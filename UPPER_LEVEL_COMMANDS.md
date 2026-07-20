@@ -267,6 +267,22 @@ justification、per-span paint/装饰或装饰线变体。
 `MissingGlyph`。当前 Unicode line-break 实现把 SA 复杂上下文字系按普通字母处理；泰文、
 老挝文、高棉文和缅甸文需要上层通过 `TextBreakProvider` 接入合适的 `Soft` 词典边界。
 
+需要跑完整 Unicode 一致性语料时，在仓库根目录执行：
+
+```sh
+scripts/fetch_unicode_conformance.sh
+SKIA_UNICODE_CONFORMANCE_DIR=target/unicode-conformance \
+  cargo test -p skia-text --test unicode_conformance -- --ignored
+```
+
+下载脚本会校验固定 SHA-256，数据留在 `target/` 而不进入 Git。测试版本跟随当前依赖实际
+声明的数据版本：grapheme 为 Unicode 17.0、line break 为 15.0、bidi 为 16.0。升级任一
+Unicode 依赖时，必须同时更新对应测试 URL、摘要、版本断言和来源说明。普通
+`cargo test -p skia-text` 会执行版本锁定测试，但不会要求本地预先下载约 8 MB 的完整语料。
+当前 grapheme 766 条与 bidi 91,707 条是严格全通过门禁；`unicode-linebreak 0.1.5` 在 7,654
+条 Unicode 15.0 用例中有 59 条已知偏差，测试精确锁定这些行。出现新增偏差、意外行为变化，
+或者修复后没有同步缩减基线，完整测试都会失败。
+
 ## 先看结论
 
 | 能力 | CPU `Canvas`（即时执行） | `DisplayListBuilder`（录制后由 CPU 回放） | `GpuCommandEncoder`（录制后提交后端） |
