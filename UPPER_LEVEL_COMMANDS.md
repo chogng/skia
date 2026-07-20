@@ -35,9 +35,19 @@
 
 输出图片时，调用 `ImageCodec::encode(&asset, &EncodeOptions::new(...))`，或使用
 `encode_to` 写入受限流。PNG 通过 `PngOptions` 控制 Deflate 和 row filter；JPEG 需要显式
-`JpegOptions`，透明像素必须选择 `JpegAlphaHandling::Flatten`，否则编码失败；WebP 当前只
-能使用 `WebPOptions::lossless_v1()`，请求有损 WebP 会明确返回不支持，不会降级。可选 EXIF
-默认剥离，只有 `MetadataPolicy::Preserve` 才会写入。`EncodeLimits` 应按输出预算收紧。
+`JpegOptions`，支持 4:4:4 / 4:2:2 / 4:2:0、baseline / progressive 和
+`JpegOptimization` 的 Fast / Balanced / Smallest 稳定策略；透明像素必须选择
+`JpegAlphaHandling::Flatten`，否则编码失败。`JpegOptions::web_v1()` 是 quality 85、4:2:0、
+progressive、Balanced 的版本化网页输出策略。WebP 当前只能使用
+`WebPOptions::lossless_v1()`，请求有损 WebP 会明确返回不支持，不会降级。可选 EXIF 默认
+剥离，只有 `MetadataPolicy::Preserve` 才会写入；与 `Image` 颜色解释一致的 ICC 会写回。
+`EncodeLimits` 应按输出预算收紧。
+
+格式实现保持在 `skia-codec` 内部，并平铺为同级私有模块 `codec/src/png.rs`、
+`codec/src/jpeg.rs`、`codec/src/webp.rs`。PNG 和 WebP 经 `image` 分别使用纯 Rust `png` 与
+`image-webp`；JPEG 解码经 `image` 使用 `zune-jpeg`，高级 JPEG 编码直接调用纯 Rust
+`mozjpeg-rs`。上层只依赖上述稳定策略 API，不接触或选择这些实现 crate。`mozjpeg-rs` 的
+默认 feature 已关闭，因此产品依赖中不引入 `mozjpeg-sys` 或 C mozjpeg。
 
 `ImageCodec` 是唯一的 PNG/JPEG/WebP 文件入口；旧的 `EncodedImageFormat` 和裸 `Image` encode
 接口已移除。
@@ -195,8 +205,9 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 
 本仓库使用 `rustup` 管理 Cargo 与 Rust 工具链。根目录的
 `rust-toolchain.toml` 会让 `cargo` / `rustc` 自动选择 `stable`，并安装
-`clippy` 和 `rustfmt`；`Cargo.toml` 的 `rust-version = "1.88"` 仍是本仓库的
-最低支持版本。更新 stable 工具链（以及 Cargo）后，用以下命令确认版本：
+`clippy` 和 `rustfmt`；`Cargo.toml` 的 `rust-version = "1.89"` 是本仓库当前的
+最低支持版本（由纯 Rust `mozjpeg-rs` 要求）。更新 stable 工具链（以及 Cargo）后，用以下
+命令确认版本：
 
 ```sh
 rustup update stable

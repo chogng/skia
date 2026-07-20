@@ -10,8 +10,8 @@
 pub use skia_codec::{
     CodecError, CodecErrorCode, CodecLimits, EncodeFormat, EncodeLimits, EncodeOptions,
     EncodeReport, EncodedFormat, EncodedImage, ImageAsset, ImageCodec, ImageMetadata,
-    JpegAlphaHandling, JpegOptions, JpegScan, JpegSubsampling, MetadataPolicy, PngCompression,
-    PngFilter, PngOptions, WebPMode, WebPOptions,
+    JpegAlphaHandling, JpegOptimization, JpegOptions, JpegScan, JpegSubsampling, MetadataPolicy,
+    PngCompression, PngFilter, PngOptions, WebPMode, WebPOptions,
 };
 pub use skia_core::{
     BlendMode, Color, FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint,

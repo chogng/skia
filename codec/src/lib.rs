@@ -6,19 +6,17 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod jpeg;
+mod png;
+mod webp;
+
 use std::{
     fmt,
     io::{self, Cursor, Write},
 };
 
 use image::{
-    DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageError, ImageFormat,
-    ImageReader, Limits,
-    codecs::{
-        jpeg::JpegEncoder,
-        png::{CompressionType, FilterType, PngEncoder},
-        webp::WebPEncoder,
-    },
+    DynamicImage, ImageDecoder, ImageEncoder, ImageError, ImageFormat, ImageReader, Limits,
 };
 use skia_image::{ColorSpace, Image};
 
@@ -278,10 +276,24 @@ pub enum JpegSubsampling {
 /// JPEG scan organization.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum JpegScan {
-    /// One baseline scan.
+    /// One sequential, baseline-compatible scan.
     Baseline,
     /// Multiple progressive scans.
     Progressive,
+}
+
+/// Stable JPEG encoder effort profile.
+///
+/// The backend may improve its algorithms without changing these semantic
+/// speed-versus-size choices.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum JpegOptimization {
+    /// Prefer encoding speed and disable expensive compression searches.
+    Fast,
+    /// Enable the recommended quality and compression optimizations.
+    Balanced,
+    /// Spend additional time searching for the smallest output.
+    Smallest,
 }
 
 /// Handling for alpha pixels supplied to a JPEG encoder.
@@ -299,11 +311,12 @@ pub struct JpegOptions {
     quality: u8,
     subsampling: JpegSubsampling,
     scan: JpegScan,
+    optimization: JpegOptimization,
     alpha: JpegAlphaHandling,
 }
 
 impl JpegOptions {
-    /// Creates a baseline, 4:4:4 JPEG profile with explicit quality.
+    /// Creates a balanced, baseline-compatible, 4:4:4 JPEG profile.
     pub fn baseline_v1(quality: u8) -> Result<Self, CodecError> {
         if !(1..=100).contains(&quality) {
             return Err(CodecError::new(CodecErrorCode::InvalidJpegQuality));
@@ -312,8 +325,24 @@ impl JpegOptions {
             quality,
             subsampling: JpegSubsampling::Yuv444,
             scan: JpegScan::Baseline,
+            optimization: JpegOptimization::Balanced,
             alpha: JpegAlphaHandling::Reject,
         })
+    }
+
+    /// Creates the version-one web delivery profile.
+    ///
+    /// This profile uses quality 85, 4:2:0 chroma, progressive scans, and the
+    /// balanced optimization effort. Transparent pixels remain an error until
+    /// an explicit alpha handling policy is supplied.
+    pub const fn web_v1() -> Self {
+        Self {
+            quality: 85,
+            subsampling: JpegSubsampling::Yuv420,
+            scan: JpegScan::Progressive,
+            optimization: JpegOptimization::Balanced,
+            alpha: JpegAlphaHandling::Reject,
+        }
     }
 
     /// Sets chroma subsampling.
@@ -325,6 +354,12 @@ impl JpegOptions {
     /// Sets scan organization.
     pub const fn with_scan(mut self, scan: JpegScan) -> Self {
         self.scan = scan;
+        self
+    }
+
+    /// Sets encoder optimization effort.
+    pub const fn with_optimization(mut self, optimization: JpegOptimization) -> Self {
+        self.optimization = optimization;
         self
     }
 
@@ -584,7 +619,7 @@ impl ImageCodec {
         let mut limited = LimitedWriter::new(&mut writer, options.limits.max_output_bytes);
         let (result, format) = match options.format {
             EncodeFormat::Png(png) => (
-                encode_png(&mut limited, asset, options.metadata, png),
+                png::encode(&mut limited, asset, options.metadata, png),
                 EncodedFormat::Png,
             ),
             EncodeFormat::Jpeg(jpeg) => (
@@ -592,7 +627,7 @@ impl ImageCodec {
                 EncodedFormat::Jpeg,
             ),
             EncodeFormat::WebP(webp) => (
-                encode_webp(&mut limited, asset, options.metadata, webp),
+                webp::encode(&mut limited, asset, options.metadata, webp),
                 EncodedFormat::WebP,
             ),
         };
@@ -614,83 +649,26 @@ fn map_decode_error(error: ImageError) -> CodecError {
     }
 }
 
-fn encode_png<W: Write>(
-    writer: W,
-    asset: &ImageAsset,
-    metadata: MetadataPolicy,
-    options: PngOptions,
-) -> Result<(), CodecError> {
-    let compression = match options.compression {
-        PngCompression::Fast => CompressionType::Fast,
-        PngCompression::Balanced => CompressionType::Default,
-        PngCompression::Best => CompressionType::Best,
-        PngCompression::Uncompressed => CompressionType::Uncompressed,
-        PngCompression::DeflateLevel(level @ 0..=9) => CompressionType::Level(level),
-        PngCompression::DeflateLevel(_) => {
-            return Err(CodecError::new(CodecErrorCode::InvalidPngCompressionLevel));
-        }
-    };
-    let filter = match options.filter {
-        PngFilter::Adaptive => FilterType::Adaptive,
-        PngFilter::None => FilterType::NoFilter,
-        PngFilter::Sub => FilterType::Sub,
-        PngFilter::Up => FilterType::Up,
-        PngFilter::Average => FilterType::Avg,
-        PngFilter::Paeth => FilterType::Paeth,
-    };
-    let mut encoder = PngEncoder::new_with_quality(writer, compression, filter);
-    apply_metadata(&mut encoder, asset, metadata)?;
-    encoder
-        .write_image(
-            asset.image.pixels(),
-            asset.image.width(),
-            asset.image.height(),
-            ExtendedColorType::Rgba8,
-        )
-        .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))
-}
-
 fn encode_jpeg<W: Write>(
     writer: W,
     asset: &ImageAsset,
     metadata: MetadataPolicy,
     options: JpegOptions,
 ) -> Result<(), CodecError> {
-    if options.subsampling != JpegSubsampling::Yuv444 || options.scan != JpegScan::Baseline {
-        return Err(CodecError::new(CodecErrorCode::UnsupportedEncodeOption));
-    }
     let rgb8 = rgba8_to_rgb8(asset.image.pixels(), options.alpha)?;
-    let mut encoder = JpegEncoder::new_with_quality(writer, options.quality);
-    apply_metadata(&mut encoder, asset, metadata)?;
-    encoder
-        .write_image(
-            &rgb8,
-            asset.image.width(),
-            asset.image.height(),
-            ExtendedColorType::Rgb8,
-        )
-        .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))
-}
-
-fn encode_webp<W: Write>(
-    writer: W,
-    asset: &ImageAsset,
-    metadata: MetadataPolicy,
-    options: WebPOptions,
-) -> Result<(), CodecError> {
-    if !matches!(options.mode, WebPMode::Lossless) {
-        return Err(CodecError::new(CodecErrorCode::UnsupportedEncodeOption));
-    }
-    let mut encoder = WebPEncoder::new_lossless(writer);
-    apply_metadata(&mut encoder, asset, metadata)?;
-    encoder
-        .write_image(
-            asset.image.pixels(),
-            asset.image.width(),
-            asset.image.height(),
-            ExtendedColorType::Rgba8,
-        )
-        .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))
+    jpeg::encode(
+        writer,
+        &rgb8,
+        asset.image.width(),
+        asset.image.height(),
+        options,
+        asset.image.color_space().icc_profile(),
+        if metadata == MetadataPolicy::Preserve {
+            asset.metadata.exif_tiff()
+        } else {
+            None
+        },
+    )
 }
 
 fn apply_metadata<E: ImageEncoder>(
@@ -703,12 +681,12 @@ fn apply_metadata<E: ImageEncoder>(
             .set_icc_profile(icc_profile.to_vec())
             .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
     }
-    if metadata == MetadataPolicy::Preserve {
-        if let Some(exif_tiff) = asset.metadata.exif_tiff() {
-            encoder
-                .set_exif_metadata(exif_tiff.to_vec())
-                .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
-        }
+    if metadata == MetadataPolicy::Preserve
+        && let Some(exif_tiff) = asset.metadata.exif_tiff()
+    {
+        encoder
+            .set_exif_metadata(exif_tiff.to_vec())
+            .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
     }
     Ok(())
 }
@@ -792,8 +770,8 @@ mod tests {
 
     use super::{
         CodecErrorCode, CodecLimits, EncodeFormat, EncodeLimits, EncodeOptions, ImageAsset,
-        ImageCodec, ImageMetadata, JpegAlphaHandling, JpegOptions, MetadataPolicy, PngCompression,
-        PngFilter, PngOptions, WebPOptions,
+        ImageCodec, ImageMetadata, JpegAlphaHandling, JpegOptimization, JpegOptions, JpegScan,
+        JpegSubsampling, MetadataPolicy, PngCompression, PngFilter, PngOptions, WebPOptions,
     };
 
     fn encoded(format: ImageFormat) -> Vec<u8> {
@@ -807,6 +785,45 @@ mod tests {
 
     fn opaque_asset() -> ImageAsset {
         ImageAsset::new(Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap())
+    }
+
+    fn jpeg_test_asset() -> ImageAsset {
+        let width = 17;
+        let height = 17;
+        let mut rgba8 = Vec::with_capacity(width * height * 4);
+        for y in 0..height {
+            for x in 0..width {
+                rgba8.extend([(x * 13) as u8, (y * 11) as u8, ((x + y) * 7) as u8, 255]);
+            }
+        }
+        ImageAsset::new(Image::from_rgba8(width as u32, height as u32, rgba8).unwrap())
+    }
+
+    fn jpeg_frame(bytes: &[u8]) -> (u8, u8) {
+        assert!(bytes.starts_with(&[0xff, 0xd8]));
+        let mut offset = 2;
+        while offset < bytes.len() {
+            while bytes.get(offset) == Some(&0xff) {
+                offset += 1;
+            }
+            let marker = bytes[offset];
+            offset += 1;
+            if marker == 0xd9 || marker == 0xda {
+                break;
+            }
+            if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+                continue;
+            }
+            let length = usize::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]));
+            assert!(length >= 2);
+            let payload = offset + 2;
+            if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+                assert_eq!(bytes[payload + 5], 3);
+                return (marker, bytes[payload + 7]);
+            }
+            offset += length;
+        }
+        panic!("JPEG has no start-of-frame marker");
     }
 
     #[test]
@@ -884,6 +901,51 @@ mod tests {
                 .bytes()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn jpeg_encodes_all_public_subsampling_and_scan_modes() {
+        let asset = jpeg_test_asset();
+        for (subsampling, expected_luma_sampling) in [
+            (JpegSubsampling::Yuv444, 0x11),
+            (JpegSubsampling::Yuv422, 0x21),
+            (JpegSubsampling::Yuv420, 0x22),
+        ] {
+            let options = EncodeOptions::new(EncodeFormat::Jpeg(
+                JpegOptions::baseline_v1(85)
+                    .unwrap()
+                    .with_subsampling(subsampling),
+            ));
+            let encoded = ImageCodec::encode(&asset, &options).unwrap();
+            assert_eq!(jpeg_frame(encoded.bytes()), (0xc0, expected_luma_sampling));
+        }
+
+        let progressive = EncodeOptions::new(EncodeFormat::Jpeg(JpegOptions::web_v1()));
+        let encoded = ImageCodec::encode(&asset, &progressive).unwrap();
+        assert_eq!(jpeg_frame(encoded.bytes()), (0xc2, 0x22));
+    }
+
+    #[test]
+    fn jpeg_optimization_profiles_honor_requested_scan_mode() {
+        let asset = jpeg_test_asset();
+        for optimization in [
+            JpegOptimization::Fast,
+            JpegOptimization::Balanced,
+            JpegOptimization::Smallest,
+        ] {
+            for (scan, expected_marker) in
+                [(JpegScan::Baseline, 0xc0), (JpegScan::Progressive, 0xc2)]
+            {
+                let options = EncodeOptions::new(EncodeFormat::Jpeg(
+                    JpegOptions::baseline_v1(80)
+                        .unwrap()
+                        .with_scan(scan)
+                        .with_optimization(optimization),
+                ));
+                let encoded = ImageCodec::encode(&asset, &options).unwrap();
+                assert_eq!(jpeg_frame(encoded.bytes()).0, expected_marker);
+            }
+        }
     }
 
     #[test]
