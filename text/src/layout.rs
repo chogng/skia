@@ -3,8 +3,8 @@ use unicode_linebreak::{BreakOpportunity, linebreaks};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    FontCollection, FontMetrics, ShapedParagraph, TextDecorationMetrics, TextDirection, TextError,
-    TextErrorCode,
+    FontCollection, FontFace, FontMetrics, ShapedParagraph, TextDecorationMetrics, TextDirection,
+    TextError, TextErrorCode, TextStyleSpan,
 };
 
 /// Decoration lines requested for every non-empty line in one text layout.
@@ -155,8 +155,9 @@ impl TextLayoutOptions {
 
     /// Selects decoration lines for every non-empty laid-out line.
     ///
-    /// Decoration metrics come from the collection's first face so one
-    /// continuous line remains stable across fallback runs.
+    /// Uniform layouts use the collection's first face. Styled layouts use
+    /// the logical line-start span's preferred face and size so one continuous
+    /// line remains stable across fallback runs within that line.
     pub const fn with_decoration(mut self, decoration: TextDecoration) -> Self {
         self.decoration = decoration;
         self
@@ -316,7 +317,21 @@ impl FontCollection {
         font_size_bits: i32,
         options: TextLayoutOptions,
     ) -> Result<TextLayout, TextError> {
-        self.layout_text_impl(text, font_size_bits, options, None)
+        self.layout_text_impl(text, LayoutStyle::Uniform(font_size_bits), options, None)
+    }
+
+    /// Shapes and greedily wraps UTF-8 with grapheme-safe font and size spans.
+    ///
+    /// Spans follow the same coverage and boundary rules as
+    /// [`FontCollection::shape_styled_paragraph`]. Each candidate line is
+    /// reshaped independently so contextual shaping remains valid at wraps.
+    pub fn layout_styled_text(
+        &self,
+        text: &str,
+        spans: &[TextStyleSpan],
+        options: TextLayoutOptions,
+    ) -> Result<TextLayout, TextError> {
+        self.layout_text_impl(text, LayoutStyle::Spans(spans), options, None)
     }
 
     /// Shapes and wraps UTF-8 with language-specific word-internal breaks.
@@ -335,24 +350,59 @@ impl FontCollection {
         if !valid_language_tag(language) {
             return Err(TextError::new(TextErrorCode::InvalidLanguage));
         }
-        self.layout_text_impl(text, font_size_bits, options, Some((language, provider)))
+        self.layout_text_impl(
+            text,
+            LayoutStyle::Uniform(font_size_bits),
+            options,
+            Some((language, provider)),
+        )
     }
 
-    fn layout_text_impl(
+    /// Shapes styled UTF-8 with language-specific word-internal breaks.
+    ///
+    /// A synthetic hyphen inherits the actual run at the logical break's left
+    /// edge, including its font instance, size, and bidi direction.
+    pub fn layout_styled_text_with_break_provider(
         &self,
         text: &str,
-        font_size_bits: i32,
+        spans: &[TextStyleSpan],
+        options: TextLayoutOptions,
+        language: &str,
+        provider: &impl TextBreakProvider,
+    ) -> Result<TextLayout, TextError> {
+        if !valid_language_tag(language) {
+            return Err(TextError::new(TextErrorCode::InvalidLanguage));
+        }
+        self.layout_text_impl(
+            text,
+            LayoutStyle::Spans(spans),
+            options,
+            Some((language, provider)),
+        )
+    }
+
+    fn layout_text_impl<'a>(
+        &'a self,
+        text: &'a str,
+        style: LayoutStyle<'a>,
         options: TextLayoutOptions,
         language_breaks: Option<(&str, &dyn TextBreakProvider)>,
     ) -> Result<TextLayout, TextError> {
         if self.faces().is_empty() {
             return Err(TextError::new(TextErrorCode::EmptyFontCollection));
         }
-        if font_size_bits <= 0 {
-            return Err(TextError::new(TextErrorCode::InvalidFontSize));
-        }
         if text.len() > self.limits().max_text_bytes() || text.len() > u32::MAX as usize {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
+        }
+        match style {
+            LayoutStyle::Uniform(font_size_bits) if font_size_bits <= 0 => {
+                return Err(TextError::new(TextErrorCode::InvalidFontSize));
+            }
+            LayoutStyle::Spans(_) if text.is_empty() => {
+                return Err(TextError::new(TextErrorCode::EmptyText));
+            }
+            LayoutStyle::Spans(spans) => self.validate_style_spans(text, spans)?,
+            LayoutStyle::Uniform(_) => {}
         }
 
         let breaks = collect_layout_breaks(text, options, language_breaks)?;
@@ -367,7 +417,7 @@ impl FontCollection {
                     TextDirection::RightToLeft => RTL_LEVEL,
                 }),
             ),
-            font_size_bits,
+            style,
             options,
             lines: Vec::new(),
             top_bits: 0,
@@ -439,7 +489,7 @@ struct LayoutBuilder<'a> {
     fonts: &'a FontCollection,
     text: &'a str,
     bidi: BidiInfo<'a>,
-    font_size_bits: i32,
+    style: LayoutStyle<'a>,
     options: TextLayoutOptions,
     lines: Vec<ShapedLine>,
     top_bits: i32,
@@ -478,17 +528,25 @@ impl LayoutBuilder<'_> {
                     start >= paragraph.range.start && content_end <= paragraph.range.end
                 })
                 .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
-            let mut paragraph = self.fonts.shape_bidi_line(
-                self.text,
-                self.font_size_bits,
-                &self.bidi,
-                bidi_paragraph,
-                start..content_end,
-            )?;
+            let mut paragraph = match self.style {
+                LayoutStyle::Uniform(font_size_bits) => self.fonts.shape_bidi_line(
+                    self.text,
+                    font_size_bits,
+                    &self.bidi,
+                    bidi_paragraph,
+                    start..content_end,
+                )?,
+                LayoutStyle::Spans(spans) => self.fonts.shape_styled_bidi_line(
+                    self.text,
+                    spans,
+                    &self.bidi,
+                    bidi_paragraph,
+                    start..content_end,
+                )?,
+            };
             if hyphenated {
                 self.fonts.append_discretionary_hyphen(
                     &mut paragraph,
-                    self.font_size_bits,
                     u32::try_from(content_end)
                         .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
                 )?;
@@ -546,21 +604,16 @@ impl LayoutBuilder<'_> {
         if self.lines.len() == self.options.max_lines {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
         }
-        let metrics = paragraph
-            .as_ref()
-            .map(ShapedParagraph::metrics)
-            .map(Ok)
-            .unwrap_or_else(|| self.fonts.default_metrics(self.font_size_bits))?;
-        let decoration_face = self
-            .fonts
-            .faces()
-            .first()
-            .ok_or(TextError::new(TextErrorCode::EmptyFontCollection))?;
+        let (line_style_face, line_style_size_bits) = self.line_style(source_start)?;
+        let metrics = paragraph.as_ref().map_or_else(
+            || line_style_face.metrics(line_style_size_bits),
+            |paragraph| Ok(paragraph.metrics()),
+        )?;
         let underline_metrics =
             if paragraph.is_some() && self.options.decoration.includes_underline() {
                 Some(
-                    decoration_face
-                        .underline_metrics(self.font_size_bits)?
+                    line_style_face
+                        .underline_metrics(line_style_size_bits)?
                         .ok_or(TextError::new(TextErrorCode::MissingDecorationMetrics))?,
                 )
             } else {
@@ -569,8 +622,8 @@ impl LayoutBuilder<'_> {
         let strike_through_metrics =
             if paragraph.is_some() && self.options.decoration.includes_strike_through() {
                 Some(
-                    decoration_face
-                        .strike_through_metrics(self.font_size_bits)?
+                    line_style_face
+                        .strike_through_metrics(line_style_size_bits)?
                         .ok_or(TextError::new(TextErrorCode::MissingDecorationMetrics))?,
                 )
             } else {
@@ -627,6 +680,39 @@ impl LayoutBuilder<'_> {
         Ok(())
     }
 
+    fn line_style(&self, source_start: usize) -> Result<(&FontFace, i32), TextError> {
+        match self.style {
+            LayoutStyle::Uniform(font_size_bits) => Ok((
+                self.fonts
+                    .faces()
+                    .first()
+                    .ok_or(TextError::new(TextErrorCode::EmptyFontCollection))?,
+                font_size_bits,
+            )),
+            LayoutStyle::Spans(spans) => {
+                let span_index = if source_start == self.text.len() {
+                    spans.len().checked_sub(1)
+                } else {
+                    Some(spans.partition_point(|span| span.source_end() as usize <= source_start))
+                }
+                .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?;
+                let span = spans
+                    .get(span_index)
+                    .filter(|span| {
+                        span.source_start() as usize <= source_start
+                            && source_start <= span.source_end() as usize
+                    })
+                    .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?;
+                Ok((
+                    self.fonts
+                        .face(span.font())
+                        .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?,
+                    span.font_size_bits(),
+                ))
+            }
+        }
+    }
+
     fn finish(mut self) -> Result<TextLayout, TextError> {
         let mut width_bits = 0;
         let line_count = self.lines.len();
@@ -673,6 +759,12 @@ impl LayoutBuilder<'_> {
             container_width_bits: self.options.max_width_bits,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+enum LayoutStyle<'a> {
+    Uniform(i32),
+    Spans(&'a [TextStyleSpan]),
 }
 
 struct LineCandidate {

@@ -443,23 +443,28 @@ impl FontCollection {
         )
     }
 
+    pub(crate) fn shape_styled_bidi_line(
+        &self,
+        text: &str,
+        spans: &[TextStyleSpan],
+        bidi: &BidiInfo<'_>,
+        paragraph: &ParagraphInfo,
+        line: std::ops::Range<usize>,
+    ) -> Result<ShapedParagraph, TextError> {
+        if line.is_empty() || line.start < paragraph.range.start || line.end > paragraph.range.end {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        self.shape_bidi_range(text, ParagraphStyle::Spans(spans), bidi, paragraph, line, 0)
+    }
+
     pub(crate) fn append_discretionary_hyphen(
         &self,
         paragraph: &mut ShapedParagraph,
-        font_size_bits: i32,
         source_offset: u32,
     ) -> Result<(), TextError> {
         if paragraph.runs.len() == self.limits.max_runs {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
         }
-        let mut selected = None;
-        for hyphen in ["\u{2010}", "-"] {
-            if let Some(face_index) = self.fallback_face(hyphen)? {
-                selected = Some((face_index, hyphen));
-                break;
-            }
-        }
-        let (face_index, hyphen) = selected.ok_or(TextError::new(TextErrorCode::MissingGlyph))?;
         let (anchor_index, anchor) = paragraph
             .runs
             .iter()
@@ -467,6 +472,22 @@ impl FontCollection {
             .find(|(_, shaped)| shaped.source_end == source_offset)
             .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
         let hyphen_direction = anchor.direction;
+        let font_size_bits = anchor.run.font_size_bits();
+        let preferred_face = self
+            .faces
+            .iter()
+            .position(|face| face.id() == anchor.run.font())
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        let mut selected = None;
+        for hyphen in ["\u{2010}", "-"] {
+            if let Some(face_index) =
+                self.fallback_face_with_preferred(hyphen, Some(preferred_face))?
+            {
+                selected = Some((face_index, hyphen));
+                break;
+            }
+        }
+        let (face_index, hyphen) = selected.ok_or(TextError::new(TextErrorCode::MissingGlyph))?;
         let insertion_index = if hyphen_direction == TextDirection::LeftToRight {
             anchor_index + 1
         } else {
@@ -542,13 +563,6 @@ impl FontCollection {
         paragraph.runs.insert(insertion_index, shaped_hyphen);
         paragraph.advance_x_bits = final_advance_bits;
         Ok(())
-    }
-
-    pub(crate) fn default_metrics(&self, font_size_bits: i32) -> Result<FontMetrics, TextError> {
-        self.faces
-            .first()
-            .ok_or(TextError::new(TextErrorCode::EmptyFontCollection))?
-            .metrics(font_size_bits)
     }
 
     pub(crate) const fn limits(&self) -> FontCollectionLimits {
@@ -778,10 +792,6 @@ impl FontCollection {
         Ok(())
     }
 
-    fn fallback_face(&self, grapheme: &str) -> Result<Option<usize>, TextError> {
-        self.fallback_face_with_preferred(grapheme, None)
-    }
-
     fn fallback_face_with_preferred(
         &self,
         grapheme: &str,
@@ -803,11 +813,20 @@ impl FontCollection {
         Ok(None)
     }
 
-    fn validate_style_spans(&self, text: &str, spans: &[TextStyleSpan]) -> Result<(), TextError> {
+    pub(crate) fn validate_style_spans(
+        &self,
+        text: &str,
+        spans: &[TextStyleSpan],
+    ) -> Result<(), TextError> {
         if spans.is_empty() || spans.len() > self.limits.max_runs {
             return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
         }
         let mut expected_start = 0_usize;
+        let mut grapheme_boundaries = text
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(text.len()));
+        let mut next_grapheme_boundary = grapheme_boundaries.next();
         for span in spans {
             let start = span.source_start as usize;
             let end = span.source_end as usize;
@@ -817,6 +836,12 @@ impl FontCollection {
                 || !text.is_char_boundary(end)
                 || self.face(span.font).is_none()
             {
+                return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
+            }
+            while next_grapheme_boundary.is_some_and(|boundary| boundary < end) {
+                next_grapheme_boundary = grapheme_boundaries.next();
+            }
+            if next_grapheme_boundary != Some(end) {
                 return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
             }
             expected_start = end;

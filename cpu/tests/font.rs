@@ -401,6 +401,150 @@ fn styled_paragraphs_select_fonts_sizes_and_grapheme_safe_fallback() {
 }
 
 #[test]
+fn styled_layout_wraps_with_per_line_metrics_decorations_and_hyphens() {
+    let characters = ['-', 'A', 'a', 'e', 'h', 'i', 'n', 'o', 'p', 't', 'y'];
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(152),
+                toy_styled_font(&characters, "Small", FontStyle::NORMAL),
+            )
+            .expect("small styled font"),
+        )
+        .expect("add small font");
+    fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(153),
+                toy_styled_font(&characters, "Large", FontStyle::NORMAL),
+            )
+            .expect("large styled font"),
+        )
+        .expect("add large font");
+
+    let wrapped_spans = [
+        TextStyleSpan::new(0, 2, FontId::new(152), 10 << 16).expect("small span"),
+        TextStyleSpan::new(2, 4, FontId::new(153), 20 << 16).expect("large span"),
+    ];
+    let wrapped = fonts
+        .layout_styled_text(
+            "AAAA",
+            &wrapped_spans,
+            TextLayoutOptions::new(15 << 16)
+                .expect("options")
+                .with_decoration(TextDecoration::UnderlineAndStrikeThrough),
+        )
+        .expect("styled wrap");
+    assert_eq!(wrapped.lines().len(), 3);
+    assert_eq!(wrapped.height_bits(), 50 << 16);
+    assert_eq!(
+        wrapped
+            .lines()
+            .iter()
+            .map(|line| (line.source_start(), line.source_end()))
+            .collect::<Vec<_>>(),
+        vec![(0, 2), (2, 3), (3, 4)]
+    );
+    assert_eq!(
+        wrapped
+            .lines()
+            .iter()
+            .map(|line| line.baseline_y_bits())
+            .collect::<Vec<_>>(),
+        vec![8 << 16, 26 << 16, 46 << 16]
+    );
+    assert_eq!(
+        wrapped.lines()[0]
+            .underline_metrics()
+            .expect("small underline")
+            .thickness_bits(),
+        1 << 16
+    );
+    assert_eq!(
+        wrapped.lines()[1]
+            .underline_metrics()
+            .expect("large underline")
+            .thickness_bits(),
+        2 << 16
+    );
+    assert_eq!(
+        wrapped.lines()[1].paragraph().expect("second line").runs()[0]
+            .glyph_run()
+            .font(),
+        FontId::new(153)
+    );
+
+    let hard_break_spans = [
+        TextStyleSpan::new(0, 3, FontId::new(152), 10 << 16).expect("first line span"),
+        TextStyleSpan::new(3, 6, FontId::new(153), 20 << 16).expect("second line span"),
+    ];
+    let hard_breaks = fonts
+        .layout_styled_text(
+            "AA\n\nAA",
+            &hard_break_spans,
+            TextLayoutOptions::new(30 << 16).expect("options"),
+        )
+        .expect("styled hard breaks");
+    assert_eq!(hard_breaks.lines().len(), 3);
+    assert!(hard_breaks.lines()[1].paragraph().is_none());
+    assert_eq!(hard_breaks.lines()[1].metrics().ascent_bits(), 16 << 16);
+    assert_eq!(hard_breaks.lines()[1].baseline_y_bits(), 26 << 16);
+    assert_eq!(hard_breaks.height_bits(), 50 << 16);
+
+    let hyphenation_spans = [
+        TextStyleSpan::new(0, 2, FontId::new(152), 10 << 16).expect("hyphen owner"),
+        TextStyleSpan::new(2, 11, FontId::new(153), 20 << 16).expect("remaining word"),
+    ];
+    let hyphenated = fonts
+        .layout_styled_text_with_break_provider(
+            "hyphenation",
+            &hyphenation_spans,
+            TextLayoutOptions::new(31 << 16).expect("options"),
+            "en-US",
+            &FixedBreakProvider {
+                language: "en-US",
+                opportunities: vec![TextWordBreak::new(2, TextWordBreakKind::Hyphenated)],
+            },
+        )
+        .expect("styled hyphenation");
+    let synthetic = &hyphenated.lines()[0]
+        .paragraph()
+        .expect("first line")
+        .runs()[1]
+        .glyph_run();
+    assert!(hyphenated.lines()[0].hyphenated());
+    assert_eq!(synthetic.font(), FontId::new(152));
+    assert_eq!(synthetic.font_size_bits(), 10 << 16);
+
+    assert_eq!(
+        fonts
+            .layout_styled_text(
+                "AAAA",
+                &[TextStyleSpan::new(0, 3, FontId::new(152), 10 << 16).expect("partial span")],
+                TextLayoutOptions::new(20 << 16).expect("options"),
+            )
+            .expect_err("partial coverage must fail")
+            .code(),
+        TextErrorCode::InvalidTextStyleSpan
+    );
+    assert_eq!(
+        fonts
+            .layout_styled_text(
+                "A\r\nA",
+                &[
+                    TextStyleSpan::new(0, 2, FontId::new(152), 10 << 16).expect("split CRLF left"),
+                    TextStyleSpan::new(2, 4, FontId::new(153), 20 << 16).expect("split CRLF right"),
+                ],
+                TextLayoutOptions::new(20 << 16).expect("options"),
+            )
+            .expect_err("span must not split a CRLF grapheme")
+            .code(),
+        TextErrorCode::InvalidTextStyleSpan
+    );
+}
+
+#[test]
 fn font_limits_bound_shaping_and_outline_work() {
     let shaping_limits = FontLimits::new(1_024, 8, 1, 32).expect("valid limits");
     let face = FontFace::from_bytes_with_limits(FontId::new(2), toy_font('A'), 0, shaping_limits)
