@@ -27,12 +27,13 @@
 
 ### 位图输入
 
-上层收到 PNG、JPEG 或 WebP 的**已编码字节**时，应先通过 facade 导出的
+上层收到 PNG、JPEG 或 WebP 的**不可信编码字节**时，应先通过 facade 导出的
 `ImageCodec::decode`（或带调用方配额的 `decode_with_limits`）解码为 `Image`，再登记并
-绘制。`Image` 本身只表示紧密排列、straight-alpha 的 RGBA8 像素，既不识别也不保存
-编码格式。`CodecLimits` 必须由处理不可信输入的上层按资源预算收紧；默认值只是通用
-安全上限。未来 PNG/JPEG/WebP 等编码输出也应放在 `skia/codec`，而不是给 `Image` 加入
-编码相关状态。
+绘制。`CodecLimits` 必须由处理不可信输入的上层按资源预算收紧；默认值只是通用安全
+上限。需要输出编码图片时，同样调用 `ImageCodec::encode(&image, EncodedImageFormat::...)`；
+PNG 和 WebP 保留 RGBA8 alpha，JPEG 因格式限制会丢弃 alpha，且质量值必须在 1–100。
+`Image` 本身只表示紧密排列、straight-alpha 的 RGBA8 像素，既不识别也不保存编码格式。
+因此 PNG/JPEG/WebP 的 decode 与 encode 都属于 `skia/codec`，而非 `Image` 资源层。
 
 ## 先看结论
 
@@ -185,10 +186,19 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 
 ## Rust 工具链维护
 
-本仓库使用 `rustup` 管理 Cargo 与 Rust 工具链。更新 stable 工具链（以及 Cargo）后，用以下命令确认版本：
+本仓库使用 `rustup` 管理 Cargo 与 Rust 工具链。根目录的
+`rust-toolchain.toml` 会让 `cargo` / `rustc` 自动选择 `stable`，并安装
+`clippy` 和 `rustfmt`；`Cargo.toml` 的 `rust-version = "1.88"` 仍是本仓库的
+最低支持版本。更新 stable 工具链（以及 Cargo）后，用以下命令确认版本：
 
 ```sh
 rustup update stable
 cargo --version
 rustc --version
+```
+
+工作区验证会构建全部内部 crate 与可选后端：
+
+```sh
+cargo test --workspace --all-features
 ```
