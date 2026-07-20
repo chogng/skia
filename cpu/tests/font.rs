@@ -3,8 +3,8 @@ use skia_core::{
     FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphBitmapFormat, GlyphId,
     GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAffinity,
     TextAlignment, TextBreakProvider, TextDecoration, TextDirection, TextError, TextErrorCode,
-    TextLayoutOptions, TextOverflow, TextPosition, TextStyleSpan, TextWordBreak, TextWordBreakKind,
-    Transform,
+    TextJustification, TextLayoutOptions, TextOverflow, TextPosition, TextStyleId, TextStyleSpan,
+    TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -2395,6 +2395,73 @@ fn justification_expands_cjk_cluster_boundaries_without_splitting_marks_or_punct
 }
 
 #[test]
+fn justification_supports_mixed_and_explicit_cross_script_boundaries() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(109), toy_font_for(&['.', 'A', 'B', '\u{4e2d}']))
+                .expect("mixed-script font"),
+        )
+        .expect("add mixed-script font");
+    let options = |justification| {
+        TextLayoutOptions::new(18 << 16)
+            .expect("options")
+            .with_alignment(TextAlignment::Justify)
+            .with_justify_last_line(true)
+            .with_justification(justification)
+    };
+
+    let mixed = fonts
+        .layout_text("\u{4e2d}A", 10 << 16, options(TextJustification::Auto))
+        .expect("mixed auto justification");
+    assert!(mixed.lines()[0].justified());
+    assert_eq!(
+        mixed.lines()[0].paragraph().expect("line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 6 << 16]
+    );
+
+    let latin_auto = fonts
+        .layout_text("AB", 10 << 16, options(TextJustification::Auto))
+        .expect("Latin auto layout");
+    assert!(!latin_auto.lines()[0].justified());
+
+    let latin_inter_character = fonts
+        .layout_text("AB", 10 << 16, options(TextJustification::InterCharacter))
+        .expect("Latin inter-character justification");
+    assert!(latin_inter_character.lines()[0].justified());
+    assert_eq!(
+        latin_inter_character.lines()[0]
+            .paragraph()
+            .expect("line")
+            .runs()[0]
+            .glyph_offsets_x_bits(),
+        &[0, 6 << 16]
+    );
+
+    let cjk_inter_word = fonts
+        .layout_text(
+            "\u{4e2d}\u{4e2d}",
+            10 << 16,
+            options(TextJustification::InterWord),
+        )
+        .expect("CJK inter-word layout");
+    assert!(!cjk_inter_word.lines()[0].justified());
+
+    let punctuated = fonts
+        .layout_text(
+            "A.B",
+            10 << 16,
+            TextLayoutOptions::new(24 << 16)
+                .expect("options")
+                .with_alignment(TextAlignment::Justify)
+                .with_justify_last_line(true)
+                .with_justification(TextJustification::InterCharacter),
+        )
+        .expect("punctuation-safe layout");
+    assert!(!punctuated.lines()[0].justified());
+}
+
+#[test]
 fn font_decorations_use_primary_metrics_across_fallback_and_alignment() {
     let primary = FontFace::from_bytes(
         FontId::new(110),
@@ -2483,6 +2550,93 @@ fn requested_font_decoration_requires_native_metrics() {
         )
         .expect("empty lines need no decoration metrics");
     assert_eq!(empty.lines()[0].underline_metrics(), None);
+
+    let disabled = fonts
+        .layout_styled_text(
+            "A",
+            &[TextStyleSpan::new(0, 1, FontId::new(120), 10 << 16)
+                .expect("span")
+                .with_decoration(TextDecoration::None)],
+            TextLayoutOptions::new(20 << 16)
+                .expect("options")
+                .with_decoration(TextDecoration::Underline),
+        )
+        .expect("span can disable inherited decoration");
+    assert!(disabled.lines()[0].decoration_segments().is_empty());
+}
+
+#[test]
+fn styled_layout_resolves_per_span_paints_and_decorations() {
+    let font = FontFace::from_bytes(
+        FontId::new(121),
+        toy_styled_font(&['A'], "Span Styles", FontStyle::NORMAL),
+    )
+    .expect("styled font");
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts.add_face(font).expect("add styled font");
+    let red_style = TextStyleId::new(1);
+    let blue_style = TextStyleId::new(2);
+    let spans = [
+        TextStyleSpan::new(0, 1, FontId::new(121), 20 << 16)
+            .expect("red span")
+            .with_style_id(red_style)
+            .with_decoration(TextDecoration::Underline),
+        TextStyleSpan::new(1, 2, FontId::new(121), 20 << 16)
+            .expect("blue span")
+            .with_style_id(blue_style)
+            .with_decoration(TextDecoration::StrikeThrough),
+    ];
+    let layout = fonts
+        .layout_styled_text(
+            "AA",
+            &spans,
+            TextLayoutOptions::new(30 << 16).expect("options"),
+        )
+        .expect("styled layout");
+    let line = &layout.lines()[0];
+    let runs = line.paragraph().expect("line").runs();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].style_id(), red_style);
+    assert_eq!(runs[1].style_id(), blue_style);
+    assert_eq!(line.decoration_segments().len(), 2);
+    assert_eq!(line.decoration_segments()[0].style_id(), red_style);
+    assert_eq!(line.decoration_segments()[0].left_bits(), 0);
+    assert_eq!(line.decoration_segments()[0].right_bits(), 12 << 16);
+    assert_eq!(line.decoration_segments()[1].style_id(), blue_style);
+    assert_eq!(line.decoration_segments()[1].left_bits(), 12 << 16);
+    assert_eq!(line.decoration_segments()[1].right_bits(), 24 << 16);
+
+    let red = Paint::new(Color::RED);
+    let blue = Paint::new(Color::BLUE);
+    let mut surface = Surface::new(30, 24, SurfaceLimits::default()).expect("surface");
+    surface
+        .canvas()
+        .draw_text_layout_with_styles(
+            &layout,
+            &fonts,
+            Point::new(Scalar::ZERO, scalar(1)),
+            &|style| match style {
+                value if value == red_style => Some(red),
+                value if value == blue_style => Some(blue),
+                _ => None,
+            },
+        )
+        .expect("draw styled layout");
+
+    assert_eq!(pixel(&surface, 2, 18), Color::RED.channels());
+    assert_eq!(pixel(&surface, 14, 10), Color::BLUE.channels());
+    assert_eq!(pixel(&surface, 14, 18), Color::TRANSPARENT.channels());
+
+    let error = surface
+        .canvas()
+        .draw_text_layout_with_styles(
+            &layout,
+            &fonts,
+            Point::new(Scalar::ZERO, Scalar::ZERO),
+            &|style| (style == red_style).then_some(red),
+        )
+        .expect_err("missing blue style must fail closed");
+    assert_eq!(error.code(), SkiaErrorCode::InvalidResource);
 }
 
 fn scalar(value: i32) -> Scalar {

@@ -1,7 +1,31 @@
-use skia_core::{GlyphBitmapFormat, GlyphRun, Point, Rect, Scalar, TextLayout};
+use skia_core::{GlyphBitmapFormat, GlyphRun, Point, Rect, Scalar, TextLayout, TextStyleId};
 use skia_gpu::GpuGlyphQuad;
 
 use crate::{TextAtlas, TextGpuError, TextGpuErrorCode};
+
+/// One contiguous GPU glyph batch sharing a caller-defined text style.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextGlyphBatch {
+    style_id: TextStyleId,
+    glyphs: Vec<GpuGlyphQuad>,
+}
+
+impl TextGlyphBatch {
+    /// Returns the style identity to resolve into a paint at submission time.
+    pub const fn style_id(&self) -> TextStyleId {
+        self.style_id
+    }
+
+    /// Borrows positioned glyph quads in visual drawing order.
+    pub fn glyphs(&self) -> &[GpuGlyphQuad] {
+        &self.glyphs
+    }
+
+    /// Moves the positioned glyph quads out of this batch.
+    pub fn into_glyphs(self) -> Vec<GpuGlyphQuad> {
+        self.glyphs
+    }
+}
 
 impl TextAtlas {
     /// Converts one text layout into positioned quads referencing this atlas.
@@ -16,6 +40,25 @@ impl TextAtlas {
         origin: Point,
     ) -> Result<Vec<GpuGlyphQuad>, TextGpuError> {
         let mut glyphs = Vec::new();
+        for batch in self.layout_style_batches(layout, origin)? {
+            glyphs
+                .try_reserve(batch.glyphs.len())
+                .map_err(|_| TextGpuError::new(TextGpuErrorCode::AllocationFailed))?;
+            glyphs.extend(batch.glyphs);
+        }
+        Ok(glyphs)
+    }
+
+    /// Converts a text layout into contiguous per-style GPU glyph batches.
+    ///
+    /// Adjacent runs with the same [`TextStyleId`] are coalesced. Callers
+    /// retain explicit paint resolution and encoder submission order.
+    pub fn layout_style_batches(
+        &self,
+        layout: &TextLayout,
+        origin: Point,
+    ) -> Result<Vec<TextGlyphBatch>, TextGpuError> {
+        let mut batches: Vec<TextGlyphBatch> = Vec::new();
         for line in layout.lines() {
             let Some(paragraph) = line.paragraph() else {
                 continue;
@@ -38,6 +81,7 @@ impl TextAtlas {
                 let run_x = line_x
                     .checked_add(shaped.origin_x_bits())
                     .ok_or(TextGpuError::new(TextGpuErrorCode::NumericOverflow))?;
+                let mut glyphs = Vec::new();
                 for (glyph, offset_x) in run.glyphs().iter().zip(shaped.glyph_offsets_x_bits()) {
                     let Some(entry) =
                         self.glyph_entry(run.font(), glyph.glyph(), run.font_size_bits())
@@ -79,9 +123,29 @@ impl TextAtlas {
                         entry.key().format() == GlyphBitmapFormat::Alpha8,
                     ));
                 }
+                if glyphs.is_empty() {
+                    continue;
+                }
+                if let Some(batch) = batches.last_mut()
+                    && batch.style_id == shaped.style_id()
+                {
+                    batch
+                        .glyphs
+                        .try_reserve(glyphs.len())
+                        .map_err(|_| TextGpuError::new(TextGpuErrorCode::AllocationFailed))?;
+                    batch.glyphs.extend(glyphs);
+                } else {
+                    batches
+                        .try_reserve(1)
+                        .map_err(|_| TextGpuError::new(TextGpuErrorCode::AllocationFailed))?;
+                    batches.push(TextGlyphBatch {
+                        style_id: shaped.style_id(),
+                        glyphs,
+                    });
+                }
             }
         }
-        Ok(glyphs)
+        Ok(batches)
     }
 }
 

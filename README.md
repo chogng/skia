@@ -82,6 +82,9 @@ performs grapheme-level ordered fallback, and shapes unwrapped or greedily
 wrapped bidi text into positioned visual runs. Styled spans can select a
 preferred immutable face instance and Q16.16 size per grapheme-safe source
 range across line boundaries, while retaining fallback and bidi behavior.
+They also preserve a renderer-neutral `TextStyleId` and optional decoration
+override, allowing CPU and GPU adapters to resolve per-span paints without a
+dependency from text layout back to paint semantics.
 Every wrap candidate is reshaped independently, and empty hard-break lines use
 the logical line-start style's metrics. Layout work remains explicitly bounded.
 CPU drawing reuses the ordinary path-fill pipeline. Laid-out lines carry
@@ -89,18 +92,20 @@ physical left/center/right alignment or bidi-aware logical start/end alignment.
 Justified lines preserve shaping output
 and add deterministic per-glyph spacing at interior breakable Unicode spaces,
 including ideographic space while excluding non-breaking spaces. If no such
-space exists, Han, Kana, Hangul, and Bopomofo shaping-cluster boundaries provide
-CJK inter-character justification without splitting marks or ligatures.
+space exists, automatic mixed CJK/script boundaries or an explicit
+cross-script inter-character policy distribute width without splitting marks,
+ligatures, whitespace, controls, or punctuation.
 Callers can also add signed Q16.16 letter spacing between shaping clusters and
 word spacing after breakable Unicode spaces; wrapping, ellipses, hit testing,
 and carets all use the resulting width without splitting grapheme or shaping clusters.
 Callers can plug language dictionaries into `TextBreakProvider`; the layout
 engine validates UTF-8 grapheme boundaries and supports either glyph-free soft breaks
 or synthetic visible hyphens without consuming source bytes. Layout options
-can also request underline and strike-through lines. Their scaled position and
-thickness come from the collection's primary OpenType face for uniform layout,
-or from the logical line-start span for styled layout, and stay continuous
-across fallback runs; CPU layout drawing paints them after glyph outlines.
+can also request underline and strike-through lines globally or per span.
+Their scaled position and thickness come from the selected span's preferred
+OpenType face; final visual segments track alignment and justification and stay
+continuous across compatible fallback runs. CPU layout drawing resolves each
+segment's style paint after glyph outlines.
 `TextLayout` also maps layout-local points to editable UTF-8 boundaries and
 resolves source positions back to vertical carets. Font-provided OpenType GDEF
 ligature caret coordinates add internal stops without dividing shaping output.
@@ -117,8 +122,7 @@ Ellipses retain styled font size and bidi placement, prefer U+2026, and fall
 back to three periods without consuming source bytes.
 
 System-font discovery, generic-family mapping, variable-font instance selection,
-language-specific font selection, dictionary data and algorithms, general
-non-CJK inter-character justification, per-span paint and decoration styles, and
+language-specific font selection, dictionary data and algorithms, and
 decorative line variants remain upper text-layout responsibilities. GPU glyph
 atlases are available through the separate `skia-gpu-text` adapter:
 `TextAtlasBuilder` rasterizes and packs a `TextLayout`, and `TextAtlas` converts

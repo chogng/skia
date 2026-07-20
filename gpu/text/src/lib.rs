@@ -16,3 +16,4 @@ mod layout;
 pub use atlas::{TextAtlas, TextAtlasBuilder};
 pub use error::{TextGpuError, TextGpuErrorCode};
 pub use key::{TextAtlasEntry, TextGlyphKey};
+pub use layout::TextGlyphBatch;

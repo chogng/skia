@@ -3,33 +3,10 @@ use unicode_linebreak::BreakOpportunity;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    FontCollection, FontFace, FontMetrics, ShapedParagraph, TextDecorationMetrics, TextDirection,
-    TextError, TextErrorCode, TextStyleSpan, line_break::linebreaks, valid_language_tag,
+    FontCollection, FontFace, FontMetrics, ShapedParagraph, TextDecoration, TextDecorationMetrics,
+    TextDirection, TextError, TextErrorCode, TextStyleId, TextStyleSpan, line_break::linebreaks,
+    valid_language_tag,
 };
-
-/// Decoration lines requested for every non-empty line in one text layout.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub enum TextDecoration {
-    /// Draw no decoration.
-    #[default]
-    None,
-    /// Draw an underline.
-    Underline,
-    /// Draw a strike-through.
-    StrikeThrough,
-    /// Draw both an underline and a strike-through.
-    UnderlineAndStrikeThrough,
-}
-
-impl TextDecoration {
-    const fn includes_underline(self) -> bool {
-        matches!(self, Self::Underline | Self::UnderlineAndStrikeThrough)
-    }
-
-    const fn includes_strike_through(self) -> bool {
-        matches!(self, Self::StrikeThrough | Self::UnderlineAndStrikeThrough)
-    }
-}
 
 /// Horizontal placement policy inside a layout's configured line width.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -46,12 +23,27 @@ pub enum TextAlignment {
     Right,
     /// Expand interior breakable Unicode spaces to fill eligible lines.
     ///
-    /// When a line has no expandable space, Han, Kana, Hangul, and Bopomofo
-    /// shaping-cluster boundaries are used without splitting marks or ligatures.
+    /// [`TextJustification`] controls whether space, automatic mixed CJK, or
+    /// explicit cross-script shaping-cluster boundaries receive extra width.
     ///
     /// By default, paragraph-final lines keep start alignment. Use
     /// [`TextLayoutOptions::with_justify_last_line`] to include them.
     Justify,
+}
+
+/// Strategy used to distribute extra width on justified lines.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum TextJustification {
+    /// Expand interior spaces first, then safe CJK and mixed-script boundaries.
+    #[default]
+    Auto,
+    /// Expand only interior breakable Unicode spaces.
+    InterWord,
+    /// Expand safe shaping-cluster boundaries across scripts.
+    ///
+    /// Whitespace, controls, combining sequences, ligatures, and punctuation
+    /// boundaries remain atomic.
+    InterCharacter,
 }
 
 /// Behavior when laid-out text would exceed the configured line limit.
@@ -139,6 +131,43 @@ pub struct TextSelectionRect {
     top_bits: i32,
     right_bits: i32,
     bottom_bits: i32,
+}
+
+/// One visual decoration range resolved from a styled text span.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextDecorationSegment {
+    style_id: TextStyleId,
+    left_bits: i32,
+    right_bits: i32,
+    underline_metrics: Option<TextDecorationMetrics>,
+    strike_through_metrics: Option<TextDecorationMetrics>,
+}
+
+impl TextDecorationSegment {
+    /// Returns the caller-defined paint/style identity for this range.
+    pub const fn style_id(self) -> TextStyleId {
+        self.style_id
+    }
+
+    /// Returns the inclusive Q16.16 left edge relative to the line origin.
+    pub const fn left_bits(self) -> i32 {
+        self.left_bits
+    }
+
+    /// Returns the exclusive Q16.16 right edge relative to the line origin.
+    pub const fn right_bits(self) -> i32 {
+        self.right_bits
+    }
+
+    /// Returns underline metrics when this range requests an underline.
+    pub const fn underline_metrics(self) -> Option<TextDecorationMetrics> {
+        self.underline_metrics
+    }
+
+    /// Returns strike-through metrics when this range requests a strike-through.
+    pub const fn strike_through_metrics(self) -> Option<TextDecorationMetrics> {
+        self.strike_through_metrics
+    }
 }
 
 impl TextSelectionRect {
@@ -246,6 +275,7 @@ pub struct TextLayoutOptions {
     max_shaping_attempts: usize,
     base_direction: Option<TextDirection>,
     alignment: TextAlignment,
+    justification: TextJustification,
     justify_last_line: bool,
     decoration: TextDecoration,
     overflow: TextOverflow,
@@ -274,6 +304,7 @@ impl TextLayoutOptions {
             max_shaping_attempts,
             base_direction: None,
             alignment: TextAlignment::Start,
+            justification: TextJustification::Auto,
             justify_last_line: false,
             decoration: TextDecoration::None,
             overflow: TextOverflow::Error,
@@ -294,6 +325,12 @@ impl TextLayoutOptions {
         self
     }
 
+    /// Selects how eligible justified lines distribute their extra width.
+    pub const fn with_justification(mut self, justification: TextJustification) -> Self {
+        self.justification = justification;
+        self
+    }
+
     /// Controls whether justification also expands paragraph-final lines.
     ///
     /// This option has no effect for alignments other than
@@ -303,11 +340,10 @@ impl TextLayoutOptions {
         self
     }
 
-    /// Selects decoration lines for every non-empty laid-out line.
+    /// Selects inherited decoration lines for every non-empty laid-out line.
     ///
-    /// Uniform layouts use the collection's first face. Styled layouts use
-    /// the logical line-start span's preferred face and size so one continuous
-    /// line remains stable across fallback runs within that line.
+    /// Uniform layouts use the collection's first face. A styled span may
+    /// override this policy and uses its own preferred face and size.
     pub const fn with_decoration(mut self, decoration: TextDecoration) -> Self {
         self.decoration = decoration;
         self
@@ -356,6 +392,11 @@ impl TextLayoutOptions {
         self.alignment
     }
 
+    /// Returns the configured extra-width distribution strategy.
+    pub const fn justification(self) -> TextJustification {
+        self.justification
+    }
+
     /// Returns whether paragraph-final lines are eligible for justification.
     pub const fn justify_last_line(self) -> bool {
         self.justify_last_line
@@ -398,6 +439,7 @@ pub struct ShapedLine {
     metrics: FontMetrics,
     underline_metrics: Option<TextDecorationMetrics>,
     strike_through_metrics: Option<TextDecorationMetrics>,
+    decoration_segments: Vec<TextDecorationSegment>,
 }
 
 impl ShapedLine {
@@ -446,7 +488,7 @@ impl ShapedLine {
         self.ellipsized
     }
 
-    /// Returns whether the line received expanded inter-word spacing.
+    /// Returns whether the line received justification spacing.
     pub const fn justified(&self) -> bool {
         self.justified
     }
@@ -464,6 +506,11 @@ impl ShapedLine {
     /// Returns resolved strike-through metrics when strike-through drawing was requested.
     pub const fn strike_through_metrics(&self) -> Option<TextDecorationMetrics> {
         self.strike_through_metrics
+    }
+
+    /// Borrows visual per-style decoration ranges for this line.
+    pub fn decoration_segments(&self) -> &[TextDecorationSegment] {
+        &self.decoration_segments
     }
 }
 
@@ -1101,10 +1148,12 @@ impl LayoutBuilder<'_> {
 
         for source_end in boundaries.into_iter().rev() {
             let mut paragraph = if source_end == candidate.source_start {
-                let (face, font_size_bits) = self.line_style(candidate.source_start)?;
+                let style = self.line_style(candidate.source_start)?;
                 self.fonts.shape_ellipsis_marker(
-                    font_size_bits,
-                    face.id(),
+                    style.font_size_bits,
+                    style.face.id(),
+                    style.style_id,
+                    style.decoration,
                     self.direction_at(candidate.source_start),
                     u32::try_from(source_end)
                         .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
@@ -1211,26 +1260,28 @@ impl LayoutBuilder<'_> {
         if self.lines.len() == self.options.max_lines {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
         }
-        let (line_style_face, line_style_size_bits) = self.line_style(source_start)?;
+        let line_style = self.line_style(source_start)?;
         let metrics = paragraph.as_ref().map_or_else(
-            || line_style_face.metrics(line_style_size_bits),
+            || line_style.face.metrics(line_style.font_size_bits),
             |paragraph| Ok(paragraph.metrics()),
         )?;
-        let underline_metrics =
-            if paragraph.is_some() && self.options.decoration.includes_underline() {
-                Some(
-                    line_style_face
-                        .underline_metrics(line_style_size_bits)?
-                        .ok_or(TextError::new(TextErrorCode::MissingDecorationMetrics))?,
-                )
-            } else {
-                None
-            };
+        let line_decoration = line_style.decoration.unwrap_or(self.options.decoration);
+        let underline_metrics = if paragraph.is_some() && line_decoration.includes_underline() {
+            Some(
+                line_style
+                    .face
+                    .underline_metrics(line_style.font_size_bits)?
+                    .ok_or(TextError::new(TextErrorCode::MissingDecorationMetrics))?,
+            )
+        } else {
+            None
+        };
         let strike_through_metrics =
-            if paragraph.is_some() && self.options.decoration.includes_strike_through() {
+            if paragraph.is_some() && line_decoration.includes_strike_through() {
                 Some(
-                    line_style_face
-                        .strike_through_metrics(line_style_size_bits)?
+                    line_style
+                        .face
+                        .strike_through_metrics(line_style.font_size_bits)?
                         .ok_or(TextError::new(TextErrorCode::MissingDecorationMetrics))?,
                 )
             } else {
@@ -1284,19 +1335,23 @@ impl LayoutBuilder<'_> {
             metrics,
             underline_metrics,
             strike_through_metrics,
+            decoration_segments: Vec::new(),
         });
         Ok(())
     }
 
-    fn line_style(&self, source_start: usize) -> Result<(&FontFace, i32), TextError> {
+    fn line_style(&self, source_start: usize) -> Result<ResolvedLineStyle<'_>, TextError> {
         match self.style {
-            LayoutStyle::Uniform(font_size_bits) => Ok((
-                self.fonts
+            LayoutStyle::Uniform(font_size_bits) => Ok(ResolvedLineStyle {
+                face: self
+                    .fonts
                     .faces()
                     .first()
                     .ok_or(TextError::new(TextErrorCode::EmptyFontCollection))?,
                 font_size_bits,
-            )),
+                style_id: TextStyleId::DEFAULT,
+                decoration: None,
+            }),
             LayoutStyle::Spans(spans) => {
                 let span_index = if source_start == self.text.len() {
                     spans.len().checked_sub(1)
@@ -1311,12 +1366,15 @@ impl LayoutBuilder<'_> {
                             && source_start <= span.source_end() as usize
                     })
                     .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?;
-                Ok((
-                    self.fonts
+                Ok(ResolvedLineStyle {
+                    face: self
+                        .fonts
                         .face(span.font())
                         .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?,
-                    span.font_size_bits(),
-                ))
+                    font_size_bits: span.font_size_bits(),
+                    style_id: span.style_id(),
+                    decoration: span.decoration(),
+                })
             }
         }
     }
@@ -1342,8 +1400,15 @@ impl LayoutBuilder<'_> {
                     line.source_start as usize,
                     line.source_end as usize,
                     self.options.max_width_bits,
+                    self.options.justification,
                 )?;
             }
+            line.decoration_segments = match &line.paragraph {
+                Some(paragraph) => {
+                    decoration_segments(self.fonts, paragraph, self.options.decoration)?
+                }
+                None => Vec::new(),
+            };
             line.advance_x_bits = line
                 .paragraph
                 .as_ref()
@@ -1375,6 +1440,95 @@ impl LayoutBuilder<'_> {
 enum LayoutStyle<'a> {
     Uniform(i32),
     Spans(&'a [TextStyleSpan]),
+}
+
+struct ResolvedLineStyle<'a> {
+    face: &'a FontFace,
+    font_size_bits: i32,
+    style_id: TextStyleId,
+    decoration: Option<TextDecoration>,
+}
+
+fn decoration_segments(
+    fonts: &FontCollection,
+    paragraph: &ShapedParagraph,
+    inherited: TextDecoration,
+) -> Result<Vec<TextDecorationSegment>, TextError> {
+    let runs = paragraph.runs();
+    let mut starts = Vec::new();
+    starts
+        .try_reserve_exact(runs.len())
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    for run in runs {
+        let offset = run
+            .glyph_offsets_x_bits()
+            .first()
+            .copied()
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        starts.push(
+            run.origin_x_bits()
+                .checked_add(offset)
+                .ok_or(TextError::new(TextErrorCode::NumericOverflow))?,
+        );
+    }
+
+    let mut segments: Vec<TextDecorationSegment> = Vec::new();
+    for (index, run) in runs.iter().enumerate() {
+        let decoration = run.decoration().unwrap_or(inherited);
+        if decoration == TextDecoration::None {
+            continue;
+        }
+        let start = starts[index];
+        let end = starts
+            .get(index + 1)
+            .copied()
+            .unwrap_or(paragraph.advance_x_bits());
+        let left_bits = start.min(end);
+        let right_bits = start.max(end);
+        if left_bits == right_bits {
+            continue;
+        }
+        let style = run.run_style();
+        let face = fonts
+            .face(style.preferred_font)
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        let underline_metrics = if decoration.includes_underline() {
+            Some(
+                face.underline_metrics(style.font_size_bits)?
+                    .ok_or(TextError::new(TextErrorCode::MissingDecorationMetrics))?,
+            )
+        } else {
+            None
+        };
+        let strike_through_metrics = if decoration.includes_strike_through() {
+            Some(
+                face.strike_through_metrics(style.font_size_bits)?
+                    .ok_or(TextError::new(TextErrorCode::MissingDecorationMetrics))?,
+            )
+        } else {
+            None
+        };
+        if let Some(previous) = segments.last_mut()
+            && previous.style_id == style.id
+            && previous.right_bits == left_bits
+            && previous.underline_metrics == underline_metrics
+            && previous.strike_through_metrics == strike_through_metrics
+        {
+            previous.right_bits = right_bits;
+            continue;
+        }
+        segments
+            .try_reserve(1)
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        segments.push(TextDecorationSegment {
+            style_id: style.id,
+            left_bits,
+            right_bits,
+            underline_metrics,
+            strike_through_metrics,
+        });
+    }
+    Ok(segments)
 }
 
 #[derive(Clone, Copy)]

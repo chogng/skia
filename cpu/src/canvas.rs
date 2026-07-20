@@ -1,8 +1,8 @@
 use skia_core::{
     BlendMode, Color, DisplayList, DrawCommand, FillRule, GlyphOutline, GlyphOutlineProvider,
     GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder, PathVerb, Point,
-    PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, TextLayout, TextUnit,
-    Transform,
+    PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, TextLayout,
+    TextStyleId, TextUnit, Transform,
 };
 use skia_image::Image;
 
@@ -377,7 +377,30 @@ impl Canvas<'_> {
         origin: Point,
         paint: Paint,
     ) -> Result<(), SkiaError> {
+        self.draw_shaped_paragraph_resolved(paragraph, provider, origin, &|_| Some(paint))
+    }
+
+    /// Draws a shaped paragraph by resolving each run's caller-defined style ID.
+    pub fn draw_shaped_paragraph_with_styles(
+        &mut self,
+        paragraph: &ShapedParagraph,
+        provider: &impl GlyphOutlineProvider,
+        origin: Point,
+        paint_for_style: &impl Fn(TextStyleId) -> Option<Paint>,
+    ) -> Result<(), SkiaError> {
+        self.draw_shaped_paragraph_resolved(paragraph, provider, origin, paint_for_style)
+    }
+
+    fn draw_shaped_paragraph_resolved(
+        &mut self,
+        paragraph: &ShapedParagraph,
+        provider: &impl GlyphOutlineProvider,
+        origin: Point,
+        paint_for_style: &impl Fn(TextStyleId) -> Option<Paint>,
+    ) -> Result<(), SkiaError> {
         for shaped in paragraph.runs() {
+            let paint = paint_for_style(shaped.style_id())
+                .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
             self.save()?;
             let draw = (|| {
                 let run_origin_bits = origin
@@ -421,6 +444,27 @@ impl Canvas<'_> {
         origin: Point,
         paint: Paint,
     ) -> Result<(), SkiaError> {
+        self.draw_text_layout_resolved(layout, provider, origin, &|_| Some(paint))
+    }
+
+    /// Draws a text layout by resolving each run and decoration style ID.
+    pub fn draw_text_layout_with_styles(
+        &mut self,
+        layout: &TextLayout,
+        provider: &impl GlyphOutlineProvider,
+        origin: Point,
+        paint_for_style: &impl Fn(TextStyleId) -> Option<Paint>,
+    ) -> Result<(), SkiaError> {
+        self.draw_text_layout_resolved(layout, provider, origin, paint_for_style)
+    }
+
+    fn draw_text_layout_resolved(
+        &mut self,
+        layout: &TextLayout,
+        provider: &impl GlyphOutlineProvider,
+        origin: Point,
+        paint_for_style: &impl Fn(TextStyleId) -> Option<Paint>,
+    ) -> Result<(), SkiaError> {
         for line in layout.lines() {
             let Some(paragraph) = line.paragraph() else {
                 continue;
@@ -435,46 +479,92 @@ impl Canvas<'_> {
                 .bits()
                 .checked_add(line.offset_x_bits())
                 .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-            self.draw_shaped_paragraph(
+            self.draw_shaped_paragraph_resolved(
                 paragraph,
                 provider,
                 Point::new(
                     Scalar::from_bits(line_origin_bits),
                     Scalar::from_bits(baseline_bits),
                 ),
-                paint,
+                paint_for_style,
             )?;
             if line.advance_x_bits() <= 0 {
                 continue;
             }
-            for metrics in [line.underline_metrics(), line.strike_through_metrics()]
-                .into_iter()
-                .flatten()
-            {
-                let right_bits = line_origin_bits
-                    .checked_add(line.advance_x_bits())
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                let center_bits = baseline_bits
-                    .checked_add(metrics.offset_bits())
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                let top_bits = center_bits
-                    .checked_sub(metrics.thickness_bits() / 2)
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                let bottom_bits = top_bits
-                    .checked_add(metrics.thickness_bits())
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                self.fill_rect(
-                    Rect::new(
-                        Scalar::from_bits(line_origin_bits),
-                        Scalar::from_bits(top_bits),
-                        Scalar::from_bits(right_bits),
-                        Scalar::from_bits(bottom_bits),
-                    )?,
-                    paint,
-                )?;
+            if line.decoration_segments().is_empty() {
+                let paint = paint_for_style(TextStyleId::DEFAULT)
+                    .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+                for metrics in [line.underline_metrics(), line.strike_through_metrics()]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.draw_decoration_line(
+                        line_origin_bits,
+                        line_origin_bits
+                            .checked_add(line.advance_x_bits())
+                            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
+                        baseline_bits,
+                        metrics,
+                        paint,
+                    )?;
+                }
+            } else {
+                for segment in line.decoration_segments() {
+                    let paint = paint_for_style(segment.style_id())
+                        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+                    let left_bits = line_origin_bits
+                        .checked_add(segment.left_bits())
+                        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                    let right_bits = line_origin_bits
+                        .checked_add(segment.right_bits())
+                        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                    for metrics in [
+                        segment.underline_metrics(),
+                        segment.strike_through_metrics(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        self.draw_decoration_line(
+                            left_bits,
+                            right_bits,
+                            baseline_bits,
+                            metrics,
+                            paint,
+                        )?;
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    fn draw_decoration_line(
+        &mut self,
+        left_bits: i32,
+        right_bits: i32,
+        baseline_bits: i32,
+        metrics: skia_core::TextDecorationMetrics,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        let center_bits = baseline_bits
+            .checked_add(metrics.offset_bits())
+            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+        let top_bits = center_bits
+            .checked_sub(metrics.thickness_bits() / 2)
+            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+        let bottom_bits = top_bits
+            .checked_add(metrics.thickness_bits())
+            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+        self.fill_rect(
+            Rect::new(
+                Scalar::from_bits(left_bits),
+                Scalar::from_bits(top_bits),
+                Scalar::from_bits(right_bits),
+                Scalar::from_bits(bottom_bits),
+            )?,
+            paint,
+        )
     }
 
     fn draw_positioned_glyph(

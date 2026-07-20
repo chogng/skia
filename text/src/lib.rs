@@ -17,7 +17,8 @@ mod outline;
 mod types;
 
 pub use collection::{
-    FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection, TextStyleSpan,
+    FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDecoration,
+    TextDirection, TextStyleId, TextStyleSpan,
 };
 pub use error::{TextError, TextErrorCode};
 pub use font::{
@@ -25,9 +26,9 @@ pub use font::{
     FontVariationAxis, FontWidth, GlyphBitmap, GlyphBitmapFormat, TextDecorationMetrics,
 };
 pub use layout::{
-    ShapedLine, TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecoration,
-    TextHitResult, TextLayout, TextLayoutOptions, TextOverflow, TextPosition, TextSelectionRect,
-    TextWordBreak, TextWordBreakKind,
+    ShapedLine, TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecorationSegment,
+    TextHitResult, TextJustification, TextLayout, TextLayoutOptions, TextOverflow, TextPosition,
+    TextSelectionRect, TextWordBreak, TextWordBreakKind,
 };
 pub use outline::{GlyphOutline, GlyphOutlineProvider, OutlinePoint, OutlineSegment};
 pub(crate) use types::LigatureCaret;

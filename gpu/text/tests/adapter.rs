@@ -2,7 +2,7 @@ mod support;
 
 use skia_core::{
     Color, FontCollection, FontCollectionLimits, FontFace, FontId, Paint, Point, Scalar,
-    TextLayoutOptions,
+    TextLayoutOptions, TextStyleId, TextStyleSpan,
 };
 use skia_gpu::{GpuBackend, GpuCommand, GpuCommandEncoder, GpuSurfaceDescriptor};
 use skia_gpu_text::{TextAtlasBuilder, TextGlyphKey};
@@ -40,6 +40,31 @@ fn text_adapter_shapes_packs_and_replays_layout_glyphs() {
     let glyphs = atlas
         .layout_quads(&layout, Point::new(Scalar::ZERO, Scalar::ZERO))
         .expect("position layout glyphs");
+
+    let first_style = TextStyleId::new(1);
+    let second_style = TextStyleId::new(2);
+    let styled = fonts
+        .layout_styled_text(
+            "AA",
+            &[
+                TextStyleSpan::new(0, 1, FontId::new(91), 12 << 16)
+                    .expect("first span")
+                    .with_style_id(first_style),
+                TextStyleSpan::new(1, 2, FontId::new(91), 12 << 16)
+                    .expect("second span")
+                    .with_style_id(second_style),
+            ],
+            TextLayoutOptions::new(32 << 16).expect("styled options"),
+        )
+        .expect("styled layout");
+    let batches = atlas
+        .layout_style_batches(&styled, Point::new(Scalar::ZERO, Scalar::ZERO))
+        .expect("position styled batches");
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0].style_id(), first_style);
+    assert_eq!(batches[0].glyphs().len(), 1);
+    assert_eq!(batches[1].style_id(), second_style);
+    assert_eq!(batches[1].glyphs().len(), 1);
 
     let mut encoder = GpuCommandEncoder::new(2).expect("encoder");
     let atlas = encoder

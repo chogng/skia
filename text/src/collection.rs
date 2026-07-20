@@ -3,7 +3,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     FontFace, FontId, FontMetrics, FontSlant, FontStyle, FontWidth, GlyphOutline,
-    GlyphOutlineProvider, GlyphRun, TextError, TextErrorCode,
+    GlyphOutlineProvider, GlyphRun, TextError, TextErrorCode, TextJustification,
 };
 
 /// Horizontal direction of one shaped text run.
@@ -15,13 +15,62 @@ pub enum TextDirection {
     RightToLeft,
 }
 
-/// One contiguous source range with a preferred font instance and font size.
+/// Stable caller-defined identity for one span's rendering style.
+///
+/// The text crate preserves this identifier through fallback, bidi reordering,
+/// wrapping, and synthetic markers without depending on a renderer's paint
+/// type. Executors can resolve it to backend-neutral or platform paint state.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct TextStyleId(u32);
+
+impl TextStyleId {
+    /// Default rendering style used by uniform text and legacy spans.
+    pub const DEFAULT: Self = Self(0);
+
+    /// Creates one caller-defined rendering-style identity.
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Returns the caller-defined identity value.
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+/// Decoration lines requested for a text range.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum TextDecoration {
+    /// Draw no decoration.
+    #[default]
+    None,
+    /// Draw an underline.
+    Underline,
+    /// Draw a strike-through.
+    StrikeThrough,
+    /// Draw both an underline and a strike-through.
+    UnderlineAndStrikeThrough,
+}
+
+impl TextDecoration {
+    pub(crate) const fn includes_underline(self) -> bool {
+        matches!(self, Self::Underline | Self::UnderlineAndStrikeThrough)
+    }
+
+    pub(crate) const fn includes_strike_through(self) -> bool {
+        matches!(self, Self::StrikeThrough | Self::UnderlineAndStrikeThrough)
+    }
+}
+
+/// One contiguous source range with shaping and rendering style metadata.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TextStyleSpan {
     source_start: u32,
     source_end: u32,
     font: FontId,
     font_size_bits: i32,
+    style_id: TextStyleId,
+    decoration: Option<TextDecoration>,
 }
 
 impl TextStyleSpan {
@@ -40,7 +89,24 @@ impl TextStyleSpan {
             source_end,
             font,
             font_size_bits,
+            style_id: TextStyleId::DEFAULT,
+            decoration: None,
         })
+    }
+
+    /// Associates this span with a caller-defined rendering style.
+    pub const fn with_style_id(mut self, style_id: TextStyleId) -> Self {
+        self.style_id = style_id;
+        self
+    }
+
+    /// Overrides the layout-wide decoration policy for this span.
+    ///
+    /// Passing [`TextDecoration::None`] explicitly disables inherited
+    /// decoration for this range.
+    pub const fn with_decoration(mut self, decoration: TextDecoration) -> Self {
+        self.decoration = Some(decoration);
+        self
     }
 
     /// Returns the inclusive source UTF-8 byte start.
@@ -61,6 +127,16 @@ impl TextStyleSpan {
     /// Returns the positive Q16.16 font size.
     pub const fn font_size_bits(self) -> i32 {
         self.font_size_bits
+    }
+
+    /// Returns the caller-defined rendering-style identity.
+    pub const fn style_id(self) -> TextStyleId {
+        self.style_id
+    }
+
+    /// Returns this span's decoration override, or `None` to inherit layout options.
+    pub const fn decoration(self) -> Option<TextDecoration> {
+        self.decoration
     }
 }
 
@@ -133,6 +209,7 @@ pub struct ShapedRun {
     origin_x_bits: i32,
     glyph_offsets_x_bits: Vec<i32>,
     direction: TextDirection,
+    style: RunStyle,
 }
 
 impl ShapedRun {
@@ -168,6 +245,28 @@ impl ShapedRun {
     pub const fn direction(&self) -> TextDirection {
         self.direction
     }
+
+    /// Returns the caller-defined rendering style associated with this run.
+    pub const fn style_id(&self) -> TextStyleId {
+        self.style.id
+    }
+
+    /// Returns this run's optional span-level decoration override.
+    pub const fn decoration(&self) -> Option<TextDecoration> {
+        self.style.decoration
+    }
+
+    pub(crate) const fn run_style(&self) -> RunStyle {
+        self.style
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RunStyle {
+    pub(crate) id: TextStyleId,
+    pub(crate) preferred_font: FontId,
+    pub(crate) font_size_bits: i32,
+    pub(crate) decoration: Option<TextDecoration>,
 }
 
 /// Shaped output for one unwrapped bidi paragraph.
@@ -297,6 +396,7 @@ impl ShapedParagraph {
         source_start: usize,
         source_end: usize,
         target_advance_bits: i32,
+        justification: TextJustification,
     ) -> Result<bool, TextError> {
         if source_start > source_end
             || source_end > text.len()
@@ -324,22 +424,24 @@ impl ShapedParagraph {
         };
 
         let mut expansion_clusters = Vec::new();
-        for (relative, character) in line.char_indices() {
-            let cluster = source_start + relative;
-            if is_expandable_justification_space(character)
-                && cluster > first_non_space
-                && cluster + character.len_utf8() < last_non_space_end
-            {
-                expansion_clusters
-                    .try_reserve(1)
-                    .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
-                expansion_clusters.push(
-                    u32::try_from(cluster)
-                        .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
-                );
+        if justification != TextJustification::InterCharacter {
+            for (relative, character) in line.char_indices() {
+                let cluster = source_start + relative;
+                if is_expandable_justification_space(character)
+                    && cluster > first_non_space
+                    && cluster + character.len_utf8() < last_non_space_end
+                {
+                    expansion_clusters
+                        .try_reserve(1)
+                        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+                    expansion_clusters.push(
+                        u32::try_from(cluster)
+                            .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
+                    );
+                }
             }
         }
-        if expansion_clusters.is_empty() {
+        if expansion_clusters.is_empty() && justification != TextJustification::InterWord {
             let mut visual_clusters = Vec::new();
             for run in &self.runs {
                 let glyphs = run.run.glyphs();
@@ -363,9 +465,14 @@ impl ShapedParagraph {
             for pair in visual_clusters.windows(2) {
                 let first = spacing_character(text, source_start, source_end, pair[0]);
                 let second = spacing_character(text, source_start, source_end, pair[1]);
-                if first.is_some_and(is_cjk_inter_character_unit)
-                    && second.is_some_and(is_cjk_inter_character_unit)
-                {
+                let eligible = first.zip(second).is_some_and(|(first, second)| {
+                    is_inter_character_unit(first)
+                        && is_inter_character_unit(second)
+                        && (justification == TextJustification::InterCharacter
+                            || is_cjk_inter_character_unit(first)
+                            || is_cjk_inter_character_unit(second))
+                });
+                if eligible {
                     expansion_clusters
                         .try_reserve(1)
                         .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
@@ -377,6 +484,9 @@ impl ShapedParagraph {
             if expansion_clusters.is_empty() {
                 return Ok(false);
             }
+        }
+        if expansion_clusters.is_empty() {
+            return Ok(false);
         }
 
         let extra_bits = target_advance_bits
@@ -490,6 +600,27 @@ const fn is_cjk_inter_character_unit(character: char) -> bool {
             | '\u{1b000}'..='\u{1b16f}'
             | '\u{20000}'..='\u{323af}'
     )
+}
+
+fn is_inter_character_unit(character: char) -> bool {
+    !character.is_whitespace()
+        && !character.is_control()
+        && !matches!(
+            character,
+            '\u{0021}'..='\u{002f}'
+                | '\u{003a}'..='\u{0040}'
+                | '\u{005b}'..='\u{0060}'
+                | '\u{007b}'..='\u{007e}'
+                | '\u{2000}'..='\u{206f}'
+                | '\u{2e00}'..='\u{2e7f}'
+                | '\u{3000}'..='\u{303f}'
+                | '\u{fe10}'..='\u{fe1f}'
+                | '\u{fe30}'..='\u{fe6f}'
+                | '\u{ff01}'..='\u{ff0f}'
+                | '\u{ff1a}'..='\u{ff20}'
+                | '\u{ff3b}'..='\u{ff40}'
+                | '\u{ff5b}'..='\u{ff65}'
+        )
 }
 
 /// Ordered font faces used for deterministic grapheme-level fallback.
@@ -714,6 +845,8 @@ impl FontCollection {
         &self,
         font_size_bits: i32,
         preferred_font: FontId,
+        style_id: TextStyleId,
+        decoration: Option<TextDecoration>,
         direction: TextDirection,
         source_offset: u32,
         language: Option<&str>,
@@ -752,6 +885,12 @@ impl FontCollection {
             origin_x_bits: 0,
             glyph_offsets_x_bits,
             direction,
+            style: RunStyle {
+                id: style_id,
+                preferred_font,
+                font_size_bits,
+                decoration,
+            },
         });
         Ok(ShapedParagraph {
             runs,
@@ -780,10 +919,11 @@ impl FontCollection {
             .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
         let marker_direction = anchor.direction;
         let font_size_bits = anchor.run.font_size_bits();
+        let style = anchor.style;
         let preferred_face = self
             .faces
             .iter()
-            .position(|face| face.id() == anchor.run.font())
+            .position(|face| face.id() == style.preferred_font)
             .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
         let (face_index, marker) = self.select_synthetic_marker(markers, preferred_face)?;
         let insertion_index = if marker_direction == TextDirection::LeftToRight {
@@ -855,6 +995,7 @@ impl FontCollection {
             origin_x_bits: marker_origin_bits,
             glyph_offsets_x_bits,
             direction: marker_direction,
+            style,
         };
         for shaped in &mut paragraph.runs[insertion_index..] {
             shaped.origin_x_bits += advance_bits;
@@ -1011,7 +1152,7 @@ impl FontCollection {
             let face = &self.faces[segment.face_index];
             let run = face.shape_segment(
                 &text[segment.start..segment.end],
-                segment.font_size_bits,
+                segment.style.font_size_bits,
                 Some(segment.direction),
                 source_start,
                 language,
@@ -1022,7 +1163,7 @@ impl FontCollection {
             if glyph_count > self.limits.max_glyphs {
                 return Err(TextError::new(TextErrorCode::ResourceLimit));
             }
-            let metrics = face.metrics(segment.font_size_bits)?;
+            let metrics = face.metrics(segment.style.font_size_bits)?;
             ascent_bits = ascent_bits.max(metrics.ascent_bits());
             descent_bits = descent_bits.max(metrics.descent_bits());
             line_gap_bits = line_gap_bits.max(metrics.line_gap_bits());
@@ -1039,6 +1180,7 @@ impl FontCollection {
                 source_end,
                 origin_x_bits,
                 direction: segment.direction,
+                style: segment.style,
             });
             origin_x_bits = origin_x_bits
                 .checked_add(advance)
@@ -1067,7 +1209,7 @@ impl FontCollection {
         for (relative_start, grapheme) in source_text.grapheme_indices(true) {
             let start = source.start + relative_start;
             let end = start + grapheme.len();
-            let (preferred_face, font_size_bits) = match style {
+            let (preferred_face, run_style) = match style {
                 ParagraphStyle::Spans(spans) => {
                     let span = spans
                         .get(spans.partition_point(|span| span.source_end as usize <= start))
@@ -1076,17 +1218,34 @@ impl FontCollection {
                     if end > span.source_end as usize {
                         return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
                     }
+                    let preferred_face = self
+                        .faces
+                        .iter()
+                        .position(|face| face.id() == span.font)
+                        .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?;
                     (
-                        Some(
-                            self.faces
-                                .iter()
-                                .position(|face| face.id() == span.font)
-                                .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?,
-                        ),
-                        span.font_size_bits,
+                        Some(preferred_face),
+                        RunStyle {
+                            id: span.style_id,
+                            preferred_font: span.font,
+                            font_size_bits: span.font_size_bits,
+                            decoration: span.decoration,
+                        },
                     )
                 }
-                ParagraphStyle::Uniform(font_size_bits) => (None, font_size_bits),
+                ParagraphStyle::Uniform(font_size_bits) => (
+                    None,
+                    RunStyle {
+                        id: TextStyleId::DEFAULT,
+                        preferred_font: self
+                            .faces
+                            .first()
+                            .ok_or(TextError::new(TextErrorCode::EmptyFontCollection))?
+                            .id(),
+                        font_size_bits,
+                        decoration: None,
+                    },
+                ),
             };
             let face_index = self
                 .fallback_face_with_preferred(grapheme, preferred_face)?
@@ -1096,7 +1255,7 @@ impl FontCollection {
                 && let Some(previous) = output.last_mut()
                 && previous.face_index == face_index
                 && previous.direction == direction
-                && previous.font_size_bits == font_size_bits
+                && previous.style == run_style
                 && previous.end == start
             {
                 previous.end = end;
@@ -1112,7 +1271,7 @@ impl FontCollection {
                     start,
                     end,
                     direction,
-                    font_size_bits,
+                    style: run_style,
                 });
             }
         }
@@ -1199,7 +1358,7 @@ struct LogicalSegment {
     start: usize,
     end: usize,
     direction: TextDirection,
-    font_size_bits: i32,
+    style: RunStyle,
 }
 
 #[derive(Clone, Copy)]
