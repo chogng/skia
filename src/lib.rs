@@ -16,9 +16,10 @@ pub use skia_codec::{
 };
 pub use skia_core::{
     BlendMode, Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits,
-    FontMetrics, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint,
-    OutlineSegment, Paint, PositionedGlyph, ShapedLine, ShapedParagraph, ShapedRun, TextAlignment,
-    TextDirection, TextError, TextErrorCode, TextLayout, TextLayoutOptions, TextUnit,
+    FontMetrics, FontSlant, FontStyle, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider,
+    GlyphRun, OutlinePoint, OutlineSegment, Paint, PositionedGlyph, ShapedLine, ShapedParagraph,
+    ShapedRun, TextAlignment, TextDirection, TextError, TextErrorCode, TextLayout,
+    TextLayoutOptions, TextUnit,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};

@@ -17,7 +17,7 @@ use std::fmt;
 pub use collection::{
     FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection,
 };
-pub use font::{FontFace, FontLimits, FontMetrics};
+pub use font::{FontFace, FontLimits, FontMetrics, FontSlant, FontStyle, FontWidth};
 pub use layout::{ShapedLine, TextAlignment, TextLayout, TextLayoutOptions};
 
 /// Stable machine-readable text-resource failure.
@@ -33,6 +33,8 @@ pub enum TextErrorCode {
     InvalidFontSize,
     /// A font's units-per-em value is zero.
     InvalidUnitsPerEm,
+    /// A requested font weight is outside the supported range.
+    InvalidFontStyle,
     /// Font bytes are malformed or omit required tables.
     InvalidFontData,
     /// A font-collection face index is out of bounds.

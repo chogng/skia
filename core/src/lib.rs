@@ -19,8 +19,8 @@ pub use skia_path::{
     Angle, ArcDirection, ArcStart, ConicWeight, FillRule, Path, PathBounds, PathBuilder, PathVerb,
 };
 pub use skia_text::{
-    FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, FontMetrics, GlyphId,
-    GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, PositionedGlyph,
-    ShapedLine, ShapedParagraph, ShapedRun, TextAlignment, TextDirection, TextError, TextErrorCode,
-    TextLayout, TextLayoutOptions, TextUnit,
+    FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, FontMetrics, FontSlant,
+    FontStyle, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint,
+    OutlineSegment, PositionedGlyph, ShapedLine, ShapedParagraph, ShapedRun, TextAlignment,
+    TextDirection, TextError, TextErrorCode, TextLayout, TextLayoutOptions, TextUnit,
 };

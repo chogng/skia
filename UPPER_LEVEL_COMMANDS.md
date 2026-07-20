@@ -59,6 +59,18 @@ progressive、Balanced 的版本化网页输出策略。WebP 当前只能使用
 不可信输入使用 `FontFace::from_bytes_with_limits`，显式提供 face index 和 `FontLimits`。
 `FontId` 由上层资源管理器稳定分配，不能使用平台字体句柄。
 
+加载后可通过 `FontFace::family_name()` 读取优先的 OpenType typographic family（缺失时回退
+legacy family），并通过 `style()` 读取 1–1000 weight、九级 `FontWidth` 和
+`FontSlant`。需要选择字体时，使用 `FontStyle::new(weight, width, slant)` 构造请求，再调用
+`FontCollection::match_face`；多 family 请求使用 `match_face_for_families`，它严格按调用方
+family 顺序选择第一个存在的 family。family 名采用 ASCII 大小写不敏感比较。
+
+同一 family 内采用 CSS-like 固定顺序：先 width（normal 及更窄请求优先向窄侧搜索，更宽请求
+优先向宽侧搜索），再按 Normal/Italic/Oblique 的相邻偏好选 slant，最后按 CSS 的
+400/500 特殊规则选择 weight；完全同分时保留 face 添加顺序。匹配本身不检查字符覆盖。
+上层应把匹配结果 clone 到实际绘制使用的有界 `FontCollection` 首位，再按语言/脚本策略添加
+fallback face；`FontFace` clone 只共享不可变字体字节。
+
 只有一个已选定字体和单方向 UTF-8 segment 时，调用 `face.shape(text, font_size_bits)`；需要
 显式方向时使用 `shape_with_direction`。这些方法通过 OpenType/AAT shaping 生成带 UTF-8
 cluster、字形位置和 advance 的 `GlyphRun`。
@@ -106,11 +118,12 @@ offset 和每个 glyph 的额外 offset；CPU `draw_text_layout` 已自动完成
 path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 advance，但绘制时不产生路径。
 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
-换行、逻辑/物理对齐、ASCII 空格 justification 和轮廓解析**，但不负责平台字体发现、
-字体族/字重匹配、语言偏好、词典断词、自动断字、非 ASCII justification 或文本装饰。
-`shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
-`MissingGlyph`。当前 Unicode line-break 实现把 SA 复杂上下文字系按普通字母处理，因此
-泰文、老挝文、高棉文和缅甸文仍需要上层词典分词。
+换行、OpenType family/style 元数据和匹配、逻辑/物理对齐、ASCII 空格 justification 和
+轮廓解析**，但不负责平台字体发现、generic family 映射、variable axis 实例化、语言偏好、
+词典断词、自动断字、非 ASCII justification 或文本装饰。`shape_paragraph` 只接受一个未换行
+段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回 `MissingGlyph`。当前 Unicode
+line-break 实现把 SA 复杂上下文字系按普通字母处理，因此泰文、老挝文、高棉文和缅甸文仍
+需要上层词典分词。
 
 ## 先看结论
 

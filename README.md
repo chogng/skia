@@ -55,19 +55,21 @@ flowchart LR
 `skia/text` owns portable font identities, ordered in-memory font collections,
 shaped glyph runs, source UTF-8 clusters, bidi visual runs, and validated
 vector outlines. `FontFace` owns TrueType/OpenType data and provides
-segment-level shaping plus outline resolution. `FontCollection` performs
-grapheme-level ordered fallback and shapes one unwrapped bidi paragraph into
-positioned visual runs. It also exposes scaled baseline metrics and greedy
-Unicode line layout with bounded line and shaping work. CPU drawing reuses the
-ordinary path-fill pipeline. Laid-out lines carry physical left/center/right
-alignment or bidi-aware logical start/end alignment. Justified lines preserve
-shaping output and add deterministic per-glyph spacing at interior ASCII spaces.
+segment-level shaping plus outline resolution. A face also exposes its preferred
+OpenType family name and normalized weight, width, and slant. `FontCollection`
+provides deterministic CSS-like family/style matching, performs grapheme-level
+ordered fallback, and shapes one unwrapped bidi paragraph into positioned visual
+runs. It also exposes scaled baseline metrics and greedy Unicode line layout
+with bounded line and shaping work. CPU drawing reuses the ordinary path-fill
+pipeline. Laid-out lines carry physical left/center/right alignment or
+bidi-aware logical start/end alignment. Justified lines preserve shaping output
+and add deterministic per-glyph spacing at interior ASCII spaces.
 
-System-font discovery, family and style matching, language-specific font
-selection, language-dictionary breaking, hyphenation, non-ASCII justification
-opportunities, and decoration remain upper text-layout responsibilities. GPU
-glyph commands, glyph atlases, hinting, and color-font painting are not
-implemented yet.
+System-font discovery, generic-family mapping, variable-font axis selection,
+language-specific font selection, language-dictionary breaking, hyphenation,
+non-ASCII justification opportunities, and decoration remain upper text-layout
+responsibilities. GPU glyph commands, glyph atlases, hinting, and color-font
+painting are not implemented yet.
 
 ## Geometry and transforms
 

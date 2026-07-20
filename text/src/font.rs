@@ -7,6 +7,109 @@ use crate::{
     PositionedGlyph, TextDirection, TextError, TextErrorCode, TextUnit,
 };
 
+/// Standard OpenType width class used during family matching.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum FontWidth {
+    /// Width class 1.
+    UltraCondensed,
+    /// Width class 2.
+    ExtraCondensed,
+    /// Width class 3.
+    Condensed,
+    /// Width class 4.
+    SemiCondensed,
+    /// Width class 5.
+    #[default]
+    Normal,
+    /// Width class 6.
+    SemiExpanded,
+    /// Width class 7.
+    Expanded,
+    /// Width class 8.
+    ExtraExpanded,
+    /// Width class 9.
+    UltraExpanded,
+}
+
+impl FontWidth {
+    /// Returns the OpenType width class in the inclusive range 1 through 9.
+    pub const fn class(self) -> u16 {
+        match self {
+            Self::UltraCondensed => 1,
+            Self::ExtraCondensed => 2,
+            Self::Condensed => 3,
+            Self::SemiCondensed => 4,
+            Self::Normal => 5,
+            Self::SemiExpanded => 6,
+            Self::Expanded => 7,
+            Self::ExtraExpanded => 8,
+            Self::UltraExpanded => 9,
+        }
+    }
+}
+
+/// Upright or sloped face classification used during family matching.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum FontSlant {
+    /// An upright face.
+    #[default]
+    Normal,
+    /// A cursive italic face.
+    Italic,
+    /// A mechanically sloped oblique face.
+    Oblique,
+}
+
+/// CSS-compatible weight, width, and slant request for one font face.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FontStyle {
+    weight: u16,
+    width: FontWidth,
+    slant: FontSlant,
+}
+
+impl FontStyle {
+    /// Regular weight, normal width, and upright slant.
+    pub const NORMAL: Self = Self {
+        weight: 400,
+        width: FontWidth::Normal,
+        slant: FontSlant::Normal,
+    };
+
+    /// Creates a style with a CSS weight in the inclusive range 1 through 1000.
+    pub const fn new(weight: u16, width: FontWidth, slant: FontSlant) -> Result<Self, TextError> {
+        if weight == 0 || weight > 1000 {
+            return Err(TextError::new(TextErrorCode::InvalidFontStyle));
+        }
+        Ok(Self {
+            weight,
+            width,
+            slant,
+        })
+    }
+
+    /// Returns the CSS/OpenType weight value.
+    pub const fn weight(self) -> u16 {
+        self.weight
+    }
+
+    /// Returns the requested width class.
+    pub const fn width(self) -> FontWidth {
+        self.width
+    }
+
+    /// Returns the requested slant.
+    pub const fn slant(self) -> FontSlant {
+        self.slant
+    }
+}
+
+impl Default for FontStyle {
+    fn default() -> Self {
+        Self::NORMAL
+    }
+}
+
 /// Resource ceilings applied while loading and using one font face.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FontLimits {
@@ -124,6 +227,8 @@ pub struct FontFace {
     face_index: u32,
     units_per_em: u16,
     glyph_count: u16,
+    family_name: Option<String>,
+    style: FontStyle,
     limits: FontLimits,
 }
 
@@ -136,6 +241,8 @@ impl fmt::Debug for FontFace {
             .field("face_index", &self.face_index)
             .field("units_per_em", &self.units_per_em)
             .field("glyph_count", &self.glyph_count)
+            .field("family_name", &self.family_name)
+            .field("style", &self.style)
             .field("limits", &self.limits)
             .finish()
     }
@@ -170,12 +277,28 @@ impl FontFace {
             return Err(TextError::new(TextErrorCode::InvalidUnitsPerEm));
         }
         let glyph_count = face.number_of_glyphs();
+        let family_name = preferred_family_name(&face);
+        let weight = face.weight().to_number();
+        let style = FontStyle::new(
+            weight,
+            font_width(face.width()),
+            if face.is_oblique() {
+                FontSlant::Oblique
+            } else if face.is_italic() {
+                FontSlant::Italic
+            } else {
+                FontSlant::Normal
+            },
+        )
+        .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
         Ok(Self {
             id,
             bytes: bytes.into(),
             face_index,
             units_per_em,
             glyph_count,
+            family_name,
+            style,
             limits,
         })
     }
@@ -198,6 +321,16 @@ impl FontFace {
     /// Returns the number of glyphs addressable by this face.
     pub const fn glyph_count(&self) -> u16 {
         self.glyph_count
+    }
+
+    /// Returns the preferred typographic or legacy family name, when present.
+    pub fn family_name(&self) -> Option<&str> {
+        self.family_name.as_deref()
+    }
+
+    /// Returns the face's parsed weight, width, and slant.
+    pub const fn style(&self) -> FontStyle {
+        self.style
     }
 
     /// Resolves one Unicode scalar to its nominal font-local glyph.
@@ -339,6 +472,44 @@ impl FontFace {
         }
 
         GlyphRun::new(self.id, font_size_bits, self.units_per_em, glyphs)
+    }
+}
+
+fn preferred_family_name(face: &ttf_parser::Face<'_>) -> Option<String> {
+    preferred_name(face, ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
+        .or_else(|| preferred_name(face, ttf_parser::name_id::FAMILY))
+}
+
+fn preferred_name(face: &ttf_parser::Face<'_>, name_id: u16) -> Option<String> {
+    let mut first = None;
+    for name in face.names() {
+        if name.name_id != name_id {
+            continue;
+        }
+        let Some(value) = name.to_string().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if name.language_id == 0x0409 {
+            return Some(value);
+        }
+        if first.is_none() {
+            first = Some(value);
+        }
+    }
+    first
+}
+
+const fn font_width(width: ttf_parser::Width) -> FontWidth {
+    match width {
+        ttf_parser::Width::UltraCondensed => FontWidth::UltraCondensed,
+        ttf_parser::Width::ExtraCondensed => FontWidth::ExtraCondensed,
+        ttf_parser::Width::Condensed => FontWidth::Condensed,
+        ttf_parser::Width::SemiCondensed => FontWidth::SemiCondensed,
+        ttf_parser::Width::Normal => FontWidth::Normal,
+        ttf_parser::Width::SemiExpanded => FontWidth::SemiExpanded,
+        ttf_parser::Width::Expanded => FontWidth::Expanded,
+        ttf_parser::Width::ExtraExpanded => FontWidth::ExtraExpanded,
+        ttf_parser::Width::UltraExpanded => FontWidth::UltraExpanded,
     }
 }
 

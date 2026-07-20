@@ -1,7 +1,8 @@
 use skia_core::{
-    Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, GlyphId,
-    GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAlignment,
-    TextDirection, TextError, TextErrorCode, TextLayoutOptions, Transform,
+    Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, FontSlant,
+    FontStyle, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar,
+    SkiaErrorCode, TextAlignment, TextDirection, TextError, TextErrorCode, TextLayoutOptions,
+    Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -39,6 +40,150 @@ fn public_font_loader_rejects_malformed_data() {
     let error = FontFace::from_bytes(FontId::new(1), b"not a font".to_vec())
         .expect_err("malformed font must fail");
     assert_eq!(error.code(), TextErrorCode::InvalidFontData);
+}
+
+#[test]
+fn font_metadata_and_css_like_style_matching_are_deterministic() {
+    assert_eq!(
+        FontStyle::new(0, FontWidth::Normal, FontSlant::Normal)
+            .expect_err("zero weight must fail")
+            .code(),
+        TextErrorCode::InvalidFontStyle
+    );
+    assert_eq!(
+        FontStyle::new(1_001, FontWidth::Normal, FontSlant::Normal)
+            .expect_err("weight above CSS range must fail")
+            .code(),
+        TextErrorCode::InvalidFontStyle
+    );
+
+    let style = |weight, width, slant| FontStyle::new(weight, width, slant).expect("valid style");
+    let faces = [
+        (
+            FontId::new(100),
+            "Example Sans",
+            style(400, FontWidth::Normal, FontSlant::Normal),
+        ),
+        (
+            FontId::new(101),
+            "Example Sans",
+            style(700, FontWidth::Normal, FontSlant::Normal),
+        ),
+        (
+            FontId::new(102),
+            "Example Sans",
+            style(700, FontWidth::Condensed, FontSlant::Normal),
+        ),
+        (
+            FontId::new(103),
+            "Example Sans",
+            style(400, FontWidth::Normal, FontSlant::Italic),
+        ),
+        (
+            FontId::new(104),
+            "Other Family",
+            style(400, FontWidth::Normal, FontSlant::Normal),
+        ),
+        (
+            FontId::new(105),
+            "Example Sans",
+            style(500, FontWidth::Normal, FontSlant::Normal),
+        ),
+        (
+            FontId::new(106),
+            "Example Sans",
+            style(400, FontWidth::Normal, FontSlant::Oblique),
+        ),
+    ];
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    for (id, family, face_style) in faces {
+        fonts
+            .add_face(
+                FontFace::from_bytes(id, toy_styled_font(&['A'], family, face_style))
+                    .expect("styled font"),
+            )
+            .expect("add styled font");
+    }
+
+    let regular = fonts.face(FontId::new(100)).expect("regular face");
+    assert_eq!(regular.family_name(), Some("Example Sans"));
+    assert_eq!(regular.style(), FontStyle::NORMAL);
+    assert_eq!(
+        fonts.face(FontId::new(106)).expect("oblique face").style(),
+        style(400, FontWidth::Normal, FontSlant::Oblique)
+    );
+    assert_eq!(
+        fonts
+            .match_face(
+                "example sans",
+                style(700, FontWidth::Normal, FontSlant::Normal)
+            )
+            .expect("bold match")
+            .id(),
+        FontId::new(101)
+    );
+    assert_eq!(
+        fonts
+            .match_face(
+                "Example Sans",
+                style(400, FontWidth::Condensed, FontSlant::Normal)
+            )
+            .expect("width takes priority")
+            .id(),
+        FontId::new(102)
+    );
+    assert_eq!(
+        fonts
+            .match_face(
+                "Example Sans",
+                style(700, FontWidth::Normal, FontSlant::Italic)
+            )
+            .expect("slant takes priority")
+            .id(),
+        FontId::new(103)
+    );
+    assert_eq!(
+        fonts
+            .match_face(
+                "Example Sans",
+                style(400, FontWidth::Normal, FontSlant::Oblique)
+            )
+            .expect("oblique match")
+            .id(),
+        FontId::new(106)
+    );
+    assert_eq!(
+        fonts
+            .match_face(
+                "Example Sans",
+                style(420, FontWidth::Normal, FontSlant::Normal)
+            )
+            .expect("CSS 400-500 preference")
+            .id(),
+        FontId::new(105)
+    );
+    assert_eq!(
+        fonts
+            .match_face(
+                "Example Sans",
+                style(450, FontWidth::Normal, FontSlant::Normal)
+            )
+            .expect("CSS 450-500 preference")
+            .id(),
+        FontId::new(100)
+    );
+    assert!(
+        fonts
+            .match_face("Missing Family", FontStyle::NORMAL)
+            .is_none()
+    );
+    assert_eq!(
+        fonts
+            .match_face_for_families(&["Missing Family", "Other Family"], FontStyle::NORMAL)
+            .expect("ordered family fallback")
+            .id(),
+        FontId::new(104)
+    );
 }
 
 #[test]
@@ -531,7 +676,15 @@ fn toy_font(character: char) -> Vec<u8> {
 }
 
 fn toy_font_for(characters: &[char]) -> Vec<u8> {
-    let tables = [
+    build_toy_font(characters, None)
+}
+
+fn toy_styled_font(characters: &[char], family: &str, style: FontStyle) -> Vec<u8> {
+    build_toy_font(characters, Some((family, style)))
+}
+
+fn build_toy_font(characters: &[char], metadata: Option<(&str, FontStyle)>) -> Vec<u8> {
+    let mut tables = vec![
         (*b"cmap", cmap_table(characters)),
         (*b"glyf", glyf_table()),
         (*b"head", head_table()),
@@ -540,6 +693,11 @@ fn toy_font_for(characters: &[char]) -> Vec<u8> {
         (*b"loca", loca_table()),
         (*b"maxp", maxp_table()),
     ];
+    if let Some((family, style)) = metadata {
+        tables.push((*b"name", name_table(family)));
+        tables.push((*b"OS/2", os2_table(style)));
+    }
+    tables.sort_unstable_by_key(|(tag, _)| *tag);
     let table_count = u16::try_from(tables.len()).expect("small table count");
     let directory_len = 12 + tables.len() * 16;
     let mut font = vec![0; directory_len];
@@ -571,6 +729,40 @@ fn toy_font_for(characters: &[char]) -> Vec<u8> {
         }
     }
     font
+}
+
+fn name_table(family: &str) -> Vec<u8> {
+    let encoded: Vec<u8> = family.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    let mut table = vec![0; 18];
+    put_u16(&mut table, 0, 0);
+    put_u16(&mut table, 2, 1);
+    put_u16(&mut table, 4, 18);
+    put_u16(&mut table, 6, 3);
+    put_u16(&mut table, 8, 1);
+    put_u16(&mut table, 10, 0x0409);
+    put_u16(&mut table, 12, 16);
+    put_u16(
+        &mut table,
+        14,
+        u16::try_from(encoded.len()).expect("short family"),
+    );
+    put_u16(&mut table, 16, 0);
+    table.extend(encoded);
+    table
+}
+
+fn os2_table(style: FontStyle) -> Vec<u8> {
+    let mut table = vec![0; 96];
+    put_u16(&mut table, 0, 4);
+    put_u16(&mut table, 4, style.weight());
+    put_u16(&mut table, 6, style.width().class());
+    let selection = match style.slant() {
+        FontSlant::Normal => 0,
+        FontSlant::Italic => 1,
+        FontSlant::Oblique => 1 << 9,
+    };
+    put_u16(&mut table, 62, selection);
+    table
 }
 
 fn cmap_table(characters: &[char]) -> Vec<u8> {
