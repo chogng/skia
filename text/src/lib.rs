@@ -18,7 +18,10 @@ pub use collection::{
     FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection,
 };
 pub use font::{FontFace, FontLimits, FontMetrics, FontSlant, FontStyle, FontWidth};
-pub use layout::{ShapedLine, TextAlignment, TextLayout, TextLayoutOptions};
+pub use layout::{
+    ShapedLine, TextAlignment, TextBreakProvider, TextLayout, TextLayoutOptions, TextWordBreak,
+    TextWordBreakKind,
+};
 
 /// Stable machine-readable text-resource failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -35,6 +38,10 @@ pub enum TextErrorCode {
     InvalidUnitsPerEm,
     /// A requested font weight is outside the supported range.
     InvalidFontStyle,
+    /// A language tag is empty or structurally invalid.
+    InvalidLanguage,
+    /// A language break provider returned a non-grapheme or out-of-word offset.
+    InvalidWordBreak,
     /// Font bytes are malformed or omit required tables.
     InvalidFontData,
     /// A font-collection face index is out of bounds.

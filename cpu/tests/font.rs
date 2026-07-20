@@ -1,8 +1,8 @@
 use skia_core::{
     Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, FontSlant,
     FontStyle, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar,
-    SkiaErrorCode, TextAlignment, TextDirection, TextError, TextErrorCode, TextLayoutOptions,
-    Transform,
+    SkiaErrorCode, TextAlignment, TextBreakProvider, TextDirection, TextError, TextErrorCode,
+    TextLayoutOptions, TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -487,6 +487,206 @@ fn hard_breaks_trailing_empty_lines_and_long_graphemes_are_bounded() {
                 TextLayoutOptions::with_limits(7 << 16, 2, 32).expect("bounded options"),
             )
             .expect_err("line limit must fail")
+            .code(),
+        TextErrorCode::ResourceLimit
+    );
+}
+
+struct FixedBreakProvider {
+    language: &'static str,
+    opportunities: Vec<TextWordBreak>,
+}
+
+impl TextBreakProvider for FixedBreakProvider {
+    fn opportunities(&self, _word: &str, language: &str) -> Result<Vec<TextWordBreak>, TextError> {
+        if language != self.language {
+            return Err(TextError::new(TextErrorCode::InvalidLanguage));
+        }
+        Ok(self.opportunities.clone())
+    }
+}
+
+#[test]
+fn dictionary_hyphenation_wraps_ltr_text_and_draws_synthetic_glyphs() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(65),
+                toy_font_for(&['-', 'a', 'e', 'h', 'i', 'n', 'o', 'p', 't', 'y']),
+            )
+            .expect("hyphenation font"),
+        )
+        .expect("add font");
+    let provider = FixedBreakProvider {
+        language: "en-US",
+        opportunities: vec![
+            TextWordBreak::new(6, TextWordBreakKind::Hyphenated),
+            TextWordBreak::new(2, TextWordBreakKind::Hyphenated),
+            TextWordBreak::new(2, TextWordBreakKind::Hyphenated),
+        ],
+    };
+    let layout = fonts
+        .layout_text_with_break_provider(
+            "hyphenation",
+            10 << 16,
+            TextLayoutOptions::new(31 << 16).expect("options"),
+            "en-US",
+            &provider,
+        )
+        .expect("hyphenated layout");
+
+    assert_eq!(layout.lines().len(), 3);
+    assert_eq!(
+        (
+            layout.lines()[0].source_start(),
+            layout.lines()[0].source_end()
+        ),
+        (0, 2)
+    );
+    assert!(layout.lines()[0].hyphenated());
+    assert_eq!(layout.lines()[0].advance_x_bits(), 18 << 16);
+    let first = layout.lines()[0].paragraph().expect("first line");
+    assert_eq!(first.runs().len(), 2);
+    assert_eq!(first.runs()[1].source_start(), 2);
+    assert_eq!(first.runs()[1].source_end(), 2);
+    assert_eq!(first.runs()[1].glyph_run().glyphs()[0].cluster(), 2);
+    assert_eq!(first.runs()[1].origin_x_bits(), 12 << 16);
+    assert_eq!(
+        (
+            layout.lines()[1].source_start(),
+            layout.lines()[1].source_end()
+        ),
+        (2, 6)
+    );
+    assert!(layout.lines()[1].hyphenated());
+    assert_eq!(
+        (
+            layout.lines()[2].source_start(),
+            layout.lines()[2].source_end()
+        ),
+        (6, 11)
+    );
+    assert!(!layout.lines()[2].hyphenated());
+
+    let mut surface = Surface::new(34, 34, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas
+        .draw_text_layout(
+            &layout,
+            &fonts,
+            Point::new(scalar(1), scalar(1)),
+            Paint::new(Color::rgba(190, 180, 170, 255)),
+        )
+        .expect("draw hyphenated text");
+    drop(canvas);
+    assert_eq!(pixel(&surface, 14, 4), [190, 180, 170, 255]);
+}
+
+#[test]
+fn dictionary_hyphenation_positions_rtl_hyphens_and_rejects_invalid_providers() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(66),
+                toy_font_for(&[
+                    '-', 'A', 'B', 'a', 'b', '\u{0301}', '\u{05d0}', '\u{05d1}', '\u{05d2}',
+                    '\u{05d3}',
+                ]),
+            )
+            .expect("mixed font"),
+        )
+        .expect("add font");
+    let rtl = fonts
+        .layout_text_with_break_provider(
+            "\u{05d0}\u{05d1}\u{05d2}\u{05d3}",
+            10 << 16,
+            TextLayoutOptions::new(19 << 16).expect("options"),
+            "he",
+            &FixedBreakProvider {
+                language: "he",
+                opportunities: vec![TextWordBreak::new(4, TextWordBreakKind::Hyphenated)],
+            },
+        )
+        .expect("RTL hyphenation");
+    assert_eq!(rtl.lines().len(), 2);
+    assert!(rtl.lines()[0].hyphenated());
+    let paragraph = rtl.lines()[0].paragraph().expect("RTL first line");
+    assert_eq!(paragraph.base_direction(), TextDirection::RightToLeft);
+    assert_eq!(paragraph.runs()[0].source_start(), 4);
+    assert_eq!(paragraph.runs()[0].source_end(), 4);
+    assert_eq!(paragraph.runs()[0].origin_x_bits(), 0);
+    assert_eq!(paragraph.runs()[1].origin_x_bits(), 6 << 16);
+
+    let soft = fonts
+        .layout_text_with_break_provider(
+            "ABAB",
+            10 << 16,
+            TextLayoutOptions::new(12 << 16).expect("options"),
+            "th",
+            &FixedBreakProvider {
+                language: "th",
+                opportunities: vec![TextWordBreak::new(2, TextWordBreakKind::Soft)],
+            },
+        )
+        .expect("dictionary soft break");
+    assert_eq!(soft.lines().len(), 2);
+    assert_eq!(soft.lines()[0].source_end(), 2);
+    assert!(!soft.lines()[0].hyphenated());
+    assert_eq!(
+        soft.lines()[0].paragraph().expect("soft line").runs().len(),
+        1
+    );
+
+    assert_eq!(
+        fonts
+            .layout_text_with_break_provider(
+                "A",
+                10 << 16,
+                TextLayoutOptions::new(20 << 16).expect("options"),
+                "en_US",
+                &FixedBreakProvider {
+                    language: "en_US",
+                    opportunities: Vec::new(),
+                },
+            )
+            .expect_err("invalid language tag")
+            .code(),
+        TextErrorCode::InvalidLanguage
+    );
+    assert_eq!(
+        fonts
+            .layout_text_with_break_provider(
+                "a\u{0301}b",
+                10 << 16,
+                TextLayoutOptions::new(20 << 16).expect("options"),
+                "en",
+                &FixedBreakProvider {
+                    language: "en",
+                    opportunities: vec![TextWordBreak::new(1, TextWordBreakKind::Soft)],
+                },
+            )
+            .expect_err("provider split a grapheme")
+            .code(),
+        TextErrorCode::InvalidWordBreak
+    );
+    assert_eq!(
+        fonts
+            .layout_text_with_break_provider(
+                "AAA",
+                10 << 16,
+                TextLayoutOptions::with_limits(20 << 16, 8, 1).expect("bounded options"),
+                "en",
+                &FixedBreakProvider {
+                    language: "en",
+                    opportunities: vec![
+                        TextWordBreak::new(1, TextWordBreakKind::Soft),
+                        TextWordBreak::new(2, TextWordBreakKind::Soft),
+                    ],
+                },
+            )
+            .expect_err("dictionary opportunities exceed work ceiling")
             .code(),
         TextErrorCode::ResourceLimit
     );

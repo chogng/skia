@@ -63,11 +63,14 @@ runs. It also exposes scaled baseline metrics and greedy Unicode line layout
 with bounded line and shaping work. CPU drawing reuses the ordinary path-fill
 pipeline. Laid-out lines carry physical left/center/right alignment or
 bidi-aware logical start/end alignment. Justified lines preserve shaping output
-and add deterministic per-glyph spacing at interior ASCII spaces.
+and add deterministic per-glyph spacing at interior ASCII spaces. Callers can
+plug language dictionaries into `TextBreakProvider`; the layout engine validates
+UTF-8 grapheme boundaries and supports either glyph-free soft breaks or
+synthetic visible hyphens without consuming source bytes.
 
 System-font discovery, generic-family mapping, variable-font axis selection,
-language-specific font selection, language-dictionary breaking, hyphenation,
-non-ASCII justification opportunities, and decoration remain upper text-layout
+language-specific font selection, dictionary data and algorithms, non-ASCII
+justification opportunities, and decoration remain upper text-layout
 responsibilities. GPU glyph commands, glyph atlases, hinting, and color-font
 painting are not implemented yet.
 

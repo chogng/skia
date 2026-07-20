@@ -26,6 +26,49 @@ pub enum TextAlignment {
     Justify,
 }
 
+/// Rendering behavior for one language-specific word-internal break.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TextWordBreakKind {
+    /// Wrap without inserting a visible glyph.
+    Soft,
+    /// Wrap and append a synthetic visible hyphen.
+    Hyphenated,
+}
+
+/// One UTF-8 byte offset supplied by a language-specific break provider.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextWordBreak {
+    offset: usize,
+    kind: TextWordBreakKind,
+}
+
+impl TextWordBreak {
+    /// Creates one word-internal break candidate.
+    pub const fn new(offset: usize, kind: TextWordBreakKind) -> Self {
+        Self { offset, kind }
+    }
+
+    /// Returns the byte offset relative to the supplied word.
+    pub const fn offset(self) -> usize {
+        self.offset
+    }
+
+    /// Returns whether taking the break inserts a visible hyphen.
+    pub const fn kind(self) -> TextWordBreakKind {
+        self.kind
+    }
+}
+
+/// Supplies language-specific UTF-8 break opportunities for one word.
+pub trait TextBreakProvider {
+    /// Returns break candidates strictly inside `word` for one BCP 47-style language.
+    ///
+    /// Candidates may be unordered, but each offset must be an
+    /// extended-grapheme boundary. The layout engine validates, sorts,
+    /// deduplicates, and resource-bounds them.
+    fn opportunities(&self, word: &str, language: &str) -> Result<Vec<TextWordBreak>, TextError>;
+}
+
 /// Width and work ceilings for greedy Unicode line layout.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TextLayoutOptions {
@@ -124,6 +167,7 @@ pub struct ShapedLine {
     advance_x_bits: i32,
     baseline_y_bits: i32,
     hard_break: bool,
+    hyphenated: bool,
     justified: bool,
     metrics: FontMetrics,
 }
@@ -162,6 +206,11 @@ impl ShapedLine {
     /// Returns whether an explicit mandatory separator ended this line.
     pub const fn hard_break(&self) -> bool {
         self.hard_break
+    }
+
+    /// Returns whether a dictionary break appended a synthetic visible hyphen.
+    pub const fn hyphenated(&self) -> bool {
+        self.hyphenated
     }
 
     /// Returns whether the line received expanded inter-word spacing.
@@ -214,6 +263,35 @@ impl FontCollection {
         font_size_bits: i32,
         options: TextLayoutOptions,
     ) -> Result<TextLayout, TextError> {
+        self.layout_text_impl(text, font_size_bits, options, None)
+    }
+
+    /// Shapes and wraps UTF-8 with language-specific word-internal breaks.
+    ///
+    /// Hyphenated breaks append U+2010 HYPHEN, falling back to ASCII `-` when
+    /// needed. Soft breaks insert no glyph. A synthetic hyphen maps to the
+    /// source break offset without consuming source bytes.
+    pub fn layout_text_with_break_provider(
+        &self,
+        text: &str,
+        font_size_bits: i32,
+        options: TextLayoutOptions,
+        language: &str,
+        provider: &impl TextBreakProvider,
+    ) -> Result<TextLayout, TextError> {
+        if !valid_language_tag(language) {
+            return Err(TextError::new(TextErrorCode::InvalidLanguage));
+        }
+        self.layout_text_impl(text, font_size_bits, options, Some((language, provider)))
+    }
+
+    fn layout_text_impl(
+        &self,
+        text: &str,
+        font_size_bits: i32,
+        options: TextLayoutOptions,
+        language_breaks: Option<(&str, &dyn TextBreakProvider)>,
+    ) -> Result<TextLayout, TextError> {
         if self.faces().is_empty() {
             return Err(TextError::new(TextErrorCode::EmptyFontCollection));
         }
@@ -224,11 +302,7 @@ impl FontCollection {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
         }
 
-        let mut breaks = Vec::new();
-        breaks
-            .try_reserve(text.len().saturating_add(1))
-            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
-        breaks.extend(linebreaks(text));
+        let breaks = collect_layout_breaks(text, options, language_breaks)?;
 
         let mut builder = LayoutBuilder {
             fonts: self,
@@ -249,7 +323,7 @@ impl FontCollection {
             total_glyphs: 0,
         };
         if text.is_empty() {
-            builder.push_line(0, 0, false, None)?;
+            builder.push_line(0, 0, false, false, None)?;
             return builder.finish();
         }
 
@@ -258,8 +332,10 @@ impl FontCollection {
         while line_start < text.len() {
             let mut last_fit: Option<LineCandidate> = None;
             let mut chosen: Option<LineCandidate> = None;
-            let first_break = breaks.partition_point(|(index, _)| *index <= line_start);
-            for &(raw_end, opportunity) in &breaks[first_break..] {
+            let first_break = breaks.partition_point(|point| point.index <= line_start);
+            for &point in &breaks[first_break..] {
+                let raw_end = point.index;
+                let opportunity = point.opportunity;
                 let hard_break = opportunity == BreakOpportunity::Mandatory
                     && strip_mandatory_ending(text, line_start, raw_end) < raw_end;
                 let content_end = if hard_break {
@@ -267,8 +343,13 @@ impl FontCollection {
                 } else {
                     raw_end
                 };
-                let candidate =
-                    builder.shape_candidate(line_start, content_end, raw_end, hard_break)?;
+                let candidate = builder.shape_candidate(
+                    line_start,
+                    content_end,
+                    raw_end,
+                    hard_break,
+                    point.hyphenated,
+                )?;
                 if candidate.width_bits() <= options.max_width_bits {
                     last_fit = Some(candidate);
                     if opportunity == BreakOpportunity::Mandatory {
@@ -295,7 +376,7 @@ impl FontCollection {
             builder.push_candidate(candidate)?;
         }
         if trailing_empty {
-            builder.push_line(text.len(), text.len(), false, None)?;
+            builder.push_line(text.len(), text.len(), false, false, None)?;
         }
         builder.finish()
     }
@@ -321,8 +402,12 @@ impl LayoutBuilder<'_> {
         content_end: usize,
         raw_end: usize,
         hard_break: bool,
+        hyphenated: bool,
     ) -> Result<LineCandidate, TextError> {
         let paragraph = if start == content_end {
+            if hyphenated {
+                return Err(TextError::new(TextErrorCode::InvalidWordBreak));
+            }
             None
         } else {
             self.shaping_attempts = self
@@ -340,13 +425,22 @@ impl LayoutBuilder<'_> {
                     start >= paragraph.range.start && content_end <= paragraph.range.end
                 })
                 .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
-            Some(self.fonts.shape_bidi_line(
+            let mut paragraph = self.fonts.shape_bidi_line(
                 self.text,
                 self.font_size_bits,
                 &self.bidi,
                 bidi_paragraph,
                 start..content_end,
-            )?)
+            )?;
+            if hyphenated {
+                self.fonts.append_discretionary_hyphen(
+                    &mut paragraph,
+                    self.font_size_bits,
+                    u32::try_from(content_end)
+                        .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
+                )?;
+            }
+            Some(paragraph)
         };
         Ok(LineCandidate {
             paragraph,
@@ -354,6 +448,7 @@ impl LayoutBuilder<'_> {
             source_end: content_end,
             raw_end,
             hard_break,
+            hyphenated,
         })
     }
 
@@ -365,7 +460,7 @@ impl LayoutBuilder<'_> {
         let mut best = None;
         for (relative_start, grapheme) in self.text[start..limit].grapheme_indices(true) {
             let end = start + relative_start + grapheme.len();
-            let candidate = self.shape_candidate(start, end, end, false)?;
+            let candidate = self.shape_candidate(start, end, end, false, false)?;
             let fits = candidate.width_bits() <= self.options.max_width_bits;
             if fits || best.is_none() {
                 best = Some(candidate);
@@ -382,6 +477,7 @@ impl LayoutBuilder<'_> {
             candidate.source_start,
             candidate.source_end,
             candidate.hard_break,
+            candidate.hyphenated,
             candidate.paragraph,
         )
     }
@@ -391,6 +487,7 @@ impl LayoutBuilder<'_> {
         source_start: usize,
         source_end: usize,
         hard_break: bool,
+        hyphenated: bool,
         paragraph: Option<ShapedParagraph>,
     ) -> Result<(), TextError> {
         if self.lines.len() == self.options.max_lines {
@@ -443,6 +540,7 @@ impl LayoutBuilder<'_> {
             advance_x_bits: 0,
             baseline_y_bits,
             hard_break,
+            hyphenated,
             justified: false,
             metrics,
         });
@@ -503,6 +601,7 @@ struct LineCandidate {
     source_end: usize,
     raw_end: usize,
     hard_break: bool,
+    hyphenated: bool,
 }
 
 impl LineCandidate {
@@ -511,6 +610,102 @@ impl LineCandidate {
             .as_ref()
             .map_or(0, ShapedParagraph::advance_x_bits)
     }
+}
+
+#[derive(Clone, Copy)]
+struct LayoutBreak {
+    index: usize,
+    opportunity: BreakOpportunity,
+    hyphenated: bool,
+}
+
+fn collect_layout_breaks(
+    text: &str,
+    options: TextLayoutOptions,
+    language_breaks: Option<(&str, &dyn TextBreakProvider)>,
+) -> Result<Vec<LayoutBreak>, TextError> {
+    let mut breaks = Vec::new();
+    breaks
+        .try_reserve(text.len().saturating_add(1))
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    breaks.extend(linebreaks(text).map(|(index, opportunity)| LayoutBreak {
+        index,
+        opportunity,
+        hyphenated: false,
+    }));
+
+    if let Some((language, provider)) = language_breaks {
+        let mut total_opportunities = 0_usize;
+        for (word_start, word) in text.split_word_bound_indices() {
+            if !word.chars().any(char::is_alphanumeric) {
+                continue;
+            }
+            let mut opportunities = provider.opportunities(word, language)?;
+            total_opportunities = total_opportunities
+                .checked_add(opportunities.len())
+                .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+            if total_opportunities > options.max_shaping_attempts {
+                return Err(TextError::new(TextErrorCode::ResourceLimit));
+            }
+            opportunities.sort_unstable_by_key(|opportunity| {
+                (
+                    opportunity.offset,
+                    opportunity.kind == TextWordBreakKind::Hyphenated,
+                )
+            });
+            opportunities.dedup_by_key(|opportunity| opportunity.offset);
+            breaks
+                .try_reserve(opportunities.len())
+                .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+            for opportunity in opportunities {
+                let relative = opportunity.offset;
+                if relative == 0
+                    || relative >= word.len()
+                    || !word.is_char_boundary(relative)
+                    || !is_grapheme_boundary(word, relative)
+                {
+                    return Err(TextError::new(TextErrorCode::InvalidWordBreak));
+                }
+                let index = word_start
+                    .checked_add(relative)
+                    .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+                breaks.push(LayoutBreak {
+                    index,
+                    opportunity: BreakOpportunity::Allowed,
+                    hyphenated: opportunity.kind == TextWordBreakKind::Hyphenated,
+                });
+            }
+        }
+    }
+
+    breaks.sort_unstable_by_key(|point| (point.index, point.hyphenated));
+    let mut merged: Vec<LayoutBreak> = Vec::new();
+    merged
+        .try_reserve_exact(breaks.len())
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    for point in breaks {
+        if merged
+            .last()
+            .is_some_and(|existing| existing.index == point.index)
+        {
+            continue;
+        }
+        merged.push(point);
+    }
+    Ok(merged)
+}
+
+fn is_grapheme_boundary(text: &str, offset: usize) -> bool {
+    text.grapheme_indices(true)
+        .any(|(index, _)| index == offset)
+}
+
+fn valid_language_tag(language: &str) -> bool {
+    !language.is_empty()
+        && language.len() <= 255
+        && language
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
 
 fn strip_mandatory_ending(text: &str, start: usize, end: usize) -> usize {

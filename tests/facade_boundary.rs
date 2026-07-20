@@ -17,5 +17,6 @@ fn public_facade_does_not_transparently_reexport_implementation_crates() {
     assert!(facade.contains("ShapedParagraph"));
     assert!(facade.contains("TextLayout"));
     assert!(facade.contains("TextAlignment"));
+    assert!(facade.contains("TextBreakProvider"));
     assert!(facade.contains("FontMetrics"));
 }

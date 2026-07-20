@@ -22,5 +22,6 @@ pub use skia_text::{
     FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, FontMetrics, FontSlant,
     FontStyle, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint,
     OutlineSegment, PositionedGlyph, ShapedLine, ShapedParagraph, ShapedRun, TextAlignment,
-    TextDirection, TextError, TextErrorCode, TextLayout, TextLayoutOptions, TextUnit,
+    TextBreakProvider, TextDirection, TextError, TextErrorCode, TextLayout, TextLayoutOptions,
+    TextUnit, TextWordBreak, TextWordBreakKind,
 };

@@ -101,6 +101,23 @@ width/height，每个 `ShapedLine` 给出全局 UTF-8 范围、baseline Y、metr
 标记。CPU 用 `Canvas::draw_text_layout(&layout, &collection, top_left, paint)` 一次绘制所有
 非空行。
 
+需要语言词典分词或断字时，由上层实现
+`TextBreakProvider::opportunities(word, language)`，返回相对当前 Unicode word 的
+`TextWordBreak` 列表，再调用
+`layout_text_with_break_provider(text, size, options, bcp47_language, &provider)`。
+`TextWordBreakKind::Soft` 只增加无 glyph 换行点，适合复杂上下文字系的词典分词；
+`Hyphenated` 会在采用断点时生成可见连字符。provider 不应返回词首、词尾、非 UTF-8
+boundary 或 extended-grapheme 内部位置；布局器会再次校验、排序和去重，非法结果返回
+`InvalidWordBreak`。language 使用非空、连字符分段的 BCP 47-style ASCII tag，结构非法时
+返回 `InvalidLanguage`。
+
+词典断点和 UAX #14 候选会一起参与贪心宽度选择；未采用的断点不会产生字符。采用
+`Hyphenated` 断点时，布局器优先插入 U+2010 HYPHEN，字体不覆盖时回退 ASCII `-`，并把它
+放在逻辑断点所属 bidi run 的正确视觉侧。synthetic run 的 `source_start == source_end`，
+glyph cluster 等于原文断点，`ShapedLine::hyphenated()` 可区分这类行。provider 返回的总
+候选数与 `max_shaping_attempts` 共享工作上限；核心不捆绑具体语言词典，上层负责词典版本、
+缓存和语言回退。
+
 横向排版通过 `TextLayoutOptions::with_alignment` 选择 `TextAlignment::Start`、`End`、
 `Left`、`Center`、`Right` 或 `Justify`。默认 `Start` 会按每行段落基方向选择物理左右边：
 LTR 从左开始，RTL 从右开始；`Left` / `Right` 始终使用物理边。`ShapedLine::offset_x_bits`
@@ -118,12 +135,12 @@ offset 和每个 glyph 的额外 offset；CPU `draw_text_layout` 已自动完成
 path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 advance，但绘制时不产生路径。
 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
-换行、OpenType family/style 元数据和匹配、逻辑/物理对齐、ASCII 空格 justification 和
-轮廓解析**，但不负责平台字体发现、generic family 映射、variable axis 实例化、语言偏好、
-词典断词、自动断字、非 ASCII justification 或文本装饰。`shape_paragraph` 只接受一个未换行
-段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回 `MissingGlyph`。当前 Unicode
-line-break 实现把 SA 复杂上下文字系按普通字母处理，因此泰文、老挝文、高棉文和缅甸文仍
-需要上层词典分词。
+换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、ASCII 空格
+justification 和轮廓解析**，但不负责平台字体发现、generic family 映射、variable axis
+实例化、语言偏好、内置词典/断字算法、非 ASCII justification 或文本装饰。
+`shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
+`MissingGlyph`。当前 Unicode line-break 实现把 SA 复杂上下文字系按普通字母处理；泰文、
+老挝文、高棉文和缅甸文需要上层通过 `TextBreakProvider` 接入合适的 `Soft` 词典边界。
 
 ## 先看结论
 
@@ -269,8 +286,9 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 3. Metal 尚未实现任何非清屏命令；
 4. 裁剪仍只有矩形，图片仍是 RGBA8；
 5. 图片不支持非轴对齐变换/过滤，描边样式也只有圆头圆角；
-6. 文本层已有内存字体解析、单段落 bidi、跨字体 fallback、metrics 和通用换行，但仍没有字体
-   发现、字体样式匹配、语言词典分词、hyphenation、对齐、justification 与完整排版；
+6. 文本层已有内存字体解析、family/style 匹配、单段落 bidi、跨字体 fallback、metrics、
+   通用换行、可插拔词典断点、hyphenation、对齐与基础 justification，但仍没有系统字体发现、
+   内置语言词典、variable axis、非 ASCII justification、装饰与完整排版；
 7. 路径的几何布尔运算、stroke-to-path 和 path effects 尚未暴露；它们不能由像素混合模式替代。
 
 源码入口：Geometry 在 `geometry/src/lib.rs`，Path 在 `path/src/lib.rs`，CPU Canvas 在

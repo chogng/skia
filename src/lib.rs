@@ -18,8 +18,8 @@ pub use skia_core::{
     BlendMode, Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits,
     FontMetrics, FontSlant, FontStyle, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider,
     GlyphRun, OutlinePoint, OutlineSegment, Paint, PositionedGlyph, ShapedLine, ShapedParagraph,
-    ShapedRun, TextAlignment, TextDirection, TextError, TextErrorCode, TextLayout,
-    TextLayoutOptions, TextUnit,
+    ShapedRun, TextAlignment, TextBreakProvider, TextDirection, TextError, TextErrorCode,
+    TextLayout, TextLayoutOptions, TextUnit, TextWordBreak, TextWordBreakKind,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};

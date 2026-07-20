@@ -352,6 +352,107 @@ impl FontCollection {
         self.shape_bidi_range(text, font_size_bits, bidi, paragraph, line, 0)
     }
 
+    pub(crate) fn append_discretionary_hyphen(
+        &self,
+        paragraph: &mut ShapedParagraph,
+        font_size_bits: i32,
+        source_offset: u32,
+    ) -> Result<(), TextError> {
+        if paragraph.runs.len() == self.limits.max_runs {
+            return Err(TextError::new(TextErrorCode::ResourceLimit));
+        }
+        let mut selected = None;
+        for hyphen in ["\u{2010}", "-"] {
+            if let Some(face_index) = self.fallback_face(hyphen)? {
+                selected = Some((face_index, hyphen));
+                break;
+            }
+        }
+        let (face_index, hyphen) = selected.ok_or(TextError::new(TextErrorCode::MissingGlyph))?;
+        let (anchor_index, anchor) = paragraph
+            .runs
+            .iter()
+            .enumerate()
+            .find(|(_, shaped)| shaped.source_end == source_offset)
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        let hyphen_direction = anchor.direction;
+        let insertion_index = if hyphen_direction == TextDirection::LeftToRight {
+            anchor_index + 1
+        } else {
+            anchor_index
+        };
+        let hyphen_origin_bits = if hyphen_direction == TextDirection::LeftToRight {
+            anchor
+                .origin_x_bits
+                .checked_add(run_advance_bits(&anchor.run)?)
+                .ok_or(TextError::new(TextErrorCode::NumericOverflow))?
+        } else {
+            anchor.origin_x_bits
+        };
+        let face = &self.faces[face_index];
+        let run = face.shape_segment(
+            hyphen,
+            font_size_bits,
+            Some(hyphen_direction),
+            source_offset,
+        )?;
+        let glyph_count = paragraph
+            .runs
+            .iter()
+            .try_fold(0_usize, |total, shaped| {
+                total.checked_add(shaped.run.glyphs().len())
+            })
+            .and_then(|total| total.checked_add(run.glyphs().len()))
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        if glyph_count > self.limits.max_glyphs {
+            return Err(TextError::new(TextErrorCode::ResourceLimit));
+        }
+        let advance_bits = run_advance_bits(&run)?;
+        let final_advance_bits = paragraph
+            .advance_x_bits
+            .checked_add(advance_bits)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        if paragraph.runs[insertion_index..]
+            .iter()
+            .any(|shaped| shaped.origin_x_bits.checked_add(advance_bits).is_none())
+        {
+            return Err(TextError::new(TextErrorCode::NumericOverflow));
+        }
+        let mut glyph_offsets_x_bits = Vec::new();
+        glyph_offsets_x_bits
+            .try_reserve_exact(run.glyphs().len())
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        glyph_offsets_x_bits.resize(run.glyphs().len(), 0);
+        paragraph
+            .runs
+            .try_reserve(1)
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+
+        let metrics = face.metrics(font_size_bits)?;
+        paragraph.metrics = FontMetrics::from_bits(
+            paragraph.metrics.ascent_bits().max(metrics.ascent_bits()),
+            paragraph.metrics.descent_bits().max(metrics.descent_bits()),
+            paragraph
+                .metrics
+                .line_gap_bits()
+                .max(metrics.line_gap_bits()),
+        );
+        let shaped_hyphen = ShapedRun {
+            run,
+            source_start: source_offset,
+            source_end: source_offset,
+            origin_x_bits: hyphen_origin_bits,
+            glyph_offsets_x_bits,
+            direction: hyphen_direction,
+        };
+        for shaped in &mut paragraph.runs[insertion_index..] {
+            shaped.origin_x_bits += advance_bits;
+        }
+        paragraph.runs.insert(insertion_index, shaped_hyphen);
+        paragraph.advance_x_bits = final_advance_bits;
+        Ok(())
+    }
+
     pub(crate) fn default_metrics(&self, font_size_bits: i32) -> Result<FontMetrics, TextError> {
         self.faces
             .first()
