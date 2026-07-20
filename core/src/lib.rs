@@ -20,8 +20,9 @@ pub use skia_path::{
 };
 pub use skia_text::{
     FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, FontMetrics, FontSlant,
-    FontStyle, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint,
-    OutlineSegment, PositionedGlyph, ShapedLine, ShapedParagraph, ShapedRun, TextAlignment,
-    TextBreakProvider, TextDecoration, TextDecorationMetrics, TextDirection, TextError,
-    TextErrorCode, TextLayout, TextLayoutOptions, TextUnit, TextWordBreak, TextWordBreakKind,
+    FontStyle, FontTag, FontVariation, FontVariationAxis, FontWidth, GlyphId, GlyphOutline,
+    GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, PositionedGlyph, ShapedLine,
+    ShapedParagraph, ShapedRun, TextAlignment, TextBreakProvider, TextDecoration,
+    TextDecorationMetrics, TextDirection, TextError, TextErrorCode, TextLayout, TextLayoutOptions,
+    TextUnit, TextWordBreak, TextWordBreakKind,
 };

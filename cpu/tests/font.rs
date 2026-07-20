@@ -1,8 +1,9 @@
 use skia_core::{
     Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, FontSlant,
-    FontStyle, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar,
-    SkiaErrorCode, TextAlignment, TextBreakProvider, TextDecoration, TextDirection, TextError,
-    TextErrorCode, TextLayoutOptions, TextWordBreak, TextWordBreakKind, Transform,
+    FontStyle, FontTag, FontVariation, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider,
+    Paint, Point, Rect, Scalar, SkiaErrorCode, TextAlignment, TextBreakProvider, TextDecoration,
+    TextDirection, TextError, TextErrorCode, TextLayoutOptions, TextWordBreak, TextWordBreakKind,
+    Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -183,6 +184,62 @@ fn font_metadata_and_css_like_style_matching_are_deterministic() {
             .expect("ordered family fallback")
             .id(),
         FontId::new(104)
+    );
+}
+
+#[test]
+fn variable_font_instances_validate_axes_and_keep_distinct_identities() {
+    let base = FontFace::from_bytes(FontId::new(130), toy_variable_font(&['A'], "Variable Sans"))
+        .expect("variable font");
+    let weight = FontTag::new(*b"wght");
+    assert_eq!(weight.bytes(), *b"wght");
+    assert_eq!(base.variation_axes().len(), 1);
+    let axis = base.variation_axes()[0];
+    assert_eq!(axis.tag(), weight);
+    assert_eq!(axis.min_value_bits(), 100 << 16);
+    assert_eq!(axis.default_value_bits(), 400 << 16);
+    assert_eq!(axis.max_value_bits(), 900 << 16);
+    assert!(!axis.hidden());
+    assert!(base.variations().is_empty());
+
+    let coordinate = FontVariation::new(weight, 700 << 16);
+    assert_eq!(coordinate.tag(), weight);
+    assert_eq!(coordinate.value_bits(), 700 << 16);
+    let instance = base
+        .instantiate_variations(FontId::new(131), &[coordinate])
+        .expect("weight instance");
+    assert_eq!(instance.id(), FontId::new(131));
+    assert_eq!(instance.variations(), &[coordinate]);
+    let run = instance.shape("A", 10 << 16).expect("shape instance");
+    assert_eq!(run.font(), FontId::new(131));
+    assert!(
+        instance
+            .glyph_outline(run.font(), run.glyphs()[0].glyph())
+            .expect("instance outline")
+            .is_some()
+    );
+
+    let default_instance = base
+        .instantiate_variations(FontId::new(132), &[FontVariation::new(weight, 400 << 16)])
+        .expect("default instance");
+    assert!(default_instance.variations().is_empty());
+    for invalid in [
+        vec![FontVariation::new(weight, 99 << 16)],
+        vec![FontVariation::new(FontTag::new(*b"wdth"), 100 << 16)],
+        vec![coordinate, coordinate],
+    ] {
+        assert_eq!(
+            base.instantiate_variations(FontId::new(133), &invalid)
+                .expect_err("invalid variation request")
+                .code(),
+            TextErrorCode::InvalidFontVariation
+        );
+    }
+    assert_eq!(
+        base.instantiate_variations(base.id(), &[coordinate])
+            .expect_err("instance identity must be distinct")
+            .code(),
+        TextErrorCode::InvalidFontVariation
     );
 }
 
@@ -1007,14 +1064,22 @@ fn toy_font(character: char) -> Vec<u8> {
 }
 
 fn toy_font_for(characters: &[char]) -> Vec<u8> {
-    build_toy_font(characters, None)
+    build_toy_font(characters, None, false)
 }
 
 fn toy_styled_font(characters: &[char], family: &str, style: FontStyle) -> Vec<u8> {
-    build_toy_font(characters, Some((family, style)))
+    build_toy_font(characters, Some((family, style)), false)
 }
 
-fn build_toy_font(characters: &[char], metadata: Option<(&str, FontStyle)>) -> Vec<u8> {
+fn toy_variable_font(characters: &[char], family: &str) -> Vec<u8> {
+    build_toy_font(characters, Some((family, FontStyle::NORMAL)), true)
+}
+
+fn build_toy_font(
+    characters: &[char],
+    metadata: Option<(&str, FontStyle)>,
+    variable: bool,
+) -> Vec<u8> {
     let mut tables = vec![
         (*b"cmap", cmap_table(characters)),
         (*b"glyf", glyf_table()),
@@ -1028,6 +1093,9 @@ fn build_toy_font(characters: &[char], metadata: Option<(&str, FontStyle)>) -> V
         tables.push((*b"name", name_table(family)));
         tables.push((*b"OS/2", os2_table(style)));
         tables.push((*b"post", post_table()));
+    }
+    if variable {
+        tables.push((*b"fvar", fvar_table()));
     }
     tables.sort_unstable_by_key(|(tag, _)| *tag);
     let table_count = u16::try_from(tables.len()).expect("small table count");
@@ -1104,6 +1172,23 @@ fn post_table() -> Vec<u8> {
     put_u32(&mut table, 0, 0x0003_0000);
     put_i16(&mut table, 8, -100);
     put_i16(&mut table, 10, 100);
+    table
+}
+
+fn fvar_table() -> Vec<u8> {
+    let mut table = vec![0; 36];
+    put_u16(&mut table, 0, 1);
+    put_u16(&mut table, 2, 0);
+    put_u16(&mut table, 4, 16);
+    put_u16(&mut table, 8, 1);
+    put_u16(&mut table, 10, 20);
+    put_u16(&mut table, 12, 0);
+    put_u16(&mut table, 14, 8);
+    table[16..20].copy_from_slice(b"wght");
+    put_u32(&mut table, 20, 100 << 16);
+    put_u32(&mut table, 24, 400 << 16);
+    put_u32(&mut table, 28, 900 << 16);
+    put_u16(&mut table, 34, 256);
     table
 }
 

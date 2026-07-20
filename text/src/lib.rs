@@ -18,7 +18,8 @@ pub use collection::{
     FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection,
 };
 pub use font::{
-    FontFace, FontLimits, FontMetrics, FontSlant, FontStyle, FontWidth, TextDecorationMetrics,
+    FontFace, FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation,
+    FontVariationAxis, FontWidth, TextDecorationMetrics,
 };
 pub use layout::{
     ShapedLine, TextAlignment, TextBreakProvider, TextDecoration, TextLayout, TextLayoutOptions,
@@ -40,6 +41,8 @@ pub enum TextErrorCode {
     InvalidUnitsPerEm,
     /// A requested font weight is outside the supported range.
     InvalidFontStyle,
+    /// A variable-font instance identity or coordinate request is invalid.
+    InvalidFontVariation,
     /// A language tag is empty or structurally invalid.
     InvalidLanguage,
     /// A language break provider returned a non-grapheme or out-of-word offset.

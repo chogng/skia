@@ -110,6 +110,87 @@ impl Default for FontStyle {
     }
 }
 
+/// Four-byte OpenType table, feature, or variation-axis tag.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FontTag([u8; 4]);
+
+impl FontTag {
+    /// Creates a tag from its exact four bytes.
+    pub const fn new(bytes: [u8; 4]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the exact four tag bytes.
+    pub const fn bytes(self) -> [u8; 4] {
+        self.0
+    }
+
+    const fn parser_tag(self) -> ttf_parser::Tag {
+        ttf_parser::Tag::from_bytes(&self.0)
+    }
+}
+
+/// One axis declared by a variable OpenType font.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FontVariationAxis {
+    tag: FontTag,
+    min_value_bits: i32,
+    default_value_bits: i32,
+    max_value_bits: i32,
+    hidden: bool,
+}
+
+impl FontVariationAxis {
+    /// Returns the four-byte axis tag, such as `wght`.
+    pub const fn tag(self) -> FontTag {
+        self.tag
+    }
+
+    /// Returns the minimum axis value in signed Q16.16 units.
+    pub const fn min_value_bits(self) -> i32 {
+        self.min_value_bits
+    }
+
+    /// Returns the default axis value in signed Q16.16 units.
+    pub const fn default_value_bits(self) -> i32 {
+        self.default_value_bits
+    }
+
+    /// Returns the maximum axis value in signed Q16.16 units.
+    pub const fn max_value_bits(self) -> i32 {
+        self.max_value_bits
+    }
+
+    /// Returns whether the font marks this axis as hidden from user interfaces.
+    pub const fn hidden(self) -> bool {
+        self.hidden
+    }
+}
+
+/// One requested variable-font coordinate in signed Q16.16 axis units.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FontVariation {
+    tag: FontTag,
+    value_bits: i32,
+}
+
+impl FontVariation {
+    /// Creates one coordinate for an OpenType variation axis.
+    pub const fn new(tag: FontTag, value_bits: i32) -> Self {
+        Self { tag, value_bits }
+    }
+
+    /// Returns the target axis tag.
+    pub const fn tag(self) -> FontTag {
+        self.tag
+    }
+
+    /// Returns the requested signed Q16.16 axis value.
+    pub const fn value_bits(self) -> i32 {
+        self.value_bits
+    }
+}
+
 /// Resource ceilings applied while loading and using one font face.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FontLimits {
@@ -251,6 +332,8 @@ pub struct FontFace {
     glyph_count: u16,
     family_name: Option<String>,
     style: FontStyle,
+    variation_axes: Vec<FontVariationAxis>,
+    variations: Vec<FontVariation>,
     limits: FontLimits,
 }
 
@@ -265,6 +348,8 @@ impl fmt::Debug for FontFace {
             .field("glyph_count", &self.glyph_count)
             .field("family_name", &self.family_name)
             .field("style", &self.style)
+            .field("variation_axes", &self.variation_axes)
+            .field("variations", &self.variations)
             .field("limits", &self.limits)
             .finish()
     }
@@ -313,6 +398,19 @@ impl FontFace {
             },
         )
         .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+        let mut variation_axes = Vec::new();
+        variation_axes
+            .try_reserve_exact(usize::from(face.variation_axes().len()))
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        for axis in face.variation_axes() {
+            variation_axes.push(FontVariationAxis {
+                tag: FontTag::new(axis.tag.to_bytes()),
+                min_value_bits: fixed_axis_bits(axis.min_value)?,
+                default_value_bits: fixed_axis_bits(axis.def_value)?,
+                max_value_bits: fixed_axis_bits(axis.max_value)?,
+                hidden: axis.hidden,
+            });
+        }
         Ok(Self {
             id,
             bytes: bytes.into(),
@@ -321,6 +419,8 @@ impl FontFace {
             glyph_count,
             family_name,
             style,
+            variation_axes,
+            variations: Vec::new(),
             limits,
         })
     }
@@ -355,6 +455,71 @@ impl FontFace {
         self.style
     }
 
+    /// Borrows axes declared by this face's OpenType `fvar` table.
+    pub fn variation_axes(&self) -> &[FontVariationAxis] {
+        &self.variation_axes
+    }
+
+    /// Borrows non-default coordinates applied to this immutable face instance.
+    pub fn variations(&self) -> &[FontVariation] {
+        &self.variations
+    }
+
+    /// Creates an immutable variable-font instance with a new stable identity.
+    ///
+    /// Every coordinate must name a declared axis, occur at most once, and
+    /// remain inside that axis's inclusive range. Unspecified axes keep their
+    /// font-defined defaults.
+    pub fn instantiate_variations(
+        &self,
+        id: FontId,
+        variations: &[FontVariation],
+    ) -> Result<Self, TextError> {
+        if id == self.id
+            || self.variation_axes.is_empty()
+            || variations.len() > self.variation_axes.len()
+            || variations.len() > 64
+        {
+            return Err(TextError::new(TextErrorCode::InvalidFontVariation));
+        }
+        for (index, variation) in variations.iter().copied().enumerate() {
+            if variations[..index]
+                .iter()
+                .any(|existing| existing.tag == variation.tag)
+            {
+                return Err(TextError::new(TextErrorCode::InvalidFontVariation));
+            }
+            let axis = self
+                .variation_axes
+                .iter()
+                .find(|axis| axis.tag == variation.tag)
+                .ok_or(TextError::new(TextErrorCode::InvalidFontVariation))?;
+            if variation.value_bits < axis.min_value_bits
+                || variation.value_bits > axis.max_value_bits
+            {
+                return Err(TextError::new(TextErrorCode::InvalidFontVariation));
+            }
+        }
+        let mut instance_variations = Vec::new();
+        instance_variations
+            .try_reserve_exact(variations.len())
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        for axis in &self.variation_axes {
+            if let Some(variation) = variations
+                .iter()
+                .copied()
+                .find(|variation| variation.tag == axis.tag)
+                && variation.value_bits != axis.default_value_bits
+            {
+                instance_variations.push(variation);
+            }
+        }
+        let mut instance = self.clone();
+        instance.id = id;
+        instance.variations = instance_variations;
+        Ok(instance)
+    }
+
     /// Resolves one Unicode scalar to its nominal font-local glyph.
     pub fn glyph_for_character(&self, character: char) -> Result<Option<GlyphId>, TextError> {
         let face = ttf_parser::Face::parse(&self.bytes, self.face_index)
@@ -375,8 +540,7 @@ impl FontFace {
         if font_size_bits <= 0 {
             return Err(TextError::new(TextErrorCode::InvalidFontSize));
         }
-        let face = ttf_parser::Face::parse(&self.bytes, self.face_index)
-            .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+        let face = self.parser_face()?;
         let ascent_bits = scale_font_units_bits(
             i64::from(face.ascender()),
             font_size_bits,
@@ -428,8 +592,7 @@ impl FontFace {
         if font_size_bits <= 0 {
             return Err(TextError::new(TextErrorCode::InvalidFontSize));
         }
-        let face = ttf_parser::Face::parse(&self.bytes, self.face_index)
-            .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+        let face = self.parser_face()?;
         let Some(metrics) = select(&face) else {
             return Ok(None);
         };
@@ -488,8 +651,16 @@ impl FontFace {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
         }
 
-        let face = rustybuzz::Face::from_slice(&self.bytes, self.face_index)
+        let mut face = rustybuzz::Face::from_slice(&self.bytes, self.face_index)
             .ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+        for variation in &self.variations {
+            face.as_mut()
+                .set_variation(
+                    variation.tag.parser_tag(),
+                    variation.value_bits as f32 / 65_536.0,
+                )
+                .ok_or(TextError::new(TextErrorCode::InvalidFontVariation))?;
+        }
         let mut buffer = rustybuzz::UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.guess_segment_properties();
@@ -543,6 +714,19 @@ impl FontFace {
         }
 
         GlyphRun::new(self.id, font_size_bits, self.units_per_em, glyphs)
+    }
+
+    fn parser_face(&self) -> Result<ttf_parser::Face<'_>, TextError> {
+        let mut face = ttf_parser::Face::parse(&self.bytes, self.face_index)
+            .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+        for variation in &self.variations {
+            face.set_variation(
+                variation.tag.parser_tag(),
+                variation.value_bits as f32 / 65_536.0,
+            )
+            .ok_or(TextError::new(TextErrorCode::InvalidFontVariation))?;
+        }
+        Ok(face)
     }
 }
 
@@ -599,8 +783,7 @@ impl GlyphOutlineProvider for FontFace {
         if glyph_index >= self.glyph_count {
             return Ok(None);
         }
-        let face = ttf_parser::Face::parse(&self.bytes, self.face_index)
-            .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+        let face = self.parser_face()?;
         let mut builder = PortableOutlineBuilder::new(self.limits.max_outline_segments);
         let outlined = face.outline_glyph(ttf_parser::GlyphId(glyph_index), &mut builder);
         if outlined.is_none() {
@@ -609,6 +792,14 @@ impl GlyphOutlineProvider for FontFace {
         let segments = builder.finish()?;
         GlyphOutline::new(self.id, glyph, segments).map(Some)
     }
+}
+
+fn fixed_axis_bits(value: f32) -> Result<i32, TextError> {
+    let bits = f64::from(value) * 65_536.0;
+    if !bits.is_finite() || bits < f64::from(i32::MIN) || bits > f64::from(i32::MAX) {
+        return Err(TextError::new(TextErrorCode::InvalidFontData));
+    }
+    Ok(bits.round() as i32)
 }
 
 fn font_units(value: i64) -> Result<TextUnit, TextError> {
