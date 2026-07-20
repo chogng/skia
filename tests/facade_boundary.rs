@@ -12,4 +12,8 @@ fn public_facade_does_not_transparently_reexport_implementation_crates() {
     assert!(!facade.contains("GlyphRunId"));
     assert!(facade.contains("FontFace"));
     assert!(facade.contains("FontLimits"));
+    assert!(facade.contains("FontCollection"));
+    assert!(facade.contains("ShapedParagraph"));
+    assert!(facade.contains("TextLayout"));
+    assert!(facade.contains("FontMetrics"));
 }

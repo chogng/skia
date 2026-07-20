@@ -8,11 +8,17 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod collection;
 mod font;
+mod layout;
 
 use std::fmt;
 
-pub use font::{FontFace, FontLimits};
+pub use collection::{
+    FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection,
+};
+pub use font::{FontFace, FontLimits, FontMetrics};
+pub use layout::{ShapedLine, TextLayout, TextLayoutOptions};
 
 /// Stable machine-readable text-resource failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -31,6 +37,18 @@ pub enum TextErrorCode {
     InvalidFontData,
     /// A font-collection face index is out of bounds.
     InvalidFaceIndex,
+    /// A resource ceiling configuration contains zero.
+    InvalidLimits,
+    /// A font collection contains no faces.
+    EmptyFontCollection,
+    /// A font collection already contains the supplied stable font identifier.
+    DuplicateFontId,
+    /// No font in a collection covers one source grapheme.
+    MissingGlyph,
+    /// Paragraph shaping received more than one paragraph.
+    MultipleParagraphs,
+    /// Line-break analysis did not produce a forward layout boundary.
+    InvalidLayout,
     /// Glyph outline segments do not form valid contours.
     InvalidOutline,
     /// A resource ceiling was reached.

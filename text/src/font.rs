@@ -4,7 +4,7 @@ use rustybuzz::ttf_parser::{self, OutlineBuilder};
 
 use crate::{
     FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment,
-    PositionedGlyph, TextError, TextErrorCode, TextUnit,
+    PositionedGlyph, TextDirection, TextError, TextErrorCode, TextUnit,
 };
 
 /// Resource ceilings applied while loading and using one font face.
@@ -14,6 +14,47 @@ pub struct FontLimits {
     max_text_bytes: usize,
     max_glyphs_per_run: usize,
     max_outline_segments: usize,
+}
+
+/// Scaled horizontal-font metrics in Q16.16 canvas units.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FontMetrics {
+    ascent_bits: i32,
+    descent_bits: i32,
+    line_gap_bits: i32,
+}
+
+impl FontMetrics {
+    pub(crate) const fn from_bits(ascent_bits: i32, descent_bits: i32, line_gap_bits: i32) -> Self {
+        Self {
+            ascent_bits,
+            descent_bits,
+            line_gap_bits,
+        }
+    }
+
+    /// Returns the non-negative distance above the baseline.
+    pub const fn ascent_bits(self) -> i32 {
+        self.ascent_bits
+    }
+
+    /// Returns the non-negative distance below the baseline.
+    pub const fn descent_bits(self) -> i32 {
+        self.descent_bits
+    }
+
+    /// Returns the non-negative recommended inter-line gap.
+    pub const fn line_gap_bits(self) -> i32 {
+        self.line_gap_bits
+    }
+
+    /// Returns ascent plus descent plus line gap.
+    pub fn line_height_bits(self) -> Result<i32, TextError> {
+        self.ascent_bits
+            .checked_add(self.descent_bits)
+            .and_then(|value| value.checked_add(self.line_gap_bits))
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))
+    }
 }
 
 impl FontLimits {
@@ -29,7 +70,7 @@ impl FontLimits {
             || max_glyphs_per_run == 0
             || max_outline_segments == 0
         {
-            return Err(TextError::new(TextErrorCode::ResourceLimit));
+            return Err(TextError::new(TextErrorCode::InvalidLimits));
         }
         Ok(Self {
             max_font_bytes,
@@ -159,12 +200,80 @@ impl FontFace {
         self.glyph_count
     }
 
+    /// Resolves one Unicode scalar to its nominal font-local glyph.
+    pub fn glyph_for_character(&self, character: char) -> Result<Option<GlyphId>, TextError> {
+        let face = ttf_parser::Face::parse(&self.bytes, self.face_index)
+            .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+        Ok(face
+            .glyph_index(character)
+            .map(|glyph| GlyphId::new(u32::from(glyph.0))))
+    }
+
+    /// Returns whether this face nominally covers one Unicode scalar.
+    pub fn supports_character(&self, character: char) -> Result<bool, TextError> {
+        self.glyph_for_character(character)
+            .map(|glyph| glyph.is_some())
+    }
+
+    /// Returns baseline metrics scaled to one positive Q16.16 font size.
+    pub fn metrics(&self, font_size_bits: i32) -> Result<FontMetrics, TextError> {
+        if font_size_bits <= 0 {
+            return Err(TextError::new(TextErrorCode::InvalidFontSize));
+        }
+        let face = ttf_parser::Face::parse(&self.bytes, self.face_index)
+            .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+        let ascent_bits = scale_font_units_bits(
+            i64::from(face.ascender()),
+            font_size_bits,
+            self.units_per_em,
+        )?
+        .max(0);
+        let descent_bits = scale_font_units_bits(
+            i64::from(face.descender())
+                .checked_neg()
+                .ok_or(TextError::new(TextErrorCode::NumericOverflow))?,
+            font_size_bits,
+            self.units_per_em,
+        )?
+        .max(0);
+        let line_gap_bits = scale_font_units_bits(
+            i64::from(face.line_gap()),
+            font_size_bits,
+            self.units_per_em,
+        )?
+        .max(0);
+        Ok(FontMetrics {
+            ascent_bits,
+            descent_bits,
+            line_gap_bits,
+        })
+    }
+
     /// Shapes one non-empty UTF-8 segment using automatic direction and script detection.
     ///
     /// The resulting clusters are UTF-8 byte offsets. Mixed-direction
-    /// paragraphs must be split and reordered by an upper-level bidi layout
-    /// stage before calling this segment-level method.
+    /// paragraphs should use [`crate::FontCollection::shape_paragraph`] instead.
     pub fn shape(&self, text: &str, font_size_bits: i32) -> Result<GlyphRun, TextError> {
+        self.shape_segment(text, font_size_bits, None, 0)
+    }
+
+    /// Shapes one horizontal UTF-8 segment with an explicit direction.
+    pub fn shape_with_direction(
+        &self,
+        text: &str,
+        font_size_bits: i32,
+        direction: TextDirection,
+    ) -> Result<GlyphRun, TextError> {
+        self.shape_segment(text, font_size_bits, Some(direction), 0)
+    }
+
+    pub(crate) fn shape_segment(
+        &self,
+        text: &str,
+        font_size_bits: i32,
+        direction: Option<TextDirection>,
+        cluster_offset: u32,
+    ) -> Result<GlyphRun, TextError> {
         if font_size_bits <= 0 {
             return Err(TextError::new(TextErrorCode::InvalidFontSize));
         }
@@ -180,6 +289,12 @@ impl FontFace {
         let mut buffer = rustybuzz::UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.guess_segment_properties();
+        if let Some(direction) = direction {
+            buffer.set_direction(match direction {
+                TextDirection::LeftToRight => rustybuzz::Direction::LeftToRight,
+                TextDirection::RightToLeft => rustybuzz::Direction::RightToLeft,
+            });
+        }
         let output = rustybuzz::shape(&face, &[], buffer);
         if output.is_empty() {
             return Err(TextError::new(TextErrorCode::EmptyGlyphRun));
@@ -207,7 +322,9 @@ impl FontFace {
                 .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
             glyphs.push(PositionedGlyph::with_cluster(
                 GlyphId::new(info.glyph_id),
-                info.cluster,
+                info.cluster
+                    .checked_add(cluster_offset)
+                    .ok_or(TextError::new(TextErrorCode::NumericOverflow))?,
                 font_units(x)?,
                 font_units(y)?,
                 font_units(advance_x)?,
@@ -258,6 +375,29 @@ fn font_units(value: i64) -> Result<TextUnit, TextError> {
         .and_then(|bits| i32::try_from(bits).ok())
         .map(TextUnit::from_bits)
         .ok_or(TextError::new(TextErrorCode::NumericOverflow))
+}
+
+pub(crate) fn scale_font_units_bits(
+    design_units: i64,
+    font_size_bits: i32,
+    units_per_em: u16,
+) -> Result<i32, TextError> {
+    let numerator = i128::from(design_units)
+        .checked_mul(i128::from(font_size_bits))
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let denominator = i128::from(units_per_em);
+    let rounded = if numerator >= 0 {
+        numerator
+            .checked_add(denominator / 2)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?
+            / denominator
+    } else {
+        -((-numerator
+            .checked_add(denominator / 2)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?)
+            / denominator)
+    };
+    i32::try_from(rounded).map_err(|_| TextError::new(TextErrorCode::NumericOverflow))
 }
 
 struct PortableOutlineBuilder {

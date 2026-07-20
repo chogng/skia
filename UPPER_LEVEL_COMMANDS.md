@@ -59,19 +59,45 @@ progressive、Balanced 的版本化网页输出策略。WebP 当前只能使用
 不可信输入使用 `FontFace::from_bytes_with_limits`，显式提供 face index 和 `FontLimits`。
 `FontId` 由上层资源管理器稳定分配，不能使用平台字体句柄。
 
-对已经完成 bidi 分段和 fallback 选字的单个 UTF-8 segment，调用
-`face.shape(text, font_size_bits)`。该方法会自动推断 segment 的书写方向和 script，并通过
-OpenType/AAT shaping 生成带 UTF-8 cluster、字形位置和 advance 的 `GlyphRun`。随后可直接调用
-`Canvas::draw_glyph_run(&run, &face, paint)`；录制 DisplayList 时则先用 `add_glyph_run`
-登记并记录 `draw_glyph_run`，CPU 回放时把同一 `FontFace` 作为 `GlyphOutlineProvider`。
+只有一个已选定字体和单方向 UTF-8 segment 时，调用 `face.shape(text, font_size_bits)`；需要
+显式方向时使用 `shape_with_direction`。这些方法通过 OpenType/AAT shaping 生成带 UTF-8
+cluster、字形位置和 advance 的 `GlyphRun`。
+
+需要跨字体 fallback 或混合 LTR/RTL 段落时，创建有界 `FontCollection`，按优先级调用
+`add_face`，再调用 `shape_paragraph`；需要强制段落基方向时使用
+`shape_paragraph_with_direction`。collection 在 extended grapheme cluster 边界选择第一个完整
+覆盖该 grapheme 的字体，通过 Unicode bidi level 分段，并返回视觉从左到右排列的
+`ShapedParagraph`。每个 `ShapedRun` 保留原始 UTF-8 范围、全局 cluster、方向和 Q16.16 横向
+origin。
+
+CPU 即时绘制使用
+`Canvas::draw_shaped_paragraph(&paragraph, &collection, baseline_origin, paint)`。它逐个应用 run
+origin，且成功或失败都会恢复 canvas 状态。单 run 仍可调用
+`Canvas::draw_glyph_run(&run, &face, paint)`。DisplayList 当前没有专用 paragraph 命令；上层
+录制时需登记每个 `GlyphRun`，并按 `ShapedRun::origin_x_bits` 录制相应 save/transform/draw/
+restore 命令。
+
+多行文本先用 `FontFace::metrics(font_size_bits)` 获取单字体 Q16.16 ascent、descent 和 line
+gap；通常直接创建 `TextLayoutOptions::new(max_width_bits)`，再调用
+`collection.layout_text(text, font_size_bits, options)`。布局器使用 Unicode line-break
+opportunity 做贪心换行，每一行重新执行 bidi/fallback/shaping，避免在连字或上下文 shaping
+结果中间直接切 glyph。没有合法软断点且首个单词超宽时，会在 extended grapheme 边界强制
+断行；显式 CR/LF/CRLF/NEL/LS/PS 产生 hard break，尾随换行会保留空白末行。
+
+`TextLayoutOptions::with_limits` 可限制总行数和候选 shaping 次数；`TextLayout` 给出总
+width/height，每个 `ShapedLine` 给出全局 UTF-8 范围、baseline Y、metrics 和 hard-break
+标记。CPU 用 `Canvas::draw_text_layout(&layout, &collection, top_left, paint)` 一次绘制所有
+非空行。
 
 `FontFace` 内部使用纯 Rust `rustybuzz` 完成 shaping，并通过其 `ttf-parser` 解析矢量轮廓；
 字体字节由 face 自身不可变持有。轮廓的字体坐标会转换为 canvas 向下为正的坐标，再复用普通
 path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 advance，但绘制时不产生路径。
 
-这一入口只负责**单段 shaping 和轮廓解析**，不负责段落级 bidi 重排、字体发现、字体族/字重
-匹配、跨字体 fallback、换行、对齐或文本装饰。上述工作属于待实现的上层文本布局模块；
-混合方向段落不能整体交给 `FontFace::shape` 后期待其完成段落重排。
+当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
+换行和轮廓解析**，但不负责平台字体发现、字体族/字重匹配、语言偏好、词典断词、自动断字、
+对齐、justification 或文本装饰。`shape_paragraph` 只接受一个未换行段落；多段内容应使用
+`layout_text`。缺少覆盖字体会返回 `MissingGlyph`。当前 Unicode line-break 实现把 SA
+复杂上下文字系按普通字母处理，因此泰文、老挝文、高棉文和缅甸文仍需要上层词典分词。
 
 ## 先看结论
 
@@ -85,7 +111,7 @@ path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 
 | 填充路径 | `fill_path` | `fill_path` | `fill_path` |
 | 描边路径 | `stroke_path` | `stroke_path` | **无** |
 | 绘制位图 | `draw_image` | `draw_image` | `draw_image` |
-| 绘制文字 | `draw_glyph_run`；`FontFace::shape` 可从 UTF-8 生成 run | `draw_glyph_run` | **无** |
+| 绘制文字 | `draw_glyph_run`、`draw_shaped_paragraph`、`draw_text_layout` | `draw_glyph_run`（paragraph/layout 需展开） | **无** |
 | 当前实际硬件后端 | CPU 可用 | CPU 可用 | Metal 目前仅支持 `clear` |
 
 因此，`Canvas` 是现阶段下层命令最完整、也是语义参考实现；`DisplayList` 适合由上层
@@ -132,7 +158,9 @@ path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 
 | `fill_path(path, rule, paint)` | 按 `EvenOdd` 或 `NonZero` 填充路径。 | 二、三次贝塞尔以固定步数展平；开放轮廓在填充时会隐式闭合。 |
 | `stroke_path(path, width, paint)` | 描边路径。 | 宽度必须为正；固定步数曲线展平；只有**圆头、圆角**，没有 butt/square cap、miter/bevel join、虚线或描边对齐选项。 |
 | `draw_image(image, destination, opacity, blend_mode)` | 绘制 RGBA8 图片到目标矩形。 | 最近邻采样；`opacity` 只乘源 alpha；旋转或错切变换被拒绝，尚无逆变换采样和滤镜。 |
-| `draw_glyph_run(run, provider, paint)` | 根据字形轮廓填充一段已整形文字。 | `FontFace` 可提供单字体 shaping 和轮廓；上层仍负责 bidi 分段、字体发现与 fallback；缺失字形会跳过；轮廓经与普通路径相同的填充管线绘制。 |
+| `draw_glyph_run(run, provider, paint)` | 根据字形轮廓填充一段已整形文字。 | `FontFace` 提供单字体 shaping；`FontCollection` 提供 bidi/fallback 后的多个 run；字体发现仍由上层负责；缺失轮廓会跳过。 |
+| `draw_shaped_paragraph(paragraph, provider, origin, paint)` | 在同一 baseline origin 绘制视觉顺序的所有字体 run。 | `FontCollection` 同时充当多字体轮廓 provider；方法内部隔离每个 run 的状态。 |
+| `draw_text_layout(layout, provider, origin, paint)` | 从 top-left origin 绘制所有非空行。 | baseline、空行和行高由 `TextLayout` 固化；仍复用 paragraph/run/path 管线。 |
 
 ## 2. DisplayList：下层可移植 CPU 命令表
 
@@ -215,8 +243,8 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 3. Metal 尚未实现任何非清屏命令；
 4. 裁剪仍只有矩形，图片仍是 RGBA8；
 5. 图片不支持非轴对齐变换/过滤，描边样式也只有圆头圆角；
-6. 文本层已有内存字体解析和单段 shaping，但仍没有字体发现、段落 bidi、跨字体 fallback、
-   换行与排版；
+6. 文本层已有内存字体解析、单段落 bidi、跨字体 fallback、metrics 和通用换行，但仍没有字体
+   发现、字体样式匹配、语言词典分词、hyphenation、对齐、justification 与完整排版；
 7. 路径的几何布尔运算、stroke-to-path 和 path effects 尚未暴露；它们不能由像素混合模式替代。
 
 源码入口：Geometry 在 `geometry/src/lib.rs`，Path 在 `path/src/lib.rs`，CPU Canvas 在

@@ -1,12 +1,13 @@
 use skia_core::{
-    Color, FontFace, FontId, FontLimits, GlyphId, GlyphOutlineProvider, Paint, Scalar,
-    TextErrorCode, Transform,
+    Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, GlyphId,
+    GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextDirection,
+    TextError, TextErrorCode, TextLayoutOptions, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
 #[test]
 fn utf8_text_shapes_and_draws_through_the_cpu_pipeline() {
-    let face = FontFace::from_bytes(FontId::new(7), toy_font()).expect("load toy font");
+    let face = FontFace::from_bytes(FontId::new(7), toy_font('A')).expect("load toy font");
     let run = face.shape("AA", 10 << 16).expect("shape UTF-8 text");
 
     assert_eq!(run.glyphs().len(), 2);
@@ -43,7 +44,7 @@ fn public_font_loader_rejects_malformed_data() {
 #[test]
 fn font_limits_bound_shaping_and_outline_work() {
     let shaping_limits = FontLimits::new(1_024, 8, 1, 32).expect("valid limits");
-    let face = FontFace::from_bytes_with_limits(FontId::new(2), toy_font(), 0, shaping_limits)
+    let face = FontFace::from_bytes_with_limits(FontId::new(2), toy_font('A'), 0, shaping_limits)
         .expect("load bounded font");
     assert_eq!(
         face.shape("AA", 10 << 16)
@@ -53,7 +54,7 @@ fn font_limits_bound_shaping_and_outline_work() {
     );
 
     let outline_limits = FontLimits::new(1_024, 8, 8, 2).expect("valid limits");
-    let face = FontFace::from_bytes_with_limits(FontId::new(3), toy_font(), 0, outline_limits)
+    let face = FontFace::from_bytes_with_limits(FontId::new(3), toy_font('A'), 0, outline_limits)
         .expect("load bounded font");
     assert_eq!(
         face.glyph_outline(face.id(), GlyphId::new(1))
@@ -63,11 +64,311 @@ fn font_limits_bound_shaping_and_outline_work() {
     );
 
     assert_eq!(
-        FontFace::from_bytes_with_limits(FontId::new(4), toy_font(), 1, FontLimits::default())
+        FontFace::from_bytes_with_limits(FontId::new(4), toy_font('A'), 1, FontLimits::default())
             .expect_err("standalone font has no second face")
             .code(),
         TextErrorCode::InvalidFaceIndex
     );
+}
+
+#[test]
+fn ordered_fallback_shapes_and_draws_multiple_faces() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(10), toy_font('A')).expect("A font"))
+        .expect("add A font");
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(11), toy_font('B')).expect("B font"))
+        .expect("add B font");
+
+    let paragraph = fonts
+        .shape_paragraph("AB", 10 << 16)
+        .expect("fallback shape");
+    assert_eq!(paragraph.base_direction(), TextDirection::LeftToRight);
+    assert_eq!(paragraph.advance_x_bits(), 12 << 16);
+    assert_eq!(paragraph.runs().len(), 2);
+    assert_eq!(paragraph.runs()[0].glyph_run().font(), FontId::new(10));
+    assert_eq!(paragraph.runs()[0].source_start(), 0);
+    assert_eq!(paragraph.runs()[0].origin_x_bits(), 0);
+    assert_eq!(paragraph.runs()[1].glyph_run().font(), FontId::new(11));
+    assert_eq!(paragraph.runs()[1].source_start(), 1);
+    assert_eq!(paragraph.runs()[1].origin_x_bits(), 6 << 16);
+
+    let mut surface = Surface::new(16, 12, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas
+        .draw_shaped_paragraph(
+            &paragraph,
+            &fonts,
+            Point::new(scalar(2), scalar(9)),
+            Paint::new(Color::rgba(70, 80, 90, 255)),
+        )
+        .expect("draw fallback paragraph");
+    drop(canvas);
+
+    assert_eq!(pixel(&surface, 3, 4), [70, 80, 90, 255]);
+    assert_eq!(pixel(&surface, 9, 4), [70, 80, 90, 255]);
+}
+
+#[test]
+fn bidi_reorders_rtl_fallback_runs_and_preserves_source_clusters() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(20), toy_font('\u{05d0}')).expect("Alef font"))
+        .expect("add Alef font");
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(21), toy_font('\u{05d1}')).expect("Bet font"))
+        .expect("add Bet font");
+
+    let paragraph = fonts
+        .shape_paragraph("\u{05d0}\u{05d1}", 10 << 16)
+        .expect("RTL shape");
+
+    assert_eq!(paragraph.base_direction(), TextDirection::RightToLeft);
+    assert_eq!(paragraph.runs().len(), 2);
+    assert_eq!(paragraph.runs()[0].glyph_run().font(), FontId::new(21));
+    assert_eq!(paragraph.runs()[0].source_start(), 2);
+    assert_eq!(paragraph.runs()[0].glyph_run().glyphs()[0].cluster(), 2);
+    assert_eq!(paragraph.runs()[0].direction(), TextDirection::RightToLeft);
+    assert_eq!(paragraph.runs()[1].glyph_run().font(), FontId::new(20));
+    assert_eq!(paragraph.runs()[1].source_start(), 0);
+    assert_eq!(paragraph.runs()[1].glyph_run().glyphs()[0].cluster(), 0);
+    assert_eq!(paragraph.advance_x_bits(), 12 << 16);
+}
+
+#[test]
+fn collection_rejects_duplicate_faces_missing_glyphs_and_multiple_paragraphs() {
+    let mut fonts = FontCollection::new(
+        FontCollectionLimits::new(2, 32, 8, 8).expect("valid collection limits"),
+    );
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(30), toy_font('A')).expect("A font"))
+        .expect("add font");
+    assert_eq!(
+        fonts
+            .add_face(FontFace::from_bytes(FontId::new(30), toy_font('B')).expect("B font"))
+            .expect_err("duplicate ID must fail")
+            .code(),
+        TextErrorCode::DuplicateFontId
+    );
+    assert_eq!(
+        fonts
+            .shape_paragraph("B", 10 << 16)
+            .expect_err("missing fallback must fail")
+            .code(),
+        TextErrorCode::MissingGlyph
+    );
+    assert_eq!(
+        fonts
+            .shape_paragraph("A\nA", 10 << 16)
+            .expect_err("line layout is not paragraph shaping")
+            .code(),
+        TextErrorCode::MultipleParagraphs
+    );
+}
+
+struct FailingProvider;
+
+impl GlyphOutlineProvider for FailingProvider {
+    fn glyph_outline(
+        &self,
+        _font: FontId,
+        _glyph: GlyphId,
+    ) -> Result<Option<GlyphOutline>, TextError> {
+        Err(TextError::new(TextErrorCode::InvalidFontData))
+    }
+}
+
+#[test]
+fn paragraph_draw_restores_canvas_state_after_provider_failure() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(40), toy_font('A')).expect("A font"))
+        .expect("add font");
+    let paragraph = fonts.shape_paragraph("A", 10 << 16).expect("shape");
+    let mut surface = Surface::new(10, 10, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas.set_transform(Transform::translate(scalar(1), Scalar::ZERO));
+
+    assert_eq!(
+        canvas
+            .draw_shaped_paragraph(
+                &paragraph,
+                &FailingProvider,
+                Point::new(scalar(5), scalar(8)),
+                Paint::new(Color::BLACK),
+            )
+            .expect_err("provider failure must propagate")
+            .code(),
+        SkiaErrorCode::TextResolverFailed
+    );
+    canvas
+        .fill_rect(
+            Rect::new(Scalar::ZERO, Scalar::ZERO, scalar(1), scalar(1)).expect("rect"),
+            Paint::new(Color::BLACK),
+        )
+        .expect("draw after failed paragraph");
+    drop(canvas);
+
+    assert_eq!(pixel(&surface, 1, 0), [0, 0, 0, 255]);
+    assert_eq!(pixel(&surface, 6, 8), [0, 0, 0, 0]);
+}
+
+#[test]
+fn font_metrics_and_unicode_soft_wrap_position_lines() {
+    let face = FontFace::from_bytes(FontId::new(50), toy_font_for(&[' ', 'A'])).expect("text font");
+    let metrics = face.metrics(10 << 16).expect("font metrics");
+    assert_eq!(metrics.ascent_bits(), 8 << 16);
+    assert_eq!(metrics.descent_bits(), 2 << 16);
+    assert_eq!(metrics.line_gap_bits(), 0);
+    assert_eq!(metrics.line_height_bits().expect("line height"), 10 << 16);
+
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts.add_face(face).expect("add font");
+    let layout = fonts
+        .layout_text(
+            "A A",
+            10 << 16,
+            TextLayoutOptions::new(12 << 16).expect("layout options"),
+        )
+        .expect("wrap text");
+
+    assert_eq!(layout.lines().len(), 2);
+    assert_eq!(layout.width_bits(), 12 << 16);
+    assert_eq!(layout.height_bits(), 20 << 16);
+    assert_eq!(
+        (
+            layout.lines()[0].source_start(),
+            layout.lines()[0].source_end()
+        ),
+        (0, 2)
+    );
+    assert_eq!(layout.lines()[0].baseline_y_bits(), 8 << 16);
+    assert!(!layout.lines()[0].hard_break());
+    assert_eq!(
+        (
+            layout.lines()[1].source_start(),
+            layout.lines()[1].source_end()
+        ),
+        (2, 3)
+    );
+    assert_eq!(layout.lines()[1].baseline_y_bits(), 18 << 16);
+    assert_eq!(
+        layout.lines()[1]
+            .paragraph()
+            .expect("second shaped line")
+            .runs()[0]
+            .glyph_run()
+            .glyphs()[0]
+            .cluster(),
+        2
+    );
+
+    let mut surface = Surface::new(18, 24, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas
+        .draw_text_layout(
+            &layout,
+            &fonts,
+            Point::new(scalar(2), scalar(1)),
+            Paint::new(Color::rgba(100, 110, 120, 255)),
+        )
+        .expect("draw text layout");
+    drop(canvas);
+
+    assert_eq!(pixel(&surface, 3, 4), [100, 110, 120, 255]);
+    assert_eq!(pixel(&surface, 3, 14), [100, 110, 120, 255]);
+}
+
+#[test]
+fn hard_breaks_trailing_empty_lines_and_long_graphemes_are_bounded() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(60), toy_font('A')).expect("A font"))
+        .expect("add font");
+
+    let hard = fonts
+        .layout_text(
+            "A\nA",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("options"),
+        )
+        .expect("hard break");
+    assert_eq!(hard.lines().len(), 2);
+    assert!(hard.lines()[0].hard_break());
+    assert_eq!(
+        (hard.lines()[0].source_start(), hard.lines()[0].source_end()),
+        (0, 1)
+    );
+    assert_eq!(
+        (hard.lines()[1].source_start(), hard.lines()[1].source_end()),
+        (2, 3)
+    );
+
+    let trailing = fonts
+        .layout_text(
+            "A\n",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("options"),
+        )
+        .expect("trailing line");
+    assert_eq!(trailing.lines().len(), 2);
+    assert!(trailing.lines()[1].paragraph().is_none());
+    assert_eq!(
+        (
+            trailing.lines()[1].source_start(),
+            trailing.lines()[1].source_end()
+        ),
+        (2, 2)
+    );
+
+    let forced = fonts
+        .layout_text(
+            "AAA",
+            10 << 16,
+            TextLayoutOptions::new(7 << 16).expect("options"),
+        )
+        .expect("forced grapheme wrap");
+    assert_eq!(forced.lines().len(), 3);
+    assert_eq!(forced.lines()[0].source_end(), 1);
+    assert_eq!(forced.lines()[1].source_end(), 2);
+    assert_eq!(forced.lines()[2].source_end(), 3);
+
+    assert_eq!(
+        fonts
+            .layout_text(
+                "AAA",
+                10 << 16,
+                TextLayoutOptions::with_limits(7 << 16, 2, 32).expect("bounded options"),
+            )
+            .expect_err("line limit must fail")
+            .code(),
+        TextErrorCode::ResourceLimit
+    );
+}
+
+#[test]
+fn soft_wrapped_rtl_line_keeps_the_logical_paragraph_base_direction() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(70), toy_font_for(&[' ', 'A', '\u{05d0}']))
+                .expect("mixed font"),
+        )
+        .expect("add font");
+
+    let layout = fonts
+        .layout_text(
+            "A \u{05d0}\u{05d0}",
+            10 << 16,
+            TextLayoutOptions::new(12 << 16).expect("options"),
+        )
+        .expect("mixed bidi wrap");
+    assert_eq!(layout.lines().len(), 2);
+    let rtl_line = layout.lines()[1].paragraph().expect("RTL content");
+    assert_eq!(rtl_line.base_direction(), TextDirection::LeftToRight);
+    assert_eq!(rtl_line.runs()[0].direction(), TextDirection::RightToLeft);
+    assert_eq!(rtl_line.runs()[0].glyph_run().glyphs()[0].cluster(), 4);
 }
 
 fn scalar(value: i32) -> Scalar {
@@ -81,9 +382,13 @@ fn pixel(surface: &Surface, x: usize, y: usize) -> [u8; 4] {
         .expect("RGBA pixel")
 }
 
-fn toy_font() -> Vec<u8> {
+fn toy_font(character: char) -> Vec<u8> {
+    toy_font_for(&[character])
+}
+
+fn toy_font_for(characters: &[char]) -> Vec<u8> {
     let tables = [
-        (*b"cmap", cmap_table()),
+        (*b"cmap", cmap_table(characters)),
         (*b"glyf", glyf_table()),
         (*b"head", head_table()),
         (*b"hhea", hhea_table()),
@@ -124,7 +429,25 @@ fn toy_font() -> Vec<u8> {
     font
 }
 
-fn cmap_table() -> Vec<u8> {
+fn cmap_table(characters: &[char]) -> Vec<u8> {
+    let mut characters: Vec<u16> = characters
+        .iter()
+        .copied()
+        .map(|character| {
+            u16::try_from(u32::from(character)).expect("toy font supports BMP characters")
+        })
+        .collect();
+    characters.sort_unstable();
+    characters.dedup();
+    assert!(!characters.is_empty());
+    assert!(!characters.contains(&0xffff));
+    let segment_count = u16::try_from(characters.len() + 1).expect("small segment count");
+    let power = 1_u16 << segment_count.ilog2();
+    let search_range = power * 2;
+    let entry_selector = u16::try_from(power.ilog2()).expect("small entry selector");
+    let segment_count_x2 = segment_count * 2;
+    let range_shift = segment_count_x2 - search_range;
+    let length = 16 + usize::from(segment_count) * 8;
     let mut table = Vec::new();
     push_u16(&mut table, 0);
     push_u16(&mut table, 1);
@@ -132,21 +455,28 @@ fn cmap_table() -> Vec<u8> {
     push_u16(&mut table, 1);
     push_u32(&mut table, 12);
     push_u16(&mut table, 4);
-    push_u16(&mut table, 32);
+    push_u16(&mut table, u16::try_from(length).expect("small cmap"));
     push_u16(&mut table, 0);
-    push_u16(&mut table, 4);
-    push_u16(&mut table, 4);
-    push_u16(&mut table, 1);
-    push_u16(&mut table, 0);
-    push_u16(&mut table, 65);
+    push_u16(&mut table, segment_count_x2);
+    push_u16(&mut table, search_range);
+    push_u16(&mut table, entry_selector);
+    push_u16(&mut table, range_shift);
+    for character in &characters {
+        push_u16(&mut table, *character);
+    }
     push_u16(&mut table, 0xffff);
     push_u16(&mut table, 0);
-    push_u16(&mut table, 65);
+    for character in &characters {
+        push_u16(&mut table, *character);
+    }
     push_u16(&mut table, 0xffff);
-    push_i16(&mut table, -64);
+    for character in &characters {
+        push_u16(&mut table, 1_u16.wrapping_sub(*character));
+    }
     push_i16(&mut table, 1);
-    push_u16(&mut table, 0);
-    push_u16(&mut table, 0);
+    for _ in 0..segment_count {
+        push_u16(&mut table, 0);
+    }
     table
 }
 

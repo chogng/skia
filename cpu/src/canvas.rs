@@ -1,7 +1,8 @@
 use skia_core::{
     BlendMode, Color, DisplayList, DrawCommand, FillRule, GlyphOutline, GlyphOutlineProvider,
     GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder, PathVerb, Point,
-    PositionedGlyph, Rect, Scalar, SkiaError, SkiaErrorCode, TextUnit, Transform,
+    PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, TextLayout, TextUnit,
+    Transform,
 };
 use skia_image::Image;
 
@@ -372,6 +373,63 @@ impl Canvas<'_> {
                 continue;
             };
             self.fill_path(&path, FillRule::NonZero, paint)?;
+        }
+        Ok(())
+    }
+
+    /// Draws all visual runs of one shaped paragraph at a common baseline origin.
+    ///
+    /// Each run is translated by its Q16.16 paragraph origin before using the
+    /// ordinary glyph-run path. The canvas transform and clip are restored even
+    /// when outline resolution or drawing fails.
+    pub fn draw_shaped_paragraph(
+        &mut self,
+        paragraph: &ShapedParagraph,
+        provider: &impl GlyphOutlineProvider,
+        origin: Point,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        for shaped in paragraph.runs() {
+            self.save()?;
+            let draw = (|| {
+                let run_origin_bits = origin
+                    .x()
+                    .bits()
+                    .checked_add(shaped.origin_x_bits())
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                let run_origin = Scalar::from_bits(run_origin_bits);
+                self.concat(Transform::translate(run_origin, origin.y()))?;
+                self.draw_glyph_run(shaped.glyph_run(), provider, paint)
+            })();
+            let restore = self.restore();
+            draw.and(restore)?;
+        }
+        Ok(())
+    }
+
+    /// Draws all non-empty lines of one laid-out text block from its top-left origin.
+    pub fn draw_text_layout(
+        &mut self,
+        layout: &TextLayout,
+        provider: &impl GlyphOutlineProvider,
+        origin: Point,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        for line in layout.lines() {
+            let Some(paragraph) = line.paragraph() else {
+                continue;
+            };
+            let baseline_bits = origin
+                .y()
+                .bits()
+                .checked_add(line.baseline_y_bits())
+                .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+            self.draw_shaped_paragraph(
+                paragraph,
+                provider,
+                Point::new(origin.x(), Scalar::from_bits(baseline_bits)),
+                paint,
+            )?;
         }
         Ok(())
     }
