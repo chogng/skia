@@ -269,9 +269,19 @@ path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 
 COLR/CPAL 分层颜色轮廓和内嵌彩色 bitmap，再回退到应用嵌入 hint 的 Alpha8 轮廓 bitmap。
 返回的 `GlyphBitmap` 相对 glyph baseline 定位；在 canvas 坐标中绘制时，X 加 `left`，Y 减
 `top`。缓存键至少包含 `font`、`glyph`、`font_size_bits` 和 `format`；Alpha8 必须使用调用方
-`Paint` 的颜色混合，RGBA8 保留字体提供的颜色。当前 CPU
-`Canvas` 的通用文字入口仍以矢量轮廓绘制；上层若选择位图文字，应在设备后端使用该 bitmap
-并按目标像素密度建立 glyph cache。该 API 不做系统字体发现或平台 LCD subpixel filtering。
+`Paint` 的颜色混合，RGBA8 保留字体提供的颜色。当前 CPU `Canvas` 的通用文字入口仍以矢量
+轮廓绘制。GPU 位图文字路径使用 `GpuGlyphAtlasBuilder::new(width, height, max_glyphs)`，随后
+调用 `insert_text_layout(&layout, &collection)` 并 `finish()`；将 atlas 通过
+`GpuCommandEncoder::add_glyph_atlas` 登记后，调用
+`draw_text_layout_glyphs(atlas_id, &layout, origin, paint)` 生成按 layout 最终位置排列的单批
+glyph quad。该方法只绘制 glyph，不绘制 underline/strike-through，装饰仍需另录普通几何命令。
+
+atlas 使用 1 像素 padding、以 `(FontId, GlyphId, font_size_bits, GlyphBitmapFormat)` 去重，并受
+尺寸和 glyph 数上限约束；空间不足会明确返回 `ResourceLimit`。atlas 由 command buffer 持有，
+Metal 在一次 submit 内对同一 atlas 只上传一次，但当前不跨 submit 保留原生纹理，因此上层仍应
+按目标像素密度管理 atlas 生命周期和失效策略。Metal 已真正批量绘制 Alpha8 mask 与 RGBA8
+彩色 glyph，目前该路径只接受 `BlendMode::SourceOver`；其他模式返回 `UnsupportedCommand`。
+该 API 不做系统字体发现或平台 LCD subpixel filtering。
 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
 换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、Unicode
@@ -313,8 +323,8 @@ adapter 补齐测试文件采用的 regex-number tailoring，以及依赖 pair t
 | 填充路径 | `fill_path` | `fill_path` | `fill_path` |
 | 描边路径 | `stroke_path` | `stroke_path` | **无** |
 | 绘制位图 | `draw_image` | `draw_image` | `draw_image` |
-| 绘制文字 | `draw_glyph_run`、`draw_shaped_paragraph`、`draw_text_layout` | `draw_glyph_run`（paragraph/layout 需展开） | **无** |
-| 当前实际硬件后端 | CPU 可用 | CPU 可用 | Metal 目前仅支持 `clear` |
+| 绘制文字 | `draw_glyph_run`、`draw_shaped_paragraph`、`draw_text_layout` | `draw_glyph_run`（paragraph/layout 需展开） | `draw_text_layout_glyphs`（atlas bitmap glyph） |
+| 当前实际硬件后端 | CPU 可用 | CPU 可用 | Metal 支持 `clear` 与 SourceOver atlas glyph batch |
 
 因此，`Canvas` 是现阶段下层命令最完整、也是语义参考实现；`DisplayList` 适合由上层
 缓存或跨线程传递同一组 CPU 绘制；GPU 命令集和 Metal 后端都还没有覆盖完整的 Canvas
@@ -406,19 +416,23 @@ adapter 补齐测试文件采用的 regex-number tailoring，以及依赖 pair t
 | `FillRect` / `fill_rect` | `Rect`、`Paint` | 填充矩形。 |
 | `FillPath` / `fill_path` | `GpuPathId`、`FillRule`、`Paint` | 填充已登记路径。 |
 | `DrawImage` / `draw_image` | `GpuImageId`、目标 `Rect`、`u8` opacity、`BlendMode` | 绘制已登记 RGBA8 图片。 |
+| `DrawGlyphs` / `draw_glyph_batch` | `GpuGlyphAtlasId`、`Vec<GpuGlyphQuad>`、`Paint` | 一次绘制一个已登记 atlas 的定位 glyph quad。 |
+| `draw_text_layout_glyphs` | `GpuGlyphAtlasId`、`TextLayout`、origin、`Paint` | 从 layout 生成包含 bidi、alignment、spacing 与 raster placement 的 glyph batch。 |
 
-GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可分别限制命令、路径、
-图片和状态栈深度。裁剪仍只接受轴对齐变换；裁剪为空时，后续绘制命令不会被录制。
+GPU encoder 要求先调用 `add_path` / `add_image` / `add_glyph_atlas` 登记对应资源。
+`GpuCommandLimits` 可分别限制命令、路径、图片、状态栈深度和单批 glyph 数。裁剪仍只接受轴对齐
+变换；裁剪为空时，后续绘制命令不会被录制。
 
 ### GPU 当前缺口
 
-- GPU 命令层没有 `stroke_path`、`draw_glyph_run`，也没有专用的渐变、滤镜、图层或
-  复杂裁剪命令。
+- GPU 命令层没有矢量 `draw_glyph_run` 或文字装饰命令；bitmap text 必须先建立 atlas。它也没有
+  `stroke_path`、渐变、滤镜、图层或复杂裁剪命令。
 - `SoftwareGpuBackend` 能用 CPU Canvas 回放上述 GPU 命令，主要用于一致性测试，并不是真正的
   硬件 GPU 实现。
-- `MetalBackend` 当前会真实创建纹理并执行 `Clear`；遇到 `FillRect`、`FillPath` 或
-  `DrawImage` 会返回 `UnsupportedCommand`。即 Metal 的着色器管线虽已有准备，硬件绘制命令尚未
-  落地。
+- `MetalBackend` 会真实创建纹理、执行 `Clear`，并上传 glyph atlas 后用一个 triangle batch
+  绘制 mask/color glyph；硬件像素读回测试覆盖两种 glyph。它目前仅支持该文字路径的
+  `SourceOver`，遇到 `FillRect`、`FillPath`、`DrawImage` 或其他 glyph blend mode 会返回
+  `UnsupportedCommand`。
 
 ## 4. 路径构造能力（为下层绘制准备资源）
 
@@ -441,8 +455,8 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 当前最明显的不对齐项是：
 
 1. `DisplayList` 缺少 `fill_rect` 的直接命令；
-2. GPU 命令层缺少描边与文字；
-3. Metal 尚未实现任何非清屏命令；
+2. GPU 命令层缺少描边、矢量文字和文字装饰，bitmap 文字需预建 atlas；
+3. Metal 的非清屏能力目前仅有 SourceOver atlas glyph batch；
 4. 裁剪仍只有矩形，图片仍是 RGBA8；
 5. 图片不支持非轴对齐变换/过滤，描边样式也只有圆头圆角；
 6. 文本层已有内存字体解析、family/style 匹配、单段落 bidi、跨字体 fallback、metrics、
@@ -492,3 +506,14 @@ cargo test --test codec_api
 ```sh
 cargo test -p skia-text -p skia-core -p skia-cpu --tests
 ```
+
+只验证 GPU glyph atlas 的资源边界、software reference replay，以及 macOS Metal shader 的
+真实像素读回时，运行：
+
+```sh
+cargo test -p skia-gpu --all-features
+cargo test -p skia-metal
+```
+
+`skia-metal` 测试需要 macOS Metal device 和 Xcode command-line shader tools；没有默认 Metal
+device 时硬件用例会跳过，shader library 创建或编译异常则直接失败。

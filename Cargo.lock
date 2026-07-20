@@ -483,6 +483,7 @@ dependencies = [
  "metal",
  "skia-core",
  "skia-gpu",
+ "skia-image",
 ]
 
 [[package]]

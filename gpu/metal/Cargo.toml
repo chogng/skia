@@ -9,3 +9,6 @@ publish = false
 metal = "0.33.0"
 skia-core = { path = "../../core" }
 skia-gpu = { path = ".." }
+
+[dev-dependencies]
+skia-image = { path = "../../image" }

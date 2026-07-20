@@ -108,10 +108,12 @@ System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, general
 non-CJK inter-character justification, per-span paint and decoration styles, and
 decorative line variants remain upper text-layout responsibilities. GPU glyph
-commands and glyph atlases are not implemented yet. `FontFace` can however
-rasterize hinted Alpha8 glyphs and COLR/CPAL or embedded-color bitmap glyphs
-through the pure-Rust `swash` path; selecting that bitmap path and caching it
-remain upper renderer responsibilities.
+atlases are available for bitmap text: `GpuGlyphAtlasBuilder` rasterizes and
+packs a `TextLayout`, and `GpuCommandEncoder` records its positioned glyphs as
+one bounded batch. The Metal backend uploads each atlas once per submission and
+draws Alpha8 masks and color glyphs through a real shader pipeline; it currently
+supports source-over blending for this path. Persistent cross-frame atlas cache
+policy remains an upper renderer responsibility.
 
 ## Geometry and transforms
 

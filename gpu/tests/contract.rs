@@ -1,11 +1,9 @@
 use std::fmt;
 
-use skia_core::{
-    BlendMode, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, Transform,
-};
+use skia_core::{BlendMode, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, Transform};
 use skia_gpu::{
-    GpuBackend, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode, GpuCommandLimits,
-    GpuSurfaceDescriptor, software::SoftwareGpuBackend,
+    GpuAtlasRect, GpuBackend, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode, GpuCommandLimits,
+    GpuGlyphAtlas, GpuGlyphQuad, GpuSurfaceDescriptor, software::SoftwareGpuBackend,
 };
 use skia_image::Image;
 
@@ -200,6 +198,85 @@ fn software_replay_is_a_pixel_oracle_for_gpu_command_state() {
     assert_eq!(pixel(&surface, 2, 0), [0, 0, 255, 255]);
     assert_eq!(pixel(&surface, 3, 0), [0, 0, 0, 255]);
     assert_eq!(pixel(&surface, 0, 1), [255, 0, 0, 255]);
+}
+
+#[test]
+fn glyph_atlas_batches_tint_masks_and_preserve_color_glyphs() {
+    let atlas = GpuGlyphAtlas::from_image(
+        Image::from_rgba8(2, 1, vec![255, 255, 255, 128, 255, 0, 0, 255]).unwrap(),
+    );
+    let mut encoder = GpuCommandEncoder::new(2).unwrap();
+    let atlas = encoder.add_glyph_atlas(atlas).unwrap();
+    encoder.clear(Color::BLACK).unwrap();
+    encoder
+        .draw_glyph_batch(
+            atlas,
+            vec![
+                GpuGlyphQuad::new(
+                    GpuAtlasRect::new(0, 0, 1, 1).unwrap(),
+                    rect(0, 0, 1, 1),
+                    true,
+                ),
+                GpuGlyphQuad::new(
+                    GpuAtlasRect::new(1, 0, 1, 1).unwrap(),
+                    rect(1, 0, 2, 1),
+                    false,
+                ),
+            ],
+            Paint::new(Color::rgba(0, 0, 255, 255)),
+        )
+        .unwrap();
+    let commands = encoder.finish();
+    assert!(matches!(
+        commands.commands()[1],
+        GpuCommand::DrawGlyphs { ref glyphs, .. } if glyphs.len() == 2
+    ));
+
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(2, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &commands).unwrap();
+    assert_eq!(pixel(&surface, 0, 0), [0, 0, 128, 255]);
+    assert_eq!(pixel(&surface, 1, 0), [255, 0, 0, 255]);
+}
+
+#[test]
+fn glyph_batches_validate_atlas_bounds_and_glyph_limits() {
+    let limits = GpuCommandLimits::new(1, 1, 1, 1)
+        .unwrap()
+        .with_max_glyphs_per_batch(1)
+        .unwrap();
+    let mut encoder = GpuCommandEncoder::with_limits(limits).unwrap();
+    let atlas = encoder
+        .add_glyph_atlas(GpuGlyphAtlas::from_image(
+            Image::from_rgba8(1, 1, vec![255; 4]).unwrap(),
+        ))
+        .unwrap();
+    let quad = GpuGlyphQuad::new(
+        GpuAtlasRect::new(0, 0, 1, 1).unwrap(),
+        rect(0, 0, 1, 1),
+        true,
+    );
+    assert_eq!(
+        encoder
+            .draw_glyph_batch(atlas, vec![quad, quad], Paint::new(Color::BLACK))
+            .unwrap_err()
+            .code(),
+        GpuCommandErrorCode::ResourceLimit
+    );
+    let outside = GpuGlyphQuad::new(
+        GpuAtlasRect::new(1, 0, 1, 1).unwrap(),
+        rect(0, 0, 1, 1),
+        true,
+    );
+    assert_eq!(
+        encoder
+            .draw_glyph_batch(atlas, vec![outside], Paint::new(Color::BLACK))
+            .unwrap_err()
+            .code(),
+        GpuCommandErrorCode::InvalidResource
+    );
 }
 
 fn pixel(surface: &skia_cpu::Surface, x: usize, y: usize) -> [u8; 4] {

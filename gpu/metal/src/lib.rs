@@ -1,22 +1,24 @@
 //! macOS Metal submission backend for `skia-gpu`.
 //!
-//! This initial adapter creates native Metal textures and command buffers, and
-//! executes `Clear` commands as real render passes. Other commands fail closed
-//! until their Metal shader and resource contracts are implemented.
+//! This adapter creates native Metal textures and command buffers, executes
+//! clears, and draws atlas-backed glyph batches through Metal shaders. Other
+//! drawing commands fail closed until their shader contracts are implemented.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use std::fmt;
+use std::{collections::HashMap, fmt, mem::size_of};
 
 use metal::{
-    CommandQueue, Device, MTLClearColor, MTLCommandBufferStatus, MTLLoadAction, MTLOrigin,
-    MTLPixelFormat, MTLRegion, MTLSize, MTLStorageMode, MTLStoreAction, MTLTextureUsage,
-    RenderPassDescriptor, RenderPipelineDescriptor, RenderPipelineState, Texture,
-    TextureDescriptor,
+    CommandQueue, Device, MTLBlendFactor, MTLClearColor, MTLCommandBufferStatus, MTLLoadAction,
+    MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLScissorRect,
+    MTLSize, MTLStorageMode, MTLStoreAction, MTLTextureUsage, RenderPassDescriptor,
+    RenderPipelineDescriptor, RenderPipelineState, Texture, TextureDescriptor,
 };
-use skia_core::Color;
-use skia_gpu::{GpuBackend, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor};
+use skia_core::{BlendMode, Color, Point, Rect, Scalar, Transform};
+use skia_gpu::{
+    GpuBackend, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphQuad, GpuSurfaceDescriptor,
+};
 
 /// Stable machine-readable Metal backend failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -111,6 +113,7 @@ pub struct MetalBackend {
     device: Device,
     queue: CommandQueue,
     solid_rect_pipeline: RenderPipelineState,
+    glyph_pipeline: RenderPipelineState,
 }
 
 impl MetalBackend {
@@ -139,10 +142,33 @@ impl MetalBackend {
         let solid_rect_pipeline = device
             .new_render_pipeline_state(&descriptor)
             .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+        let glyph_vertex = library
+            .get_function("skia_glyph_vertex", None)
+            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
+        let glyph_fragment = library
+            .get_function("skia_glyph_fragment", None)
+            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
+        let glyph_descriptor = RenderPipelineDescriptor::new();
+        glyph_descriptor.set_vertex_function(Some(&glyph_vertex));
+        glyph_descriptor.set_fragment_function(Some(&glyph_fragment));
+        let glyph_attachment = glyph_descriptor
+            .color_attachments()
+            .object_at(0)
+            .ok_or(MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+        glyph_attachment.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+        glyph_attachment.set_blending_enabled(true);
+        glyph_attachment.set_source_rgb_blend_factor(MTLBlendFactor::SourceAlpha);
+        glyph_attachment.set_destination_rgb_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
+        glyph_attachment.set_source_alpha_blend_factor(MTLBlendFactor::One);
+        glyph_attachment.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
+        let glyph_pipeline = device
+            .new_render_pipeline_state(&glyph_descriptor)
+            .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
         Ok(Self {
             device,
             queue,
             solid_rect_pipeline,
+            glyph_pipeline,
         })
     }
 }
@@ -173,12 +199,18 @@ impl GpuBackend for MetalBackend {
         surface: &mut Self::Surface,
         commands: &GpuCommandBuffer,
     ) -> Result<(), Self::Error> {
-        // Keep the validated shader pipeline resident for subsequent FillRect commands.
+        // Keep the validated shader pipeline resident for subsequent FillRect support.
         let _solid_rect_pipeline = &self.solid_rect_pipeline;
-        let mut clear = None;
         for command in commands.commands() {
             match command {
-                GpuCommand::Clear(color) => clear = Some(*color),
+                GpuCommand::Clear(_) => {}
+                GpuCommand::DrawGlyphs { atlas, paint, .. } => {
+                    if paint.blend_mode() != BlendMode::SourceOver
+                        || commands.glyph_atlas(*atlas).is_none()
+                    {
+                        return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
+                    }
+                }
                 GpuCommand::FillRect { .. }
                 | GpuCommand::FillPath { .. }
                 | GpuCommand::DrawImage { .. } => {
@@ -186,22 +218,48 @@ impl GpuBackend for MetalBackend {
                 }
             }
         }
-        let Some(clear) = clear else {
+        if commands.commands().is_empty() {
             return Ok(());
-        };
-        let descriptor = RenderPassDescriptor::new();
-        let attachment = descriptor
-            .color_attachments()
-            .object_at(0)
-            .ok_or(MetalError::new(MetalErrorCode::SurfaceAllocationFailed))?;
-        attachment.set_texture(Some(&surface.texture));
-        attachment.set_load_action(MTLLoadAction::Clear);
-        attachment.set_store_action(MTLStoreAction::Store);
-        attachment.set_clear_color(clear_color(clear));
+        }
 
         let command_buffer = self.queue.new_command_buffer();
-        let encoder = command_buffer.new_render_command_encoder(descriptor);
-        encoder.end_encoding();
+        let mut atlas_textures = HashMap::new();
+        for command in commands.commands() {
+            match command {
+                GpuCommand::Clear(color) => {
+                    encode_clear(command_buffer, surface, *color)?;
+                }
+                GpuCommand::DrawGlyphs {
+                    atlas,
+                    glyphs,
+                    paint,
+                    transform,
+                    clip,
+                } => {
+                    if !atlas_textures.contains_key(atlas) {
+                        let atlas_resource = commands
+                            .glyph_atlas(*atlas)
+                            .ok_or(MetalError::new(MetalErrorCode::UnsupportedCommand))?;
+                        atlas_textures.insert(*atlas, self.upload_atlas(atlas_resource));
+                    }
+                    let texture = atlas_textures
+                        .get(atlas)
+                        .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+                    self.encode_glyphs(
+                        command_buffer,
+                        surface,
+                        texture,
+                        glyphs,
+                        *paint,
+                        *transform,
+                        *clip,
+                    )?;
+                }
+                GpuCommand::FillRect { .. }
+                | GpuCommand::FillPath { .. }
+                | GpuCommand::DrawImage { .. } => unreachable!("commands were prevalidated"),
+            }
+        }
         let blit = command_buffer.new_blit_command_encoder();
         blit.synchronize_resource(&surface.texture);
         blit.end_encoding();
@@ -212,6 +270,205 @@ impl GpuBackend for MetalBackend {
         }
         Ok(())
     }
+}
+
+impl MetalBackend {
+    fn upload_atlas(&self, atlas: &GpuGlyphAtlas) -> Texture {
+        let image = atlas.image();
+        let descriptor = TextureDescriptor::new();
+        descriptor.set_width(u64::from(image.width()));
+        descriptor.set_height(u64::from(image.height()));
+        descriptor.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+        descriptor.set_usage(MTLTextureUsage::ShaderRead);
+        descriptor.set_storage_mode(MTLStorageMode::Managed);
+        let texture = self.device.new_texture(&descriptor);
+        texture.replace_region(
+            MTLRegion {
+                origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                size: MTLSize {
+                    width: u64::from(image.width()),
+                    height: u64::from(image.height()),
+                    depth: 1,
+                },
+            },
+            0,
+            image.pixels().as_ptr().cast(),
+            u64::from(image.width()) * 4,
+        );
+        texture
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_glyphs(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: &MetalSurface,
+        atlas: &Texture,
+        glyphs: &[GpuGlyphQuad],
+        paint: skia_core::Paint,
+        transform: Transform,
+        clip: Option<Rect>,
+    ) -> Result<(), MetalError> {
+        let Some(scissor) = scissor_rect(clip, surface.descriptor) else {
+            return Ok(());
+        };
+        let vertices = glyph_vertices(glyphs, transform)?;
+        let byte_length = vertices
+            .len()
+            .checked_mul(size_of::<GlyphVertex>())
+            .and_then(|length| u64::try_from(length).ok())
+            .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        let vertex_buffer = self.device.new_buffer_with_data(
+            vertices.as_ptr().cast(),
+            byte_length,
+            MTLResourceOptions::CPUCacheModeDefaultCache,
+        );
+        let descriptor = render_pass(surface, MTLLoadAction::Load)?;
+        let encoder = command_buffer.new_render_command_encoder(descriptor);
+        encoder.set_render_pipeline_state(&self.glyph_pipeline);
+        encoder.set_scissor_rect(scissor);
+        encoder.set_vertex_buffer(0, Some(&vertex_buffer), 0);
+        let viewport = [
+            surface.descriptor.width() as f32,
+            surface.descriptor.height() as f32,
+        ];
+        encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
+        let [red, green, blue, alpha] = paint.color().channels();
+        let scale = f32::from(u8::MAX);
+        let paint = [
+            f32::from(red) / scale,
+            f32::from(green) / scale,
+            f32::from(blue) / scale,
+            f32::from(alpha) / scale,
+        ];
+        encoder.set_fragment_bytes(0, size_of_val(&paint) as u64, paint.as_ptr().cast());
+        encoder.set_fragment_texture(0, Some(atlas));
+        encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, vertices.len() as u64);
+        encoder.end_encoding();
+        Ok(())
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GlyphVertex {
+    position: [f32; 2],
+    atlas_position: [f32; 2],
+    mask: u32,
+}
+
+fn glyph_vertices(
+    glyphs: &[GpuGlyphQuad],
+    transform: Transform,
+) -> Result<Vec<GlyphVertex>, MetalError> {
+    let capacity = glyphs
+        .len()
+        .checked_mul(6)
+        .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+    let mut vertices = Vec::new();
+    vertices
+        .try_reserve_exact(capacity)
+        .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+    for glyph in glyphs {
+        let destination = glyph.destination();
+        let source = glyph.source();
+        let logical = [
+            Point::new(destination.left(), destination.top()),
+            Point::new(destination.right(), destination.top()),
+            Point::new(destination.left(), destination.bottom()),
+            Point::new(destination.right(), destination.bottom()),
+        ];
+        let mut position = [[0.0; 2]; 4];
+        for (index, point) in logical.into_iter().enumerate() {
+            let mapped = transform
+                .map_point(point)
+                .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+            position[index] = [scalar_to_f32(mapped.x()), scalar_to_f32(mapped.y())];
+        }
+        let left = source.x() as f32;
+        let top = source.y() as f32;
+        let right = source.x().saturating_add(source.width()) as f32;
+        let bottom = source.y().saturating_add(source.height()) as f32;
+        let atlas_position = [[left, top], [right, top], [left, bottom], [right, bottom]];
+        let mask = u32::from(glyph.is_mask());
+        for index in [0, 1, 2, 1, 3, 2] {
+            vertices.push(GlyphVertex {
+                position: position[index],
+                atlas_position: atlas_position[index],
+                mask,
+            });
+        }
+    }
+    Ok(vertices)
+}
+
+fn encode_clear(
+    command_buffer: &metal::CommandBufferRef,
+    surface: &MetalSurface,
+    color: Color,
+) -> Result<(), MetalError> {
+    let descriptor = render_pass(surface, MTLLoadAction::Clear)?;
+    let attachment = descriptor
+        .color_attachments()
+        .object_at(0)
+        .ok_or(MetalError::new(MetalErrorCode::SurfaceAllocationFailed))?;
+    attachment.set_clear_color(clear_color(color));
+    let encoder = command_buffer.new_render_command_encoder(descriptor);
+    encoder.end_encoding();
+    Ok(())
+}
+
+fn render_pass<'a>(
+    surface: &MetalSurface,
+    load_action: MTLLoadAction,
+) -> Result<&'a metal::RenderPassDescriptorRef, MetalError> {
+    let descriptor = RenderPassDescriptor::new();
+    let attachment = descriptor
+        .color_attachments()
+        .object_at(0)
+        .ok_or(MetalError::new(MetalErrorCode::SurfaceAllocationFailed))?;
+    attachment.set_texture(Some(&surface.texture));
+    attachment.set_load_action(load_action);
+    attachment.set_store_action(MTLStoreAction::Store);
+    Ok(descriptor)
+}
+
+fn scissor_rect(clip: Option<Rect>, surface: GpuSurfaceDescriptor) -> Option<MTLScissorRect> {
+    let width = u64::from(surface.width());
+    let height = u64::from(surface.height());
+    let Some(clip) = clip else {
+        return Some(MTLScissorRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        });
+    };
+    let left = scalar_floor(clip.left()).clamp(0, i64::from(surface.width()));
+    let top = scalar_floor(clip.top()).clamp(0, i64::from(surface.height()));
+    let right = scalar_ceil(clip.right()).clamp(0, i64::from(surface.width()));
+    let bottom = scalar_ceil(clip.bottom()).clamp(0, i64::from(surface.height()));
+    if left >= right || top >= bottom {
+        return None;
+    }
+    Some(MTLScissorRect {
+        x: left as u64,
+        y: top as u64,
+        width: (right - left) as u64,
+        height: (bottom - top) as u64,
+    })
+}
+
+fn scalar_to_f32(value: Scalar) -> f32 {
+    value.bits() as f32 / 65_536.0
+}
+
+fn scalar_floor(value: Scalar) -> i64 {
+    i64::from(value.bits()).div_euclid(65_536)
+}
+
+fn scalar_ceil(value: Scalar) -> i64 {
+    -i64::from(value.bits()).div_euclid(-65_536)
 }
 
 fn clear_color(color: Color) -> MTLClearColor {
