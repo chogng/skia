@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub use skia_codec::{CodecError, CodecErrorCode, CodecLimits, ImageCodec};
+pub use skia_codec::{CodecError, CodecErrorCode, CodecLimits, EncodedImageFormat, ImageCodec};
 pub use skia_core::{
     BlendMode, Color, FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint,
     OutlineSegment, Paint, PositionedGlyph, TextError, TextErrorCode, TextUnit,

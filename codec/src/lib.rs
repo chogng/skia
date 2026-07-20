@@ -1,15 +1,20 @@
-//! Decoding of general-purpose encoded image bytes into Skia image resources.
+//! Parsing and encoding of general-purpose image formats.
 //!
-//! This crate deliberately owns codec policy rather than pixel storage. Its
-//! output is always the portable, tightly packed, straight-alpha RGBA8
-//! [`Image`]. Rendering backends therefore never parse untrusted image files.
+//! This crate deliberately owns image-format policy rather than pixel storage.
+//! Decoding accepts untrusted encoded data subject to [`CodecLimits`], while
+//! encoding converts portable, tightly packed, straight-alpha RGBA8 [`Image`]
+//! resources to PNG, JPEG, or WebP. Rendering backends therefore never parse
+//! image files or encode image formats.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 use std::{fmt, io::Cursor};
 
-use image::{ImageError, ImageFormat, ImageReader, Limits};
+use image::{
+    codecs::{jpeg::JpegEncoder, png::PngEncoder, webp::WebPEncoder},
+    ExtendedColorType, ImageEncoder, ImageError, ImageFormat, ImageReader, Limits,
+};
 use skia_image::Image;
 
 /// Stable machine-readable image codec failure code.
@@ -25,6 +30,10 @@ pub enum CodecErrorCode {
     UnsupportedFormat,
     /// A supported encoded image could not be decoded.
     DecodeFailed,
+    /// JPEG quality is outside its inclusive 1 through 100 range.
+    InvalidJpegQuality,
+    /// A Skia image resource could not be encoded.
+    EncodeFailed,
 }
 
 /// Source-redacted image codec error.
@@ -104,7 +113,24 @@ impl Default for CodecLimits {
     }
 }
 
-/// Stateless codec facade for decoding common image formats.
+/// Output format and settings for an encoded image.
+///
+/// PNG and lossless WebP preserve straight-alpha RGBA8 pixels. JPEG has no
+/// alpha channel, so [`ImageCodec::encode`] discards its alpha channel.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum EncodedImageFormat {
+    /// Lossless PNG with an RGBA8 color model.
+    Png,
+    /// Lossy JPEG with the supplied inclusive quality value from 1 through 100.
+    Jpeg {
+        /// The JPEG encoder's quality setting, from 1 (lowest) to 100 (highest).
+        quality: u8,
+    },
+    /// Lossless WebP with an RGBA8 color model.
+    WebP,
+}
+
+/// Stateless codec facade for common image-format parsing and encoding.
 pub struct ImageCodec;
 
 impl ImageCodec {
@@ -158,6 +184,51 @@ impl ImageCodec {
             .map_err(|_| CodecError::new(CodecErrorCode::DecodeFailed))?;
         Ok(image)
     }
+
+    /// Encodes an [`Image`] as PNG, JPEG, or lossless WebP.
+    ///
+    /// PNG and WebP retain alpha. JPEG encodes RGB only and therefore discards
+    /// the source alpha channel. `quality` for [`EncodedImageFormat::Jpeg`] must
+    /// be in the inclusive range 1 through 100.
+    pub fn encode(image: &Image, format: EncodedImageFormat) -> Result<Vec<u8>, CodecError> {
+        let mut encoded = Vec::new();
+        let result = match format {
+            EncodedImageFormat::Png => PngEncoder::new(&mut encoded).write_image(
+                image.pixels(),
+                image.width(),
+                image.height(),
+                ExtendedColorType::Rgba8,
+            ),
+            EncodedImageFormat::Jpeg { quality } => {
+                if !(1..=100).contains(&quality) {
+                    return Err(CodecError::new(CodecErrorCode::InvalidJpegQuality));
+                }
+                let rgb8 = rgba8_to_rgb8(image.pixels());
+                JpegEncoder::new_with_quality(&mut encoded, quality).write_image(
+                    &rgb8,
+                    image.width(),
+                    image.height(),
+                    ExtendedColorType::Rgb8,
+                )
+            }
+            EncodedImageFormat::WebP => WebPEncoder::new_lossless(&mut encoded).write_image(
+                image.pixels(),
+                image.width(),
+                image.height(),
+                ExtendedColorType::Rgba8,
+            ),
+        };
+        result.map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
+        Ok(encoded)
+    }
+}
+
+fn rgba8_to_rgb8(rgba8: &[u8]) -> Vec<u8> {
+    let mut rgb8 = Vec::with_capacity(rgba8.len() / 4 * 3);
+    for pixel in rgba8.chunks_exact(4) {
+        rgb8.extend_from_slice(&pixel[..3]);
+    }
+    rgb8
 }
 
 #[cfg(test)]
@@ -166,7 +237,9 @@ mod tests {
 
     use image::{DynamicImage, ImageFormat, RgbaImage};
 
-    use super::{CodecErrorCode, CodecLimits, ImageCodec};
+    use skia_image::Image;
+
+    use super::{CodecErrorCode, CodecLimits, EncodedImageFormat, ImageCodec};
 
     fn encoded(format: ImageFormat) -> Vec<u8> {
         let source = RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 128]).unwrap();
@@ -209,6 +282,35 @@ mod tests {
                 .unwrap_err()
                 .code(),
             CodecErrorCode::ImageTooLarge
+        );
+    }
+
+    #[test]
+    fn encodes_png_jpeg_and_webp_from_image_resources() {
+        let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 128]).unwrap();
+        for format in [
+            EncodedImageFormat::Png,
+            EncodedImageFormat::Jpeg { quality: 90 },
+            EncodedImageFormat::WebP,
+        ] {
+            let encoded = ImageCodec::encode(&image, format)
+                .unwrap_or_else(|error| panic!("{format:?} failed: {error:?}"));
+            let decoded = ImageCodec::decode(&encoded).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (2, 1));
+            if format == EncodedImageFormat::Png || format == EncodedImageFormat::WebP {
+                assert_eq!(decoded.pixel_at(1, 0).unwrap()[3], 128);
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_rejects_invalid_jpeg_quality() {
+        let image = Image::from_rgba8(1, 1, vec![0, 0, 0, 255]).unwrap();
+        assert_eq!(
+            ImageCodec::encode(&image, EncodedImageFormat::Jpeg { quality: 0 })
+                .unwrap_err()
+                .code(),
+            CodecErrorCode::InvalidJpegQuality
         );
     }
 }

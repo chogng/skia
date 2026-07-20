@@ -36,9 +36,10 @@ flowchart LR
   depends on the foundational crates but never on an executor, platform
   graphics API, caller-specific parser, document model, or Scene.
 - `skia/image` owns the immutable RGBA8 resource representation. `skia/codec`
-  translates encoded, general-purpose image bytes into that representation; it
-  does not depend on rendering backends or caller-specific types. Future encoders belong in
-  `skia/codec` as well, not in the resource crate.
+  parses untrusted, general-purpose image bytes into that representation and
+  encodes those resources as general-purpose image formats. It does not depend
+  on rendering backends or caller-specific types, so both decode and encode
+  remain in `skia/codec`, not in the resource crate.
 - Every consumer calls Skia only through its public API. Each consumer owns its
   source-domain adapter and reports its rendering
   intent, target description, and source data to the Skia upper integration

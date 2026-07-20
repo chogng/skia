@@ -238,7 +238,7 @@ fn conics_and_reversed_contours_preserve_fill_semantics() {
 }
 
 #[test]
-fn stroke_has_round_caps_and_joins_without_pdf_dependencies() {
+fn stroke_has_round_caps_and_joins_without_external_dependencies() {
     let mut path = PathBuilder::new(3).unwrap();
     path.move_to(point(1, 2)).unwrap();
     path.line_to(point(5, 2)).unwrap();
