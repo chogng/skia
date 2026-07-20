@@ -1,4 +1,7 @@
-use crate::{Color, FillRule, Paint, Path, Rect, Scalar, SkiaError, SkiaErrorCode, Transform};
+use crate::{
+    Color, FillRule, Paint, Path, Rect, Scalar, SkiaError, SkiaErrorCode, StrokeCap, StrokeJoin,
+    StrokeOptions, Transform,
+};
 use skia_image::Image;
 #[cfg(feature = "text")]
 use skia_text::GlyphRun;
@@ -17,7 +20,7 @@ pub struct ImageId(u32);
 pub struct GlyphRunId(u32);
 
 /// Backend-neutral drawing operation in declaration order.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DrawCommand {
     /// Clears the entire target without inheriting state.
     Clear(Color),
@@ -40,12 +43,12 @@ pub enum DrawCommand {
         /// Source paint.
         paint: Paint,
     },
-    /// Strokes a registered path with a positive logical width.
+    /// Strokes a registered path with backend-neutral geometry options.
     StrokePath {
         /// Local path resource.
         path: PathId,
-        /// Positive stroke width.
-        width: Scalar,
+        /// Cap, join, miter, width, and dash geometry.
+        options: StrokeOptions,
         /// Source paint.
         paint: Paint,
     },
@@ -194,10 +197,24 @@ impl DisplayListBuilder {
         width: Scalar,
         paint: Paint,
     ) -> Result<(), SkiaError> {
-        if width.bits() <= 0 {
-            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
-        }
-        self.push(DrawCommand::StrokePath { path, width, paint })
+        let options = StrokeOptions::new(width)?
+            .with_cap(StrokeCap::Round)
+            .with_join(StrokeJoin::Round);
+        self.stroke_path_with_options(path, options, paint)
+    }
+
+    /// Records a stroke of a registered path with explicit geometry options.
+    pub fn stroke_path_with_options(
+        &mut self,
+        path: PathId,
+        options: StrokeOptions,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        self.push(DrawCommand::StrokePath {
+            path,
+            options,
+            paint,
+        })
     }
     /// Records one registered image draw.
     pub fn draw_image(

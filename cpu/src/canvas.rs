@@ -1,10 +1,12 @@
 use skia_core::{
     BlendMode, Color, DisplayList, DrawCommand, FillRule, GlyphOutline, GlyphOutlineProvider,
     GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder, PathVerb, Point,
-    PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, TextLayout,
-    TextStyleId, TextUnit, Transform,
+    PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, StrokeCap,
+    StrokeJoin, StrokeOptions, TextLayout, TextStyleId, TextUnit, Transform,
 };
 use skia_image::Image;
+
+use crate::stroke::{stroke_bounds, stroke_contains, stroke_pieces};
 
 /// Limits for one CPU-owned RGBA8 surface and Canvas state stack.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,24 +124,28 @@ impl Surface {
     ) -> Result<(), SkiaError> {
         let mut canvas = self.canvas();
         for command in list.commands() {
-            match *command {
-                DrawCommand::Clear(color) => canvas.clear(color),
+            match command {
+                DrawCommand::Clear(color) => canvas.clear(*color),
                 DrawCommand::Save => canvas.save()?,
                 DrawCommand::Restore => canvas.restore()?,
-                DrawCommand::ClipRect(rect) => canvas.clip_rect(ClipRect::new(rect))?,
-                DrawCommand::SetTransform(transform) => canvas.set_transform(transform),
-                DrawCommand::ConcatTransform(transform) => canvas.concat(transform)?,
+                DrawCommand::ClipRect(rect) => canvas.clip_rect(ClipRect::new(*rect))?,
+                DrawCommand::SetTransform(transform) => canvas.set_transform(*transform),
+                DrawCommand::ConcatTransform(transform) => canvas.concat(*transform)?,
                 DrawCommand::FillPath { path, rule, paint } => {
                     let path = list
-                        .path(path)
+                        .path(*path)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    canvas.fill_path(path, rule, paint)?;
+                    canvas.fill_path(path, *rule, *paint)?;
                 }
-                DrawCommand::StrokePath { path, width, paint } => {
+                DrawCommand::StrokePath {
+                    path,
+                    options,
+                    paint,
+                } => {
                     let path = list
-                        .path(path)
+                        .path(*path)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    canvas.stroke_path(path, width, paint)?;
+                    canvas.stroke_path_with_options(path, options, *paint)?;
                 }
                 DrawCommand::DrawImage {
                     image,
@@ -148,15 +154,15 @@ impl Surface {
                     paint,
                 } => {
                     let image = list
-                        .image(image)
+                        .image(*image)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    canvas.draw_image(image, destination, opacity, paint.blend_mode())?;
+                    canvas.draw_image(image, *destination, *opacity, paint.blend_mode())?;
                 }
                 DrawCommand::DrawGlyphRun { run, paint } => {
                     let run = list
-                        .glyph_run(run)
+                        .glyph_run(*run)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    canvas.draw_glyph_run(run, glyphs, paint)?;
+                    canvas.draw_glyph_run(run, glyphs, *paint)?;
                 }
             }
         }
@@ -279,18 +285,33 @@ impl Canvas<'_> {
         width: Scalar,
         paint: Paint,
     ) -> Result<(), SkiaError> {
-        if width.bits() <= 0 {
-            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
-        }
+        let options = StrokeOptions::new(width)?
+            .with_cap(StrokeCap::Round)
+            .with_join(StrokeJoin::Round);
+        self.stroke_path_with_options(path, &options, paint)
+    }
+
+    /// Strokes a transformed path with explicit cap, join, miter, and dash geometry.
+    ///
+    /// Curves use the same deterministic fixed-step flattening as
+    /// [`Canvas::fill_path`]. Dash lengths and stroke width are evaluated in
+    /// the transformed canvas coordinate space.
+    pub fn stroke_path_with_options(
+        &mut self,
+        path: &Path,
+        options: &StrokeOptions,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
         let contours = transformed_contours(path, self.state.transform)?;
         if contours.iter().all(|contour| contour.points.len() < 2) {
             return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
         }
-        let bounds = stroke_bounds(&contours, width)?.intersection(self.state.clip);
+        let pieces = stroke_pieces(&contours, options)?;
+        let bounds = stroke_bounds(&contours, options)?.intersection(self.state.clip);
         for y in bounds.top..bounds.bottom {
             for x in bounds.left..bounds.right {
                 let sample = pixel_center(x, y)?;
-                if stroke_contains(&contours, sample, width)? {
+                if stroke_contains(&pieces, sample, options)? {
                     self.blend_pixel(x, y, paint)?;
                 }
             }
@@ -662,11 +683,11 @@ impl Canvas<'_> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct DeviceRect {
-    left: i64,
-    top: i64,
-    right: i64,
-    bottom: i64,
+pub(crate) struct DeviceRect {
+    pub(crate) left: i64,
+    pub(crate) top: i64,
+    pub(crate) right: i64,
+    pub(crate) bottom: i64,
 }
 
 impl DeviceRect {
@@ -696,9 +717,9 @@ impl DeviceRect {
 const CURVE_STEPS: i64 = 16;
 
 #[derive(Debug)]
-struct Contour {
-    points: Vec<Point>,
-    closed: bool,
+pub(crate) struct Contour {
+    pub(crate) points: Vec<Point>,
+    pub(crate) closed: bool,
 }
 
 fn glyph_path(
@@ -1057,7 +1078,7 @@ fn rounded_scalar(value: i128, divisor: i128) -> Result<Scalar, SkiaError> {
         .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))
 }
 
-fn contour_bounds(contours: &[Contour]) -> DeviceRect {
+pub(crate) fn contour_bounds(contours: &[Contour]) -> DeviceRect {
     let mut left = i64::MAX;
     let mut top = i64::MAX;
     let mut right = i64::MIN;
@@ -1147,160 +1168,11 @@ fn pixel_center(x: i64, y: i64) -> Result<Point, SkiaError> {
     ))
 }
 
-fn stroke_bounds(contours: &[Contour], width: Scalar) -> Result<DeviceRect, SkiaError> {
-    let bounds = contour_bounds(contours);
-    let radius = i64::from(width.bits()).div_euclid(2);
-    let left = bounds
-        .left
-        .checked_mul(1_i64 << 16)
-        .and_then(|value| value.checked_sub(radius))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let top = bounds
-        .top
-        .checked_mul(1_i64 << 16)
-        .and_then(|value| value.checked_sub(radius))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let right = bounds
-        .right
-        .checked_mul(1_i64 << 16)
-        .and_then(|value| value.checked_add(radius))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let bottom = bounds
-        .bottom
-        .checked_mul(1_i64 << 16)
-        .and_then(|value| value.checked_add(radius))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    Ok(DeviceRect {
-        left: floor_q16_i64(left),
-        top: floor_q16_i64(top),
-        right: ceil_q16_i64(right),
-        bottom: ceil_q16_i64(bottom),
-    })
-}
-
-fn stroke_contains(contours: &[Contour], sample: Point, width: Scalar) -> Result<bool, SkiaError> {
-    for contour in contours {
-        if contour.points.len() < 2 {
-            continue;
-        }
-        for (start, end) in contour
-            .points
-            .iter()
-            .copied()
-            .zip(contour.points.iter().copied().skip(1))
-        {
-            if point_near_segment(sample, start, end, width)? {
-                return Ok(true);
-            }
-        }
-        if contour.closed
-            && point_near_segment(
-                sample,
-                contour.points[contour.points.len() - 1],
-                contour.points[0],
-                width,
-            )?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn point_near_segment(
-    sample: Point,
-    start: Point,
-    end: Point,
-    width: Scalar,
-) -> Result<bool, SkiaError> {
-    let start_x = i128::from(start.x().bits());
-    let start_y = i128::from(start.y().bits());
-    let delta_x = i128::from(end.x().bits()) - start_x;
-    let delta_y = i128::from(end.y().bits()) - start_y;
-    let length_squared = delta_x
-        .checked_mul(delta_x)
-        .and_then(|value| {
-            delta_y
-                .checked_mul(delta_y)
-                .and_then(|other| value.checked_add(other))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    if length_squared == 0 {
-        return point_near_point(sample, start, width);
-    }
-    let sample_x = i128::from(sample.x().bits());
-    let sample_y = i128::from(sample.y().bits());
-    let projection = (sample_x - start_x)
-        .checked_mul(delta_x)
-        .and_then(|value| {
-            (sample_y - start_y)
-                .checked_mul(delta_y)
-                .and_then(|other| value.checked_add(other))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?
-        .clamp(0, length_squared);
-    let nearest_x = start_x
-        .checked_add(rounded_div_signed(delta_x * projection, length_squared)?)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let nearest_y = start_y
-        .checked_add(rounded_div_signed(delta_y * projection, length_squared)?)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    point_near_coordinates(sample_x, sample_y, nearest_x, nearest_y, width)
-}
-
-fn point_near_point(sample: Point, point: Point, width: Scalar) -> Result<bool, SkiaError> {
-    point_near_coordinates(
-        i128::from(sample.x().bits()),
-        i128::from(sample.y().bits()),
-        i128::from(point.x().bits()),
-        i128::from(point.y().bits()),
-        width,
-    )
-}
-
-fn point_near_coordinates(
-    sample_x: i128,
-    sample_y: i128,
-    point_x: i128,
-    point_y: i128,
-    width: Scalar,
-) -> Result<bool, SkiaError> {
-    let dx = sample_x - point_x;
-    let dy = sample_y - point_y;
-    let distance_squared = dx
-        .checked_mul(dx)
-        .and_then(|value| {
-            dy.checked_mul(dy)
-                .and_then(|other| value.checked_add(other))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let radius = i128::from(width.bits()).div_euclid(2);
-    let radius_squared = radius
-        .checked_mul(radius)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    Ok(distance_squared <= radius_squared)
-}
-
-fn rounded_div_signed(numerator: i128, denominator: i128) -> Result<i128, SkiaError> {
-    let half = denominator / 2;
-    if numerator >= 0 {
-        numerator
-            .checked_add(half)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))
-            .map(|value| value / denominator)
-    } else {
-        (-numerator)
-            .checked_add(half)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))
-            .map(|value| -(value / denominator))
-    }
-}
-
 fn floor_q16(value: i32) -> i64 {
     floor_q16_i64(i64::from(value))
 }
 
-fn floor_q16_i64(value: i64) -> i64 {
+pub(crate) fn floor_q16_i64(value: i64) -> i64 {
     if value >= 0 {
         value >> 16
     } else {
@@ -1312,6 +1184,6 @@ fn ceil_q16(value: i32) -> i64 {
     ceil_q16_i64(i64::from(value))
 }
 
-fn ceil_q16_i64(value: i64) -> i64 {
+pub(crate) fn ceil_q16_i64(value: i64) -> i64 {
     -floor_q16_i64(value.saturating_neg())
 }

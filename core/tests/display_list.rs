@@ -1,4 +1,7 @@
-use skia_core::{Color, DisplayListBuilder, DrawCommand, Paint, Scalar, SkiaErrorCode, Transform};
+use skia_core::{
+    Color, DisplayListBuilder, DrawCommand, Paint, Scalar, SkiaErrorCode, StrokeCap, StrokeJoin,
+    StrokeOptions, Transform,
+};
 #[cfg(feature = "text")]
 use skia_core::{FontId, GlyphId, GlyphRun, PositionedGlyph, TextUnit};
 
@@ -51,6 +54,37 @@ fn stroke_command_rejects_non_positive_width() {
         .expect_err("zero stroke width must fail");
 
     assert_eq!(error.code(), SkiaErrorCode::InvalidGeometry);
+}
+
+#[test]
+fn display_list_owns_explicit_stroke_geometry() {
+    let mut builder = DisplayListBuilder::new(2).expect("valid limits");
+    let path = builder.add_path(empty_path()).expect("store path");
+    let options = StrokeOptions::new(Scalar::from_i32(3).expect("width"))
+        .expect("stroke")
+        .with_cap(StrokeCap::Square)
+        .with_join(StrokeJoin::Bevel)
+        .with_dash_pattern(
+            &[
+                Scalar::from_i32(2).expect("dash"),
+                Scalar::from_i32(1).expect("gap"),
+            ],
+            Scalar::from_i32(1).expect("phase"),
+        )
+        .expect("dash options");
+    let paint = Paint::new(Color::BLACK);
+    builder
+        .stroke_path_with_options(path, options.clone(), paint)
+        .expect("record stroke");
+
+    assert_eq!(
+        builder.finish().commands(),
+        &[DrawCommand::StrokePath {
+            path,
+            options,
+            paint,
+        }]
+    );
 }
 
 #[test]

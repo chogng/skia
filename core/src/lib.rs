@@ -19,6 +19,7 @@ pub use skia_error::{SkiaError, SkiaErrorCode};
 pub use skia_geometry::{Point, Rect, Scalar, Transform};
 pub use skia_path::{
     Angle, ArcDirection, ArcStart, ConicWeight, FillRule, Path, PathBounds, PathBuilder, PathVerb,
+    StrokeCap, StrokeJoin, StrokeOptions,
 };
 #[cfg(feature = "text")]
 pub use skia_text::{
