@@ -4,7 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     FontCollection, FontFace, FontMetrics, ShapedParagraph, TextDecorationMetrics, TextDirection,
-    TextError, TextErrorCode, TextStyleSpan,
+    TextError, TextErrorCode, TextStyleSpan, valid_language_tag,
 };
 
 /// Decoration lines requested for every non-empty line in one text layout.
@@ -209,6 +209,8 @@ pub struct TextLayoutOptions {
     justify_last_line: bool,
     decoration: TextDecoration,
     overflow: TextOverflow,
+    letter_spacing_bits: i32,
+    word_spacing_bits: i32,
 }
 
 impl TextLayoutOptions {
@@ -235,6 +237,8 @@ impl TextLayoutOptions {
             justify_last_line: false,
             decoration: TextDecoration::None,
             overflow: TextOverflow::Error,
+            letter_spacing_bits: 0,
+            word_spacing_bits: 0,
         })
     }
 
@@ -272,6 +276,18 @@ impl TextLayoutOptions {
     /// Selects behavior when text would exceed `max_lines`.
     pub const fn with_overflow(mut self, overflow: TextOverflow) -> Self {
         self.overflow = overflow;
+        self
+    }
+
+    /// Adds signed Q16.16 spacing between adjacent shaping clusters.
+    pub const fn with_letter_spacing(mut self, spacing_bits: i32) -> Self {
+        self.letter_spacing_bits = spacing_bits;
+        self
+    }
+
+    /// Adds signed Q16.16 spacing after interior breakable Unicode spaces.
+    pub const fn with_word_spacing(mut self, spacing_bits: i32) -> Self {
+        self.word_spacing_bits = spacing_bits;
         self
     }
 
@@ -313,6 +329,16 @@ impl TextLayoutOptions {
     /// Returns the configured line-limit overflow behavior.
     pub const fn overflow(self) -> TextOverflow {
         self.overflow
+    }
+
+    /// Returns signed Q16.16 spacing between adjacent shaping clusters.
+    pub const fn letter_spacing_bits(self) -> i32 {
+        self.letter_spacing_bits
+    }
+
+    /// Returns signed Q16.16 spacing after interior breakable Unicode spaces.
+    pub const fn word_spacing_bits(self) -> i32 {
+        self.word_spacing_bits
     }
 }
 
@@ -510,7 +536,30 @@ impl FontCollection {
         font_size_bits: i32,
         options: TextLayoutOptions,
     ) -> Result<TextLayout, TextError> {
-        self.layout_text_impl(text, LayoutStyle::Uniform(font_size_bits), options, None)
+        self.layout_text_impl(
+            text,
+            LayoutStyle::Uniform(font_size_bits),
+            options,
+            None,
+            None,
+        )
+    }
+
+    /// Shapes and greedily wraps UTF-8 with a BCP 47-style OpenType language.
+    pub fn layout_text_with_language(
+        &self,
+        text: &str,
+        font_size_bits: i32,
+        options: TextLayoutOptions,
+        language: &str,
+    ) -> Result<TextLayout, TextError> {
+        self.layout_text_impl(
+            text,
+            LayoutStyle::Uniform(font_size_bits),
+            options,
+            Some(language),
+            None,
+        )
     }
 
     /// Shapes and greedily wraps UTF-8 with grapheme-safe font and size spans.
@@ -524,7 +573,24 @@ impl FontCollection {
         spans: &[TextStyleSpan],
         options: TextLayoutOptions,
     ) -> Result<TextLayout, TextError> {
-        self.layout_text_impl(text, LayoutStyle::Spans(spans), options, None)
+        self.layout_text_impl(text, LayoutStyle::Spans(spans), options, None, None)
+    }
+
+    /// Shapes and wraps styled UTF-8 with a BCP 47-style OpenType language.
+    pub fn layout_styled_text_with_language(
+        &self,
+        text: &str,
+        spans: &[TextStyleSpan],
+        options: TextLayoutOptions,
+        language: &str,
+    ) -> Result<TextLayout, TextError> {
+        self.layout_text_impl(
+            text,
+            LayoutStyle::Spans(spans),
+            options,
+            Some(language),
+            None,
+        )
     }
 
     /// Shapes and wraps UTF-8 with language-specific word-internal breaks.
@@ -547,6 +613,7 @@ impl FontCollection {
             text,
             LayoutStyle::Uniform(font_size_bits),
             options,
+            Some(language),
             Some((language, provider)),
         )
     }
@@ -570,6 +637,7 @@ impl FontCollection {
             text,
             LayoutStyle::Spans(spans),
             options,
+            Some(language),
             Some((language, provider)),
         )
     }
@@ -579,6 +647,7 @@ impl FontCollection {
         text: &'a str,
         style: LayoutStyle<'a>,
         options: TextLayoutOptions,
+        language: Option<&'a str>,
         language_breaks: Option<(&str, &dyn TextBreakProvider)>,
     ) -> Result<TextLayout, TextError> {
         if self.faces().is_empty() {
@@ -597,6 +666,9 @@ impl FontCollection {
             LayoutStyle::Spans(spans) => self.validate_style_spans(text, spans)?,
             LayoutStyle::Uniform(_) => {}
         }
+        if language.is_some_and(|language| !valid_language_tag(language)) {
+            return Err(TextError::new(TextErrorCode::InvalidLanguage));
+        }
 
         let breaks = collect_layout_breaks(text, options, language_breaks)?;
 
@@ -611,6 +683,7 @@ impl FontCollection {
                 }),
             ),
             style,
+            language,
             options,
             lines: Vec::new(),
             top_bits: 0,
@@ -704,6 +777,7 @@ struct LayoutBuilder<'a> {
     text: &'a str,
     bidi: BidiInfo<'a>,
     style: LayoutStyle<'a>,
+    language: Option<&'a str>,
     options: TextLayoutOptions,
     lines: Vec<ShapedLine>,
     top_bits: i32,
@@ -750,6 +824,7 @@ impl LayoutBuilder<'_> {
                     &self.bidi,
                     bidi_paragraph,
                     start..content_end,
+                    self.language,
                 )?,
                 LayoutStyle::Spans(spans) => self.fonts.shape_styled_bidi_line(
                     self.text,
@@ -757,6 +832,7 @@ impl LayoutBuilder<'_> {
                     &self.bidi,
                     bidi_paragraph,
                     start..content_end,
+                    self.language,
                 )?,
             };
             if hyphenated {
@@ -764,8 +840,16 @@ impl LayoutBuilder<'_> {
                     &mut paragraph,
                     u32::try_from(content_end)
                         .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
+                    self.language,
                 )?;
             }
+            paragraph.apply_spacing(
+                self.text,
+                start,
+                content_end,
+                self.options.letter_spacing_bits,
+                self.options.word_spacing_bits,
+            )?;
             Some(paragraph)
         };
         Ok(LineCandidate {
@@ -803,7 +887,7 @@ impl LayoutBuilder<'_> {
         );
 
         for source_end in boundaries.into_iter().rev() {
-            let paragraph = if source_end == candidate.source_start {
+            let mut paragraph = if source_end == candidate.source_start {
                 let (face, font_size_bits) = self.line_style(candidate.source_start)?;
                 self.fonts.shape_ellipsis_marker(
                     font_size_bits,
@@ -811,6 +895,7 @@ impl LayoutBuilder<'_> {
                     self.direction_at(candidate.source_start),
                     u32::try_from(source_end)
                         .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
+                    self.language,
                 )?
             } else {
                 let mut paragraph = self
@@ -821,9 +906,17 @@ impl LayoutBuilder<'_> {
                     &mut paragraph,
                     u32::try_from(source_end)
                         .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
+                    self.language,
                 )?;
                 paragraph
             };
+            paragraph.apply_spacing(
+                self.text,
+                candidate.source_start,
+                source_end,
+                self.options.letter_spacing_bits,
+                self.options.word_spacing_bits,
+            )?;
             if paragraph.advance_x_bits() <= self.options.max_width_bits
                 || source_end == candidate.source_start
             {
@@ -1412,14 +1505,6 @@ fn collect_layout_breaks(
 fn is_grapheme_boundary(text: &str, offset: usize) -> bool {
     text.grapheme_indices(true)
         .any(|(index, _)| index == offset)
-}
-
-fn valid_language_tag(language: &str) -> bool {
-    !language.is_empty()
-        && language.len() <= 255
-        && language
-            .split('-')
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
 
 fn strip_mandatory_ending(text: &str, start: usize, end: usize) -> usize {

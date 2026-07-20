@@ -689,7 +689,17 @@ impl FontFace {
     /// The resulting clusters are UTF-8 byte offsets. Mixed-direction
     /// paragraphs should use [`crate::FontCollection::shape_paragraph`] instead.
     pub fn shape(&self, text: &str, font_size_bits: i32) -> Result<GlyphRun, TextError> {
-        self.shape_segment(text, font_size_bits, None, 0)
+        self.shape_segment(text, font_size_bits, None, 0, None)
+    }
+
+    /// Shapes one segment with a BCP 47-style language for OpenType `locl`.
+    pub fn shape_with_language(
+        &self,
+        text: &str,
+        font_size_bits: i32,
+        language: &str,
+    ) -> Result<GlyphRun, TextError> {
+        self.shape_segment(text, font_size_bits, None, 0, Some(language))
     }
 
     /// Shapes one horizontal UTF-8 segment with an explicit direction.
@@ -699,7 +709,18 @@ impl FontFace {
         font_size_bits: i32,
         direction: TextDirection,
     ) -> Result<GlyphRun, TextError> {
-        self.shape_segment(text, font_size_bits, Some(direction), 0)
+        self.shape_segment(text, font_size_bits, Some(direction), 0, None)
+    }
+
+    /// Shapes one segment with explicit direction and shaping language.
+    pub fn shape_with_direction_and_language(
+        &self,
+        text: &str,
+        font_size_bits: i32,
+        direction: TextDirection,
+        language: &str,
+    ) -> Result<GlyphRun, TextError> {
+        self.shape_segment(text, font_size_bits, Some(direction), 0, Some(language))
     }
 
     pub(crate) fn shape_segment(
@@ -708,6 +729,7 @@ impl FontFace {
         font_size_bits: i32,
         direction: Option<TextDirection>,
         cluster_offset: u32,
+        language: Option<&str>,
     ) -> Result<GlyphRun, TextError> {
         if font_size_bits <= 0 {
             return Err(TextError::new(TextErrorCode::InvalidFontSize));
@@ -717,6 +739,9 @@ impl FontFace {
         }
         if text.len() > self.limits.max_text_bytes {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
+        }
+        if language.is_some_and(|language| !crate::valid_language_tag(language)) {
+            return Err(TextError::new(TextErrorCode::InvalidLanguage));
         }
 
         let mut face = rustybuzz::Face::from_slice(&self.bytes, self.face_index)
@@ -737,6 +762,13 @@ impl FontFace {
                 TextDirection::LeftToRight => rustybuzz::Direction::LeftToRight,
                 TextDirection::RightToLeft => rustybuzz::Direction::RightToLeft,
             });
+        }
+        if let Some(language) = language {
+            buffer.set_language(
+                language
+                    .parse()
+                    .map_err(|_| TextError::new(TextErrorCode::InvalidLanguage))?,
+            );
         }
         let mut features = Vec::new();
         features

@@ -61,6 +61,10 @@ Validated Q16.16 axis coordinates create immutable instances with distinct
 `FontId` values, and consistently affect shaping, metrics, and outlines.
 Immutable feature instances also apply global OpenType values such as `kern=0`
 through every single-run, fallback, bidi, and multiline shaping path.
+BCP 47-style language tags can likewise be supplied to face, paragraph,
+styled, and multiline APIs so language-sensitive OpenType substitutions such
+as `locl` remain consistent through fallback, bidi segmentation, wrapping,
+hyphenation, and ellipses.
 `FontCollection` provides deterministic CSS-like family/style matching,
 performs grapheme-level ordered fallback, and shapes unwrapped or greedily
 wrapped bidi text into positioned visual runs. Styled spans can select a
@@ -73,7 +77,10 @@ physical left/center/right alignment or bidi-aware logical start/end alignment.
 Justified lines preserve shaping output
 and add deterministic per-glyph spacing at interior breakable Unicode spaces,
 including ideographic space while excluding non-breaking spaces. Callers can
-plug language dictionaries into `TextBreakProvider`; the layout engine
+also add signed Q16.16 letter spacing between shaping clusters and word spacing
+after breakable Unicode spaces; wrapping, ellipses, hit testing, and carets all
+use the resulting width without splitting grapheme or shaping clusters.
+Callers can plug language dictionaries into `TextBreakProvider`; the layout engine
 validates UTF-8 grapheme boundaries and supports either glyph-free soft breaks
 or synthetic visible hyphens without consuming source bytes. Layout options
 can also request underline and strike-through lines. Their scaled position and

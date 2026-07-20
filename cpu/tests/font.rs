@@ -316,6 +316,167 @@ fn shaping_feature_instances_propagate_through_paragraph_and_layout() {
 }
 
 #[test]
+fn shaping_language_propagates_through_fallback_bidi_styles_layout_and_markers() {
+    let face = FontFace::from_bytes(
+        FontId::new(145),
+        toy_localized_font(&['-', 'A', '\u{05d0}', '\u{2026}']),
+    )
+    .expect("localized font");
+    assert_eq!(
+        face.shape("A", 10 << 16).expect("default shape").glyphs()[0]
+            .glyph()
+            .value(),
+        1
+    );
+    assert_eq!(
+        face.shape_with_language("A", 10 << 16, "sr")
+            .expect("Serbian shape")
+            .glyphs()[0]
+            .glyph()
+            .value(),
+        2
+    );
+    assert_eq!(
+        face.shape_with_direction_and_language("A", 10 << 16, TextDirection::LeftToRight, "sr",)
+            .expect("directed Serbian shape")
+            .glyphs()[0]
+            .glyph()
+            .value(),
+        2
+    );
+    assert_eq!(
+        face.shape_with_language("A", 10 << 16, "en_US")
+            .expect_err("invalid language tag")
+            .code(),
+        TextErrorCode::InvalidLanguage
+    );
+
+    let mut fallback_fonts = FontCollection::new(FontCollectionLimits::default());
+    fallback_fonts
+        .add_face(FontFace::from_bytes(FontId::new(146), toy_font('B')).expect("primary font"))
+        .expect("add primary font");
+    fallback_fonts
+        .add_face(face)
+        .expect("add localized fallback");
+    let fallback = fallback_fonts
+        .shape_paragraph_with_language("A", 10 << 16, "sr")
+        .expect("localized fallback");
+    assert_eq!(fallback.runs()[0].glyph_run().font(), FontId::new(145));
+    assert_eq!(
+        fallback.runs()[0].glyph_run().glyphs()[0].glyph().value(),
+        2
+    );
+
+    let bidi = fallback_fonts
+        .shape_paragraph_with_direction_and_language(
+            "A\u{05d0}",
+            10 << 16,
+            TextDirection::LeftToRight,
+            "sr",
+        )
+        .expect("localized bidi paragraph");
+    assert_eq!(
+        bidi.runs()
+            .iter()
+            .find(|run| run.source_start() == 0)
+            .expect("Latin run")
+            .glyph_run()
+            .glyphs()[0]
+            .glyph()
+            .value(),
+        2
+    );
+
+    let spans = [
+        TextStyleSpan::new(0, 1, FontId::new(145), 10 << 16).expect("first span"),
+        TextStyleSpan::new(1, 2, FontId::new(145), 12 << 16).expect("second span"),
+    ];
+    let styled = fallback_fonts
+        .shape_styled_paragraph_with_language("AA", &spans, "sr")
+        .expect("localized styled paragraph");
+    assert!(
+        styled
+            .runs()
+            .iter()
+            .flat_map(|run| run.glyph_run().glyphs())
+            .all(|glyph| glyph.glyph().value() == 2)
+    );
+    let styled_layout = fallback_fonts
+        .layout_styled_text_with_language(
+            "AA",
+            &spans,
+            TextLayoutOptions::new(20 << 16).expect("styled options"),
+            "sr",
+        )
+        .expect("localized styled layout");
+    assert!(
+        styled_layout.lines()[0]
+            .paragraph()
+            .expect("styled line")
+            .runs()
+            .iter()
+            .flat_map(|run| run.glyph_run().glyphs())
+            .all(|glyph| glyph.glyph().value() == 2)
+    );
+
+    let ellipsized = fallback_fonts
+        .layout_text_with_language(
+            "AAA",
+            10 << 16,
+            TextLayoutOptions::with_limits(12 << 16, 1, 64)
+                .expect("ellipsis options")
+                .with_overflow(TextOverflow::Ellipsis),
+            "sr",
+        )
+        .expect("localized ellipsis");
+    assert!(ellipsized.lines()[0].ellipsized());
+    assert!(
+        ellipsized.lines()[0]
+            .paragraph()
+            .expect("ellipsis line")
+            .runs()
+            .iter()
+            .flat_map(|run| run.glyph_run().glyphs())
+            .all(|glyph| glyph.glyph().value() == 2)
+    );
+
+    let provider_layout = fallback_fonts
+        .layout_text_with_break_provider(
+            "AA",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("provider options"),
+            "sr",
+            &FixedBreakProvider {
+                language: "sr",
+                opportunities: Vec::new(),
+            },
+        )
+        .expect("provider language also shapes");
+    assert!(
+        provider_layout.lines()[0]
+            .paragraph()
+            .expect("provider line")
+            .runs()[0]
+            .glyph_run()
+            .glyphs()
+            .iter()
+            .all(|glyph| glyph.glyph().value() == 2)
+    );
+    assert_eq!(
+        fallback_fonts
+            .layout_text_with_language(
+                "A",
+                10 << 16,
+                TextLayoutOptions::new(20 << 16).expect("invalid-language options"),
+                "",
+            )
+            .expect_err("empty language tag")
+            .code(),
+        TextErrorCode::InvalidLanguage
+    );
+}
+
+#[test]
 fn styled_paragraphs_select_fonts_sizes_and_grapheme_safe_fallback() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
@@ -1525,6 +1686,187 @@ fn hit_testing_and_carets_resolve_wraps_alignment_bidi_and_spacing() {
 }
 
 #[test]
+fn cluster_spacing_affects_wraps_carets_bidi_justification_and_ellipsis() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(85),
+                toy_font_for(&[' ', 'A', '\u{00a0}', '\u{0301}', '\u{2026}']),
+            )
+            .expect("spacing font"),
+        )
+        .expect("add spacing font");
+
+    let letter_options = TextLayoutOptions::new(100 << 16)
+        .expect("options")
+        .with_letter_spacing(2 << 16);
+    assert_eq!(letter_options.letter_spacing_bits(), 2 << 16);
+    let letters = fonts
+        .layout_text("AAA", 10 << 16, letter_options)
+        .expect("letter spacing");
+    let letter_run = &letters.lines()[0].paragraph().expect("line").runs()[0];
+    assert_eq!(letters.lines()[0].advance_x_bits(), 22 << 16);
+    assert_eq!(letter_run.glyph_offsets_x_bits(), &[0, 2 << 16, 4 << 16]);
+    assert_eq!(
+        letters
+            .caret_for_position(TextPosition::new(1, TextAffinity::Upstream))
+            .expect("upstream spacing caret")
+            .expect("upstream boundary")
+            .x_bits(),
+        6 << 16
+    );
+    assert_eq!(
+        letters
+            .caret_for_position(TextPosition::new(1, TextAffinity::Downstream))
+            .expect("downstream spacing caret")
+            .expect("downstream boundary")
+            .x_bits(),
+        8 << 16
+    );
+
+    let wrapped = fonts
+        .layout_text(
+            "AAAA",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16)
+                .expect("options")
+                .with_letter_spacing(2 << 16),
+        )
+        .expect("spacing-aware wrap");
+    assert_eq!(wrapped.lines().len(), 2);
+    assert_eq!(wrapped.lines()[0].source_end(), 2);
+
+    let combined_options = TextLayoutOptions::new(100 << 16)
+        .expect("options")
+        .with_letter_spacing(1 << 16)
+        .with_word_spacing(4 << 16);
+    assert_eq!(combined_options.word_spacing_bits(), 4 << 16);
+    let combined = fonts
+        .layout_text("A A", 10 << 16, combined_options)
+        .expect("combined spacing");
+    assert_eq!(combined.lines()[0].advance_x_bits(), 24 << 16);
+    assert_eq!(
+        combined.lines()[0].paragraph().expect("line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 1 << 16, 6 << 16]
+    );
+    let non_breaking = fonts
+        .layout_text("A\u{00a0}A", 10 << 16, combined_options)
+        .expect("non-breaking spacing");
+    assert_eq!(non_breaking.lines()[0].advance_x_bits(), 20 << 16);
+    assert_eq!(
+        non_breaking.lines()[0].paragraph().expect("line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 1 << 16, 2 << 16]
+    );
+
+    let grapheme = fonts
+        .layout_text(
+            "A\u{0301}A",
+            10 << 16,
+            TextLayoutOptions::new(100 << 16)
+                .expect("options")
+                .with_letter_spacing(2 << 16),
+        )
+        .expect("grapheme-safe spacing");
+    assert_eq!(
+        grapheme.lines()[0].paragraph().expect("line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 0, 2 << 16]
+    );
+
+    let negative = fonts
+        .layout_text(
+            "AAA",
+            10 << 16,
+            TextLayoutOptions::new(100 << 16)
+                .expect("options")
+                .with_letter_spacing(-(2 << 16)),
+        )
+        .expect("negative spacing");
+    assert_eq!(negative.lines()[0].advance_x_bits(), 14 << 16);
+    assert_eq!(
+        negative.lines()[0].paragraph().expect("line").runs()[0].glyph_offsets_x_bits(),
+        &[0, -(2 << 16), -(4 << 16)]
+    );
+    assert_eq!(
+        fonts
+            .layout_text(
+                "AAA",
+                10 << 16,
+                TextLayoutOptions::new(100 << 16)
+                    .expect("options")
+                    .with_letter_spacing(-(10 << 16)),
+            )
+            .expect_err("spacing must not make advance negative")
+            .code(),
+        TextErrorCode::InvalidLayout
+    );
+
+    let justified = fonts
+        .layout_text(
+            "A A",
+            10 << 16,
+            TextLayoutOptions::new(26 << 16)
+                .expect("options")
+                .with_letter_spacing(1 << 16)
+                .with_word_spacing(2 << 16)
+                .with_alignment(TextAlignment::Justify)
+                .with_justify_last_line(true),
+        )
+        .expect("spacing plus justification");
+    assert_eq!(justified.lines()[0].advance_x_bits(), 26 << 16);
+    assert_eq!(
+        justified.lines()[0].paragraph().expect("line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 1 << 16, 8 << 16]
+    );
+
+    let ellipsized = fonts
+        .layout_text(
+            "AAAAAAA",
+            10 << 16,
+            TextLayoutOptions::with_limits(18 << 16, 2, 128)
+                .expect("options")
+                .with_letter_spacing(2 << 16)
+                .with_overflow(TextOverflow::Ellipsis),
+        )
+        .expect("spacing-aware ellipsis");
+    assert_eq!(ellipsized.lines()[0].source_end(), 2);
+    assert_eq!(ellipsized.lines()[1].source_end(), 3);
+    assert_eq!(ellipsized.lines()[1].advance_x_bits(), 14 << 16);
+
+    let mut rtl_fonts = FontCollection::new(FontCollectionLimits::default());
+    rtl_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(86), toy_font_for(&['\u{05d0}', '\u{05d1}']))
+                .expect("RTL spacing font"),
+        )
+        .expect("add RTL font");
+    let rtl = rtl_fonts
+        .layout_text(
+            "\u{05d0}\u{05d1}",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16)
+                .expect("options")
+                .with_letter_spacing(2 << 16),
+        )
+        .expect("RTL spacing");
+    assert_eq!(rtl.lines()[0].advance_x_bits(), 14 << 16);
+    assert_eq!(
+        rtl.caret_for_position(TextPosition::new(2, TextAffinity::Downstream))
+            .expect("RTL downstream")
+            .expect("RTL downstream caret")
+            .x_bits(),
+        12 << 16
+    );
+    assert_eq!(
+        rtl.caret_for_position(TextPosition::new(2, TextAffinity::Upstream))
+            .expect("RTL upstream")
+            .expect("RTL upstream caret")
+            .x_bits(),
+        14 << 16
+    );
+}
+
+#[test]
 fn justification_expands_interior_spaces_and_controls_the_final_line() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
@@ -1759,6 +2101,31 @@ fn toy_kerned_font(characters: &[char]) -> Vec<u8> {
     build_toy_font(characters, None, false, true)
 }
 
+fn toy_localized_font(characters: &[char]) -> Vec<u8> {
+    let outline = glyf_table();
+    let mut glyf = outline.clone();
+    glyf.extend_from_slice(&outline);
+    let mut hhea = hhea_table();
+    put_u16(&mut hhea, 34, 3);
+    let mut hmtx = hmtx_table();
+    push_u16(&mut hmtx, 600);
+    push_i16(&mut hmtx, 0);
+    let mut loca = loca_table();
+    push_u16(&mut loca, 34);
+    let mut maxp = maxp_table();
+    put_u16(&mut maxp, 4, 3);
+    build_font_from_tables(vec![
+        (*b"cmap", cmap_table(characters)),
+        (*b"glyf", glyf),
+        (*b"GSUB", localized_gsub_table()),
+        (*b"head", head_table()),
+        (*b"hhea", hhea),
+        (*b"hmtx", hmtx),
+        (*b"loca", loca),
+        (*b"maxp", maxp),
+    ])
+}
+
 fn build_toy_font(
     characters: &[char],
     metadata: Option<(&str, FontStyle)>,
@@ -1785,6 +2152,10 @@ fn build_toy_font(
     if kerned {
         tables.push((*b"kern", kern_table()));
     }
+    build_font_from_tables(tables)
+}
+
+fn build_font_from_tables(mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
     tables.sort_unstable_by_key(|(tag, _)| *tag);
     let table_count = u16::try_from(tables.len()).expect("small table count");
     let directory_len = 12 + tables.len() * 16;
@@ -1817,6 +2188,58 @@ fn build_toy_font(
         }
     }
     font
+}
+
+fn localized_gsub_table() -> Vec<u8> {
+    let mut script_list = Vec::new();
+    push_u16(&mut script_list, 1);
+    script_list.extend_from_slice(b"latn");
+    push_u16(&mut script_list, 8);
+    push_u16(&mut script_list, 0);
+    push_u16(&mut script_list, 1);
+    script_list.extend_from_slice(b"SRB ");
+    push_u16(&mut script_list, 10);
+    push_u16(&mut script_list, 0);
+    push_u16(&mut script_list, 0xffff);
+    push_u16(&mut script_list, 1);
+    push_u16(&mut script_list, 0);
+
+    let mut feature_list = Vec::new();
+    push_u16(&mut feature_list, 1);
+    feature_list.extend_from_slice(b"locl");
+    push_u16(&mut feature_list, 8);
+    push_u16(&mut feature_list, 0);
+    push_u16(&mut feature_list, 1);
+    push_u16(&mut feature_list, 0);
+
+    let mut lookup_list = Vec::new();
+    push_u16(&mut lookup_list, 1);
+    push_u16(&mut lookup_list, 4);
+    push_u16(&mut lookup_list, 1);
+    push_u16(&mut lookup_list, 0);
+    push_u16(&mut lookup_list, 1);
+    push_u16(&mut lookup_list, 8);
+    push_u16(&mut lookup_list, 1);
+    push_u16(&mut lookup_list, 6);
+    push_i16(&mut lookup_list, 1);
+    push_u16(&mut lookup_list, 1);
+    push_u16(&mut lookup_list, 1);
+    push_u16(&mut lookup_list, 1);
+
+    let script_offset = 10_u16;
+    let feature_offset =
+        script_offset + u16::try_from(script_list.len()).expect("small script list");
+    let lookup_offset =
+        feature_offset + u16::try_from(feature_list.len()).expect("small feature list");
+    let mut table = Vec::new();
+    push_u32(&mut table, 0x0001_0000);
+    push_u16(&mut table, script_offset);
+    push_u16(&mut table, feature_offset);
+    push_u16(&mut table, lookup_offset);
+    table.extend(script_list);
+    table.extend(feature_list);
+    table.extend(lookup_list);
+    table
 }
 
 fn name_table(family: &str) -> Vec<u8> {

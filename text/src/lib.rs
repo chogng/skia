@@ -12,6 +12,14 @@ mod collection;
 mod font;
 mod layout;
 
+pub(crate) fn valid_language_tag(language: &str) -> bool {
+    !language.is_empty()
+        && language.len() <= 255
+        && language
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+}
+
 use std::fmt;
 
 pub use collection::{

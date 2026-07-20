@@ -175,6 +175,7 @@ impl ShapedRun {
 pub struct ShapedParagraph {
     runs: Vec<ShapedRun>,
     advance_x_bits: i32,
+    spacing_added_bits: i32,
     base_direction: TextDirection,
     metrics: FontMetrics,
 }
@@ -198,6 +199,96 @@ impl ShapedParagraph {
     /// Returns maximum baseline metrics across fonts used by the paragraph.
     pub const fn metrics(&self) -> FontMetrics {
         self.metrics
+    }
+
+    pub(crate) fn apply_spacing(
+        &mut self,
+        text: &str,
+        source_start: usize,
+        source_end: usize,
+        letter_spacing_bits: i32,
+        word_spacing_bits: i32,
+    ) -> Result<(), TextError> {
+        if source_start > source_end
+            || source_end > text.len()
+            || !text.is_char_boundary(source_start)
+            || !text.is_char_boundary(source_end)
+        {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        let raw_advance_bits = self
+            .advance_x_bits
+            .checked_sub(self.spacing_added_bits)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        let glyph_count = self.runs.iter().try_fold(0_usize, |total, shaped| {
+            if shaped.glyph_offsets_x_bits.len() != shaped.run.glyphs().len() {
+                return Err(TextError::new(TextErrorCode::InvalidLayout));
+            }
+            total
+                .checked_add(shaped.run.glyphs().len())
+                .ok_or(TextError::new(TextErrorCode::NumericOverflow))
+        })?;
+        let mut clusters = Vec::new();
+        clusters
+            .try_reserve(glyph_count)
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        for shaped in &self.runs {
+            let mut previous_cluster = None;
+            for glyph in shaped.run.glyphs() {
+                if previous_cluster != Some(glyph.cluster()) {
+                    clusters.push(glyph.cluster());
+                    previous_cluster = Some(glyph.cluster());
+                }
+            }
+        }
+        let mut total_spacing_bits = 0_i32;
+        for &cluster in clusters.iter().take(clusters.len().saturating_sub(1)) {
+            let word_increment = spacing_character(text, source_start, source_end, cluster)
+                .filter(|character| is_expandable_justification_space(*character))
+                .map_or(0, |_| word_spacing_bits);
+            total_spacing_bits = total_spacing_bits
+                .checked_add(letter_spacing_bits)
+                .and_then(|value| value.checked_add(word_increment))
+                .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        }
+        let final_advance_bits = raw_advance_bits
+            .checked_add(total_spacing_bits)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        if final_advance_bits < 0 {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+
+        let mut cumulative_spacing_bits = 0_i32;
+        let mut cluster_index = 0_usize;
+        for shaped in &mut self.runs {
+            let glyphs = shaped.run.glyphs();
+            let mut first = 0_usize;
+            while first < glyphs.len() {
+                let cluster = glyphs[first].cluster();
+                let mut end = first + 1;
+                while end < glyphs.len() && glyphs[end].cluster() == cluster {
+                    end += 1;
+                }
+                shaped.glyph_offsets_x_bits[first..end].fill(cumulative_spacing_bits);
+                cluster_index += 1;
+                if cluster_index < clusters.len() {
+                    let word_increment = spacing_character(text, source_start, source_end, cluster)
+                        .filter(|character| is_expandable_justification_space(*character))
+                        .map_or(0, |_| word_spacing_bits);
+                    cumulative_spacing_bits = cumulative_spacing_bits
+                        .checked_add(letter_spacing_bits)
+                        .and_then(|value| value.checked_add(word_increment))
+                        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+                }
+                first = end;
+            }
+        }
+        if cumulative_spacing_bits != total_spacing_bits {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        self.advance_x_bits = final_advance_bits;
+        self.spacing_added_bits = total_spacing_bits;
+        Ok(())
     }
 
     pub(crate) fn justify_expandable_spaces(
@@ -259,43 +350,78 @@ impl ShapedParagraph {
             .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?;
         let per_slot = extra_bits / slot_count;
         let mut remainder = extra_bits % slot_count;
-        let mut cumulative_shift = 0_i32;
         let mut expanded = Vec::new();
         expanded
             .try_reserve_exact(expansion_clusters.len())
             .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
         expanded.resize(expansion_clusters.len(), false);
 
-        for run in &mut self.runs {
+        for run in &self.runs {
             if run.glyph_offsets_x_bits.len() != run.run.glyphs().len() {
                 return Err(TextError::new(TextErrorCode::InvalidLayout));
             }
-            for (glyph, offset) in run.run.glyphs().iter().zip(&mut run.glyph_offsets_x_bits) {
-                *offset = cumulative_shift;
-                if let Ok(slot) = expansion_clusters.binary_search(&glyph.cluster())
-                    && !expanded[slot]
-                {
+            for glyph in run.run.glyphs() {
+                if let Ok(slot) = expansion_clusters.binary_search(&glyph.cluster()) {
                     expanded[slot] = true;
-                    let increment = per_slot + i32::from(remainder > 0);
-                    remainder = remainder.saturating_sub(1);
-                    cumulative_shift = cumulative_shift
-                        .checked_add(increment)
-                        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
                 }
             }
         }
         if expanded.iter().any(|expanded| !expanded) {
-            for run in &mut self.runs {
-                run.glyph_offsets_x_bits.fill(0);
-            }
             return Ok(false);
         }
-        if cumulative_shift != extra_bits {
+        if self.runs.iter().any(|run| {
+            run.glyph_offsets_x_bits
+                .iter()
+                .any(|offset| offset.checked_add(extra_bits).is_none())
+        }) {
+            return Err(TextError::new(TextErrorCode::NumericOverflow));
+        }
+
+        let mut cumulative_shift = 0_i32;
+        for run in &mut self.runs {
+            let glyphs = run.run.glyphs();
+            let mut first = 0_usize;
+            while first < glyphs.len() {
+                let cluster = glyphs[first].cluster();
+                let mut end = first + 1;
+                while end < glyphs.len() && glyphs[end].cluster() == cluster {
+                    end += 1;
+                }
+                for offset in &mut run.glyph_offsets_x_bits[first..end] {
+                    *offset += cumulative_shift;
+                }
+                if expansion_clusters.binary_search(&cluster).is_ok() {
+                    let consumes_remainder = remainder > 0;
+                    let increment = per_slot + i32::from(consumes_remainder);
+                    if consumes_remainder {
+                        remainder -= 1;
+                    }
+                    cumulative_shift = cumulative_shift
+                        .checked_add(increment)
+                        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+                }
+                first = end;
+            }
+        }
+        if cumulative_shift != extra_bits || remainder != 0 {
             return Err(TextError::new(TextErrorCode::InvalidLayout));
         }
         self.advance_x_bits = target_advance_bits;
         Ok(true)
     }
+}
+
+fn spacing_character(
+    text: &str,
+    source_start: usize,
+    source_end: usize,
+    cluster: u32,
+) -> Option<char> {
+    let cluster = usize::try_from(cluster).ok()?;
+    if cluster < source_start || cluster >= source_end || !text.is_char_boundary(cluster) {
+        return None;
+    }
+    text[cluster..source_end].chars().next()
 }
 
 const fn is_expandable_justification_space(character: char) -> bool {
@@ -386,7 +512,17 @@ impl FontCollection {
         text: &str,
         font_size_bits: i32,
     ) -> Result<ShapedParagraph, TextError> {
-        self.shape_paragraph_impl(text, font_size_bits, None)
+        self.shape_paragraph_impl(text, font_size_bits, None, None)
+    }
+
+    /// Shapes one paragraph with a BCP 47-style OpenType language.
+    pub fn shape_paragraph_with_language(
+        &self,
+        text: &str,
+        font_size_bits: i32,
+        language: &str,
+    ) -> Result<ShapedParagraph, TextError> {
+        self.shape_paragraph_impl(text, font_size_bits, None, Some(language))
     }
 
     /// Shapes one unwrapped paragraph with an explicit base direction.
@@ -396,7 +532,18 @@ impl FontCollection {
         font_size_bits: i32,
         base_direction: TextDirection,
     ) -> Result<ShapedParagraph, TextError> {
-        self.shape_paragraph_impl(text, font_size_bits, Some(base_direction))
+        self.shape_paragraph_impl(text, font_size_bits, Some(base_direction), None)
+    }
+
+    /// Shapes one paragraph with explicit base direction and language.
+    pub fn shape_paragraph_with_direction_and_language(
+        &self,
+        text: &str,
+        font_size_bits: i32,
+        base_direction: TextDirection,
+        language: &str,
+    ) -> Result<ShapedParagraph, TextError> {
+        self.shape_paragraph_impl(text, font_size_bits, Some(base_direction), Some(language))
     }
 
     /// Shapes one styled, unwrapped paragraph with automatic base direction.
@@ -409,7 +556,17 @@ impl FontCollection {
         text: &str,
         spans: &[TextStyleSpan],
     ) -> Result<ShapedParagraph, TextError> {
-        self.shape_styled_paragraph_impl(text, spans, None)
+        self.shape_styled_paragraph_impl(text, spans, None, None)
+    }
+
+    /// Shapes one styled paragraph with a BCP 47-style OpenType language.
+    pub fn shape_styled_paragraph_with_language(
+        &self,
+        text: &str,
+        spans: &[TextStyleSpan],
+        language: &str,
+    ) -> Result<ShapedParagraph, TextError> {
+        self.shape_styled_paragraph_impl(text, spans, None, Some(language))
     }
 
     /// Shapes one styled, unwrapped paragraph with an explicit base direction.
@@ -419,7 +576,18 @@ impl FontCollection {
         spans: &[TextStyleSpan],
         base_direction: TextDirection,
     ) -> Result<ShapedParagraph, TextError> {
-        self.shape_styled_paragraph_impl(text, spans, Some(base_direction))
+        self.shape_styled_paragraph_impl(text, spans, Some(base_direction), None)
+    }
+
+    /// Shapes one styled paragraph with explicit base direction and language.
+    pub fn shape_styled_paragraph_with_direction_and_language(
+        &self,
+        text: &str,
+        spans: &[TextStyleSpan],
+        base_direction: TextDirection,
+        language: &str,
+    ) -> Result<ShapedParagraph, TextError> {
+        self.shape_styled_paragraph_impl(text, spans, Some(base_direction), Some(language))
     }
 
     pub(crate) fn shape_bidi_line(
@@ -429,6 +597,7 @@ impl FontCollection {
         bidi: &BidiInfo<'_>,
         paragraph: &ParagraphInfo,
         line: std::ops::Range<usize>,
+        language: Option<&str>,
     ) -> Result<ShapedParagraph, TextError> {
         if line.is_empty() || line.start < paragraph.range.start || line.end > paragraph.range.end {
             return Err(TextError::new(TextErrorCode::InvalidLayout));
@@ -440,6 +609,7 @@ impl FontCollection {
             paragraph,
             line,
             0,
+            language,
         )
     }
 
@@ -450,27 +620,38 @@ impl FontCollection {
         bidi: &BidiInfo<'_>,
         paragraph: &ParagraphInfo,
         line: std::ops::Range<usize>,
+        language: Option<&str>,
     ) -> Result<ShapedParagraph, TextError> {
         if line.is_empty() || line.start < paragraph.range.start || line.end > paragraph.range.end {
             return Err(TextError::new(TextErrorCode::InvalidLayout));
         }
-        self.shape_bidi_range(text, ParagraphStyle::Spans(spans), bidi, paragraph, line, 0)
+        self.shape_bidi_range(
+            text,
+            ParagraphStyle::Spans(spans),
+            bidi,
+            paragraph,
+            line,
+            0,
+            language,
+        )
     }
 
     pub(crate) fn append_discretionary_hyphen(
         &self,
         paragraph: &mut ShapedParagraph,
         source_offset: u32,
+        language: Option<&str>,
     ) -> Result<(), TextError> {
-        self.append_synthetic_marker(paragraph, source_offset, &["\u{2010}", "-"])
+        self.append_synthetic_marker(paragraph, source_offset, &["\u{2010}", "-"], language)
     }
 
     pub(crate) fn append_ellipsis(
         &self,
         paragraph: &mut ShapedParagraph,
         source_offset: u32,
+        language: Option<&str>,
     ) -> Result<(), TextError> {
-        self.append_synthetic_marker(paragraph, source_offset, &["\u{2026}", "..."])
+        self.append_synthetic_marker(paragraph, source_offset, &["\u{2026}", "..."], language)
     }
 
     pub(crate) fn shape_ellipsis_marker(
@@ -479,6 +660,7 @@ impl FontCollection {
         preferred_font: FontId,
         direction: TextDirection,
         source_offset: u32,
+        language: Option<&str>,
     ) -> Result<ShapedParagraph, TextError> {
         let preferred_face = self
             .faces
@@ -488,7 +670,13 @@ impl FontCollection {
         let (face_index, marker) =
             self.select_synthetic_marker(&["\u{2026}", "..."], preferred_face)?;
         let face = &self.faces[face_index];
-        let run = face.shape_segment(marker, font_size_bits, Some(direction), source_offset)?;
+        let run = face.shape_segment(
+            marker,
+            font_size_bits,
+            Some(direction),
+            source_offset,
+            language,
+        )?;
         if run.glyphs().len() > self.limits.max_glyphs {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
         }
@@ -512,6 +700,7 @@ impl FontCollection {
         Ok(ShapedParagraph {
             runs,
             advance_x_bits,
+            spacing_added_bits: 0,
             base_direction: direction,
             metrics: face.metrics(font_size_bits)?,
         })
@@ -522,6 +711,7 @@ impl FontCollection {
         paragraph: &mut ShapedParagraph,
         source_offset: u32,
         markers: &[&str],
+        language: Option<&str>,
     ) -> Result<(), TextError> {
         if paragraph.runs.len() == self.limits.max_runs {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
@@ -559,6 +749,7 @@ impl FontCollection {
             font_size_bits,
             Some(marker_direction),
             source_offset,
+            language,
         )?;
         let glyph_count = paragraph
             .runs
@@ -641,6 +832,7 @@ impl FontCollection {
         text: &str,
         font_size_bits: i32,
         base_direction: Option<TextDirection>,
+        language: Option<&str>,
     ) -> Result<ShapedParagraph, TextError> {
         if self.faces.is_empty() {
             return Err(TextError::new(TextErrorCode::EmptyFontCollection));
@@ -653,6 +845,9 @@ impl FontCollection {
         }
         if text.len() > self.limits.max_text_bytes || text.len() > u32::MAX as usize {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
+        }
+        if language.is_some_and(|language| !crate::valid_language_tag(language)) {
+            return Err(TextError::new(TextErrorCode::InvalidLanguage));
         }
 
         let default_level = base_direction.map(direction_level);
@@ -668,6 +863,7 @@ impl FontCollection {
             paragraph,
             paragraph.range.clone(),
             0,
+            language,
         )
     }
 
@@ -676,6 +872,7 @@ impl FontCollection {
         text: &str,
         spans: &[TextStyleSpan],
         base_direction: Option<TextDirection>,
+        language: Option<&str>,
     ) -> Result<ShapedParagraph, TextError> {
         if self.faces.is_empty() {
             return Err(TextError::new(TextErrorCode::EmptyFontCollection));
@@ -685,6 +882,9 @@ impl FontCollection {
         }
         if text.len() > self.limits.max_text_bytes || text.len() > u32::MAX as usize {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
+        }
+        if language.is_some_and(|language| !crate::valid_language_tag(language)) {
+            return Err(TextError::new(TextErrorCode::InvalidLanguage));
         }
         self.validate_style_spans(text, spans)?;
         let bidi = BidiInfo::new(text, base_direction.map(direction_level));
@@ -699,6 +899,7 @@ impl FontCollection {
             paragraph,
             paragraph.range.clone(),
             0,
+            language,
         )
     }
 
@@ -710,6 +911,7 @@ impl FontCollection {
         paragraph: &ParagraphInfo,
         line: std::ops::Range<usize>,
         source_offset: u32,
+        language: Option<&str>,
     ) -> Result<ShapedParagraph, TextError> {
         let resolved_base = level_direction(paragraph.level);
         let (levels, visual_runs) = bidi.visual_runs(paragraph, line);
@@ -756,6 +958,7 @@ impl FontCollection {
                 segment.font_size_bits,
                 Some(segment.direction),
                 source_start,
+                language,
             )?;
             glyph_count = glyph_count
                 .checked_add(run.glyphs().len())
@@ -789,6 +992,7 @@ impl FontCollection {
         Ok(ShapedParagraph {
             runs,
             advance_x_bits: origin_x_bits,
+            spacing_added_bits: 0,
             base_direction: resolved_base,
             metrics: FontMetrics::from_bits(ascent_bits, descent_bits, line_gap_bits),
         })
