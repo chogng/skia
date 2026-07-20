@@ -8,7 +8,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod font;
+
 use std::fmt;
+
+pub use font::{FontFace, FontLimits};
 
 /// Stable machine-readable text-resource failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -17,10 +21,16 @@ pub enum TextErrorCode {
     NumericOverflow,
     /// A glyph run has no glyphs.
     EmptyGlyphRun,
+    /// Text supplied to the shaper is empty.
+    EmptyText,
     /// A font size is zero or negative.
     InvalidFontSize,
     /// A font's units-per-em value is zero.
     InvalidUnitsPerEm,
+    /// Font bytes are malformed or omit required tables.
+    InvalidFontData,
+    /// A font-collection face index is out of bounds.
+    InvalidFaceIndex,
     /// Glyph outline segments do not form valid contours.
     InvalidOutline,
     /// A resource ceiling was reached.
@@ -104,10 +114,9 @@ impl TextUnit {
 
     /// Creates an exact whole-number text coordinate.
     pub fn from_i32(value: i32) -> Result<Self, TextError> {
-        value
-            .checked_shl(6)
+        i32::try_from(i64::from(value) * 64)
             .map(Self)
-            .ok_or(TextError::new(TextErrorCode::ResourceLimit))
+            .map_err(|_| TextError::new(TextErrorCode::NumericOverflow))
     }
 
     /// Creates a text coordinate from exact Q26.6 storage.
@@ -125,6 +134,7 @@ impl TextUnit {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PositionedGlyph {
     glyph: GlyphId,
+    cluster: u32,
     x: TextUnit,
     y: TextUnit,
     advance_x: TextUnit,
@@ -142,6 +152,26 @@ impl PositionedGlyph {
     ) -> Self {
         Self {
             glyph,
+            cluster: 0,
+            x,
+            y,
+            advance_x,
+            advance_y,
+        }
+    }
+
+    /// Creates one positioned glyph with its source UTF-8 cluster offset.
+    pub const fn with_cluster(
+        glyph: GlyphId,
+        cluster: u32,
+        x: TextUnit,
+        y: TextUnit,
+        advance_x: TextUnit,
+        advance_y: TextUnit,
+    ) -> Self {
+        Self {
+            glyph,
+            cluster,
             x,
             y,
             advance_x,
@@ -152,6 +182,11 @@ impl PositionedGlyph {
     /// Returns the font-local glyph index.
     pub const fn glyph(self) -> GlyphId {
         self.glyph
+    }
+
+    /// Returns the byte offset of this glyph's source grapheme cluster.
+    pub const fn cluster(self) -> u32 {
+        self.cluster
     }
 
     /// Returns the glyph's shaped horizontal position.

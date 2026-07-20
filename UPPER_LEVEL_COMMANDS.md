@@ -52,6 +52,27 @@ progressive、Balanced 的版本化网页输出策略。WebP 当前只能使用
 `ImageCodec` 是唯一的 PNG/JPEG/WebP 文件入口；旧的 `EncodedImageFormat` 和裸 `Image` encode
 接口已移除。
 
+### 字体与文字输入
+
+上层持有 TrueType、OpenType 或字体集合的编码字节时，通过
+`FontFace::from_bytes(FontId::new(...), bytes)` 加载单字体文件的第 0 个 face；字体集合或
+不可信输入使用 `FontFace::from_bytes_with_limits`，显式提供 face index 和 `FontLimits`。
+`FontId` 由上层资源管理器稳定分配，不能使用平台字体句柄。
+
+对已经完成 bidi 分段和 fallback 选字的单个 UTF-8 segment，调用
+`face.shape(text, font_size_bits)`。该方法会自动推断 segment 的书写方向和 script，并通过
+OpenType/AAT shaping 生成带 UTF-8 cluster、字形位置和 advance 的 `GlyphRun`。随后可直接调用
+`Canvas::draw_glyph_run(&run, &face, paint)`；录制 DisplayList 时则先用 `add_glyph_run`
+登记并记录 `draw_glyph_run`，CPU 回放时把同一 `FontFace` 作为 `GlyphOutlineProvider`。
+
+`FontFace` 内部使用纯 Rust `rustybuzz` 完成 shaping，并通过其 `ttf-parser` 解析矢量轮廓；
+字体字节由 face 自身不可变持有。轮廓的字体坐标会转换为 canvas 向下为正的坐标，再复用普通
+path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 advance，但绘制时不产生路径。
+
+这一入口只负责**单段 shaping 和轮廓解析**，不负责段落级 bidi 重排、字体发现、字体族/字重
+匹配、跨字体 fallback、换行、对齐或文本装饰。上述工作属于待实现的上层文本布局模块；
+混合方向段落不能整体交给 `FontFace::shape` 后期待其完成段落重排。
+
 ## 先看结论
 
 | 能力 | CPU `Canvas`（即时执行） | `DisplayListBuilder`（录制后由 CPU 回放） | `GpuCommandEncoder`（录制后提交后端） |
@@ -64,7 +85,7 @@ progressive、Balanced 的版本化网页输出策略。WebP 当前只能使用
 | 填充路径 | `fill_path` | `fill_path` | `fill_path` |
 | 描边路径 | `stroke_path` | `stroke_path` | **无** |
 | 绘制位图 | `draw_image` | `draw_image` | `draw_image` |
-| 绘制文字 | `draw_glyph_run` | `draw_glyph_run` | **无** |
+| 绘制文字 | `draw_glyph_run`；`FontFace::shape` 可从 UTF-8 生成 run | `draw_glyph_run` | **无** |
 | 当前实际硬件后端 | CPU 可用 | CPU 可用 | Metal 目前仅支持 `clear` |
 
 因此，`Canvas` 是现阶段下层命令最完整、也是语义参考实现；`DisplayList` 适合由上层
@@ -111,7 +132,7 @@ progressive、Balanced 的版本化网页输出策略。WebP 当前只能使用
 | `fill_path(path, rule, paint)` | 按 `EvenOdd` 或 `NonZero` 填充路径。 | 二、三次贝塞尔以固定步数展平；开放轮廓在填充时会隐式闭合。 |
 | `stroke_path(path, width, paint)` | 描边路径。 | 宽度必须为正；固定步数曲线展平；只有**圆头、圆角**，没有 butt/square cap、miter/bevel join、虚线或描边对齐选项。 |
 | `draw_image(image, destination, opacity, blend_mode)` | 绘制 RGBA8 图片到目标矩形。 | 最近邻采样；`opacity` 只乘源 alpha；旋转或错切变换被拒绝，尚无逆变换采样和滤镜。 |
-| `draw_glyph_run(run, provider, paint)` | 根据字形轮廓填充一段已整形文字。 | 调用方负责字体查找、Unicode shaping 与 fallback；缺失字形会跳过；轮廓经与普通路径相同的填充管线绘制。 |
+| `draw_glyph_run(run, provider, paint)` | 根据字形轮廓填充一段已整形文字。 | `FontFace` 可提供单字体 shaping 和轮廓；上层仍负责 bidi 分段、字体发现与 fallback；缺失字形会跳过；轮廓经与普通路径相同的填充管线绘制。 |
 
 ## 2. DisplayList：下层可移植 CPU 命令表
 
@@ -194,11 +215,13 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 3. Metal 尚未实现任何非清屏命令；
 4. 裁剪仍只有矩形，图片仍是 RGBA8；
 5. 图片不支持非轴对齐变换/过滤，描边样式也只有圆头圆角；
-6. 文本层只消费调用方已完成整形的 `GlyphRun`，不提供字体解析、fallback 或 shaping；
+6. 文本层已有内存字体解析和单段 shaping，但仍没有字体发现、段落 bidi、跨字体 fallback、
+   换行与排版；
 7. 路径的几何布尔运算、stroke-to-path 和 path effects 尚未暴露；它们不能由像素混合模式替代。
 
 源码入口：Geometry 在 `geometry/src/lib.rs`，Path 在 `path/src/lib.rs`，CPU Canvas 在
-`cpu/src/canvas.rs`，DisplayList 在 `core/src/display_list.rs`，GPU 命令层在
+`cpu/src/canvas.rs`，字体加载与 shaping 在 `text/src/font.rs`，DisplayList 在
+`core/src/display_list.rs`，GPU 命令层在
 `gpu/src/lib.rs`，Metal 后端在 `gpu/metal/src/lib.rs`。
 
 ## Rust 工具链维护
@@ -226,4 +249,10 @@ cargo test --workspace --all-features
 
 ```sh
 cargo test --test codec_api
+```
+
+只验证字体加载、UTF-8 shaping、轮廓解析和 CPU 文字绘制链路时，运行：
+
+```sh
+cargo test -p skia-text -p skia-core -p skia-cpu --tests
 ```

@@ -8,14 +8,16 @@
 #![deny(missing_docs)]
 
 pub use skia_codec::{
-    CodecError, CodecErrorCode, CodecLimits, EncodeFormat, EncodeLimits, EncodeOptions,
-    EncodeReport, EncodedFormat, EncodedImage, ImageAsset, ImageCodec, ImageMetadata,
-    JpegAlphaHandling, JpegOptimization, JpegOptions, JpegScan, JpegSubsampling, MetadataPolicy,
-    PngCompression, PngFilter, PngOptions, WebPMode, WebPOptions,
+    AnimatedImageAsset, AnimationBlend, AnimationDisposal, AnimationFrame, AnimationLimits,
+    AnimationLoop, CodecError, CodecErrorCode, CodecLimits, EncodeFormat, EncodeLimits,
+    EncodeOptions, EncodeReport, EncodedFormat, EncodedImage, FrameDuration, ImageAsset,
+    ImageCodec, ImageMetadata, JpegAlphaHandling, JpegOptimization, JpegOptions, JpegScan,
+    JpegSubsampling, MetadataPolicy, PngCompression, PngFilter, PngOptions, WebPMode, WebPOptions,
 };
 pub use skia_core::{
-    BlendMode, Color, FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint,
-    OutlineSegment, Paint, PositionedGlyph, TextError, TextErrorCode, TextUnit,
+    BlendMode, Color, FontFace, FontId, FontLimits, GlyphId, GlyphOutline, GlyphOutlineProvider,
+    GlyphRun, OutlinePoint, OutlineSegment, Paint, PositionedGlyph, TextError, TextErrorCode,
+    TextUnit,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};

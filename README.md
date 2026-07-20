@@ -12,6 +12,7 @@ flowchart LR
   other["Other library adapters"] --> api
   api --> geometry["Geometry"]
   api --> path["Path"]
+  api --> text["Font loading and shaping"]
   api --> image["Image resources"]
   api --> codec["Image codecs"]
   api --> core["Skia core semantics"]
@@ -22,8 +23,8 @@ flowchart LR
 ## Dependency rule
 
 - `skia/` (`skia`) is the only public graphics API for consumers.
-  `skia/error`, `skia/geometry`, `skia/path`, `skia/core`, `skia/image`, `skia/codec`, and
-  executor crates are implementation crates;
+  `skia/error`, `skia/geometry`, `skia/path`, `skia/text`, `skia/core`, `skia/image`,
+  `skia/codec`, and executor crates are implementation crates;
   consumers must not depend on them directly. Skia crates may depend on each
   other, but never on a caller-specific document crate or semantic type.
 - The facade exports an explicit, stable set of canvas, geometry, paint, path,
@@ -48,6 +49,18 @@ flowchart LR
 - A Skia public type, method, error, or command must not mention caller-specific
   objects, operators, page state, or policy. Perform such translation in the
   caller's adapter.
+
+## Text implementation boundary
+
+`skia/text` owns portable font identities, shaped glyph runs, source UTF-8
+clusters, and validated vector outlines. `FontFace` owns in-memory
+TrueType/OpenType data and provides segment-level shaping plus outline
+resolution; CPU drawing reuses the ordinary path-fill pipeline.
+
+Paragraph bidi segmentation and reordering, system-font discovery, family and
+style matching, cross-font fallback, line breaking, alignment, and decoration
+remain upper text-layout responsibilities. GPU glyph commands, glyph atlases,
+hinting, and color-font painting are not implemented yet.
 
 ## Geometry and transforms
 

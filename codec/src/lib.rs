@@ -31,8 +31,14 @@ pub enum CodecErrorCode {
     ImageTooLarge,
     /// The encoded bytes do not identify a supported image format.
     UnsupportedFormat,
+    /// A still image was supplied where an animation was required.
+    NotAnimated,
     /// A supported encoded image could not be decoded.
     DecodeFailed,
+    /// Animation dimensions, timing, frame count, or frame placement are invalid.
+    InvalidAnimation,
+    /// The decoded animation exceeds its configured frame or aggregate byte ceiling.
+    AnimationTooLarge,
     /// A supplied metadata payload is malformed for this API.
     InvalidMetadata,
     /// A PNG Deflate compression level is outside the inclusive range 0 through 9.
@@ -187,6 +193,292 @@ impl ImageAsset {
     /// Borrows optional format metadata.
     pub const fn metadata(&self) -> &ImageMetadata {
         &self.metadata
+    }
+}
+
+/// Number of times an animation sequence is played.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AnimationLoop {
+    /// Repeat indefinitely.
+    Infinite,
+    /// Play the complete sequence the supplied non-zero number of times.
+    Finite(u32),
+}
+
+/// How a frame is combined with pixels already present on its canvas region.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AnimationBlend {
+    /// Replace the destination region with the frame pixels.
+    Source,
+    /// Alpha-composite the frame over the destination region.
+    Over,
+}
+
+/// How the canvas region is changed after a frame's display duration.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AnimationDisposal {
+    /// Keep the displayed pixels for the next frame.
+    Keep,
+    /// Clear the frame region to the animation background.
+    Background,
+    /// Restore the frame region to its state before the frame.
+    Previous,
+}
+
+/// Exact rational animation-frame duration in milliseconds.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FrameDuration {
+    numerator_ms: u32,
+    denominator: u32,
+}
+
+impl FrameDuration {
+    /// Creates an exact rational millisecond duration with a non-zero denominator.
+    pub fn new(numerator_ms: u32, denominator: u32) -> Result<Self, CodecError> {
+        if denominator == 0 {
+            return Err(CodecError::new(CodecErrorCode::InvalidAnimation));
+        }
+        Ok(Self {
+            numerator_ms,
+            denominator,
+        })
+    }
+
+    /// Creates an integer millisecond duration.
+    pub const fn from_millis(milliseconds: u32) -> Self {
+        Self {
+            numerator_ms: milliseconds,
+            denominator: 1,
+        }
+    }
+
+    /// Returns the numerator of the duration in milliseconds.
+    pub const fn numerator_ms(self) -> u32 {
+        self.numerator_ms
+    }
+
+    /// Returns the non-zero denominator of the duration in milliseconds.
+    pub const fn denominator(self) -> u32 {
+        self.denominator
+    }
+}
+
+/// One animation frame and its placement and playback semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnimationFrame {
+    image: Image,
+    duration: FrameDuration,
+    x: u32,
+    y: u32,
+    blend: AnimationBlend,
+    disposal: AnimationDisposal,
+}
+
+impl AnimationFrame {
+    /// Creates a full-image frame at the canvas origin.
+    pub const fn new(image: Image, duration: FrameDuration) -> Self {
+        Self {
+            image,
+            duration,
+            x: 0,
+            y: 0,
+            blend: AnimationBlend::Source,
+            disposal: AnimationDisposal::Keep,
+        }
+    }
+
+    /// Sets the frame's top-left canvas position.
+    pub const fn with_offset(mut self, x: u32, y: u32) -> Self {
+        self.x = x;
+        self.y = y;
+        self
+    }
+
+    /// Sets how the frame is combined with the current canvas.
+    pub const fn with_blend(mut self, blend: AnimationBlend) -> Self {
+        self.blend = blend;
+        self
+    }
+
+    /// Sets the post-display disposal operation.
+    pub const fn with_disposal(mut self, disposal: AnimationDisposal) -> Self {
+        self.disposal = disposal;
+        self
+    }
+
+    /// Borrows the frame pixels.
+    pub const fn image(&self) -> &Image {
+        &self.image
+    }
+
+    /// Returns the frame duration.
+    pub const fn duration(&self) -> FrameDuration {
+        self.duration
+    }
+
+    /// Returns the horizontal canvas offset.
+    pub const fn x(&self) -> u32 {
+        self.x
+    }
+
+    /// Returns the vertical canvas offset.
+    pub const fn y(&self) -> u32 {
+        self.y
+    }
+
+    /// Returns the frame blend operation.
+    pub const fn blend(&self) -> AnimationBlend {
+        self.blend
+    }
+
+    /// Returns the frame disposal operation.
+    pub const fn disposal(&self) -> AnimationDisposal {
+        self.disposal
+    }
+}
+
+/// A validated multi-frame image sequence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnimatedImageAsset {
+    width: u32,
+    height: u32,
+    frames: Vec<AnimationFrame>,
+    loop_count: AnimationLoop,
+    background: [u8; 4],
+    metadata: ImageMetadata,
+}
+
+impl AnimatedImageAsset {
+    /// Creates an animation whose frames fit within a non-empty canvas.
+    pub fn new(
+        width: u32,
+        height: u32,
+        frames: Vec<AnimationFrame>,
+        loop_count: AnimationLoop,
+    ) -> Result<Self, CodecError> {
+        if width == 0
+            || height == 0
+            || frames.is_empty()
+            || matches!(loop_count, AnimationLoop::Finite(0))
+        {
+            return Err(CodecError::new(CodecErrorCode::InvalidAnimation));
+        }
+        let color_space = frames[0].image.color_space();
+        for frame in &frames {
+            let right = frame.x.checked_add(frame.image.width());
+            let bottom = frame.y.checked_add(frame.image.height());
+            if right.is_none_or(|right| right > width)
+                || bottom.is_none_or(|bottom| bottom > height)
+                || frame.image.color_space() != color_space
+            {
+                return Err(CodecError::new(CodecErrorCode::InvalidAnimation));
+            }
+        }
+        Ok(Self {
+            width,
+            height,
+            frames,
+            loop_count,
+            background: [0; 4],
+            metadata: ImageMetadata::new(),
+        })
+    }
+
+    /// Attaches global format metadata.
+    pub const fn with_metadata(mut self, metadata: ImageMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Sets the RGBA8 animation background color.
+    pub const fn with_background(mut self, background: [u8; 4]) -> Self {
+        self.background = background;
+        self
+    }
+
+    /// Returns the canvas width.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Returns the canvas height.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Borrows animation frames in playback order.
+    pub fn frames(&self) -> &[AnimationFrame] {
+        &self.frames
+    }
+
+    /// Returns the sequence loop policy.
+    pub const fn loop_count(&self) -> AnimationLoop {
+        self.loop_count
+    }
+
+    /// Returns the RGBA8 animation background.
+    pub const fn background(&self) -> [u8; 4] {
+        self.background
+    }
+
+    /// Borrows global format metadata.
+    pub const fn metadata(&self) -> &ImageMetadata {
+        &self.metadata
+    }
+}
+
+/// Resource ceilings applied while decoding an animation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AnimationLimits {
+    codec: CodecLimits,
+    max_frames: u32,
+    max_total_decoded_bytes: u64,
+}
+
+impl AnimationLimits {
+    /// Creates animation limits with non-zero frame and aggregate-byte ceilings.
+    pub fn new(
+        codec: CodecLimits,
+        max_frames: u32,
+        max_total_decoded_bytes: u64,
+    ) -> Result<Self, CodecError> {
+        if max_frames == 0 || max_total_decoded_bytes == 0 {
+            return Err(CodecError::new(CodecErrorCode::InvalidLimits));
+        }
+        Ok(Self {
+            codec,
+            max_frames,
+            max_total_decoded_bytes,
+        })
+    }
+
+    /// Returns the still-image limits applied to the encoded input and canvas.
+    pub const fn codec(self) -> CodecLimits {
+        self.codec
+    }
+
+    /// Returns the maximum decoded frame count.
+    pub const fn max_frames(self) -> u32 {
+        self.max_frames
+    }
+
+    /// Returns the maximum aggregate decoded RGBA8 bytes across all frames.
+    pub const fn max_total_decoded_bytes(self) -> u64 {
+        self.max_total_decoded_bytes
+    }
+}
+
+impl Default for AnimationLimits {
+    fn default() -> Self {
+        Self {
+            codec: CodecLimits {
+                max_input_bytes: 64 * 1024 * 1024,
+                max_pixels: 67_108_864,
+                max_decoded_bytes: 256 * 1024 * 1024,
+            },
+            max_frames: 1024,
+            max_total_decoded_bytes: 512 * 1024 * 1024,
+        }
     }
 }
 
@@ -547,6 +839,30 @@ impl ImageCodec {
         Self::decode_with_limits(bytes, CodecLimits::default())
     }
 
+    /// Decodes an APNG or animated WebP using [`AnimationLimits::default`].
+    pub fn decode_animated(bytes: &[u8]) -> Result<AnimatedImageAsset, CodecError> {
+        Self::decode_animated_with_limits(bytes, AnimationLimits::default())
+    }
+
+    /// Detects and decodes an APNG or animated WebP subject to animation limits.
+    pub fn decode_animated_with_limits(
+        bytes: &[u8],
+        limits: AnimationLimits,
+    ) -> Result<AnimatedImageAsset, CodecError> {
+        if bytes.len() > limits.codec.max_input_bytes {
+            return Err(CodecError::new(CodecErrorCode::InputTooLarge));
+        }
+        let reader = ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|_| CodecError::new(CodecErrorCode::DecodeFailed))?;
+        match reader.format() {
+            Some(ImageFormat::Png) => png::decode_animated(bytes, limits),
+            Some(ImageFormat::WebP) => webp::decode_animated(bytes, limits),
+            Some(ImageFormat::Jpeg) => Err(CodecError::new(CodecErrorCode::NotAnimated)),
+            _ => Err(CodecError::new(CodecErrorCode::UnsupportedFormat)),
+        }
+    }
+
     /// Detects and decodes PNG, JPEG, or WebP bytes subject to `limits`.
     pub fn decode_with_limits(bytes: &[u8], limits: CodecLimits) -> Result<ImageAsset, CodecError> {
         if bytes.len() > limits.max_input_bytes {
@@ -610,6 +926,16 @@ impl ImageCodec {
         Ok(EncodedImage { bytes, report })
     }
 
+    /// Encodes a multi-frame asset as APNG or animated WebP.
+    pub fn encode_animated(
+        asset: &AnimatedImageAsset,
+        options: &EncodeOptions,
+    ) -> Result<EncodedImage, CodecError> {
+        let mut bytes = Vec::new();
+        let report = Self::encode_animated_to(&mut bytes, asset, options)?;
+        Ok(EncodedImage { bytes, report })
+    }
+
     /// Encodes an image asset to a writer according to explicit options.
     pub fn encode_to<W: Write>(
         mut writer: W,
@@ -628,6 +954,37 @@ impl ImageCodec {
             ),
             EncodeFormat::WebP(webp) => (
                 webp::encode(&mut limited, asset, options.metadata, webp),
+                EncodedFormat::WebP,
+            ),
+        };
+        if limited.exceeded {
+            return Err(CodecError::new(CodecErrorCode::OutputTooLarge));
+        }
+        result?;
+        Ok(EncodeReport {
+            format,
+            output_bytes: limited.written,
+        })
+    }
+
+    /// Encodes a multi-frame asset to a writer as APNG or animated WebP.
+    pub fn encode_animated_to<W: Write>(
+        mut writer: W,
+        asset: &AnimatedImageAsset,
+        options: &EncodeOptions,
+    ) -> Result<EncodeReport, CodecError> {
+        let mut limited = LimitedWriter::new(&mut writer, options.limits.max_output_bytes);
+        let (result, format) = match options.format {
+            EncodeFormat::Png(png) => (
+                png::encode_animated(&mut limited, asset, options.metadata, png),
+                EncodedFormat::Png,
+            ),
+            EncodeFormat::Jpeg(_) => (
+                Err(CodecError::new(CodecErrorCode::UnsupportedEncodeOption)),
+                EncodedFormat::Jpeg,
+            ),
+            EncodeFormat::WebP(webp) => (
+                webp::encode_animated(&mut limited, asset, options.metadata, webp),
                 EncodedFormat::WebP,
             ),
         };

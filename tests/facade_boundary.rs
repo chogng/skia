@@ -10,4 +10,6 @@ fn public_facade_does_not_transparently_reexport_implementation_crates() {
     assert!(!facade.contains("ImageId"));
     assert!(!facade.contains("PathId"));
     assert!(!facade.contains("GlyphRunId"));
+    assert!(facade.contains("FontFace"));
+    assert!(facade.contains("FontLimits"));
 }

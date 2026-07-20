@@ -40,6 +40,30 @@ fn glyph_run_rejects_ambiguous_input() {
 }
 
 #[test]
+fn positioned_glyph_preserves_source_cluster() {
+    let glyph = PositionedGlyph::with_cluster(
+        GlyphId::new(17),
+        9,
+        TextUnit::ZERO,
+        TextUnit::ZERO,
+        TextUnit::ZERO,
+        TextUnit::ZERO,
+    );
+
+    assert_eq!(glyph.cluster(), 9);
+}
+
+#[test]
+fn whole_text_units_report_numeric_overflow() {
+    assert_eq!(
+        TextUnit::from_i32(i32::MAX)
+            .expect_err("Q26.6 conversion must be checked")
+            .code(),
+        TextErrorCode::NumericOverflow
+    );
+}
+
+#[test]
 fn outline_rejects_open_or_out_of_order_contours() {
     let point = OutlinePoint::new(TextUnit::ZERO, TextUnit::ZERO);
     assert_eq!(
