@@ -1,8 +1,10 @@
 use std::{env, fs, path::PathBuf};
 
 use unicode_bidi::{BidiInfo, LTR_LEVEL, RTL_LEVEL};
-use unicode_linebreak::linebreaks;
 use unicode_segmentation::UnicodeSegmentation;
+
+#[path = "../src/line_break.rs"]
+mod line_break;
 
 const DATA_DIRECTORY_ENV: &str = "SKIA_UNICODE_CONFORMANCE_DIR";
 
@@ -37,33 +39,18 @@ fn extended_grapheme_boundaries_conform_to_unicode_17() {
 #[test]
 #[ignore = "requires scripts/fetch_unicode_conformance.sh"]
 fn default_line_breaks_match_the_unicode_15_conformance_baseline() {
-    const KNOWN_DEVIATIONS: &[usize] = &[
-        125, 127, 815, 1161, 1163, 1165, 1167, 1331, 2189, 2191, 2873, 2875, 3567, 3739, 4081,
-        4083, 4425, 4427, 4473, 4475, 4597, 4599, 4645, 4647, 4943, 5109, 5111, 5459, 6149, 6151,
-        6153, 6155, 6489, 6491, 6663, 6833, 6835, 7005, 7007, 7177, 7179, 7477, 7486, 7491, 7576,
-        7577, 7578, 7579, 7580, 7581, 7583, 7584, 7585, 7586, 7587, 7604, 7610, 7611, 7681,
-    ];
     let data = read_data("LineBreakTest-15.0.0.txt");
     let mut cases = 0_usize;
-    let mut failures = Vec::new();
     for (line_index, line) in data.lines().enumerate() {
         let Some(case) = parse_boundary_case(line, line_index + 1) else {
             continue;
         };
-        let actual: Vec<usize> = linebreaks(&case.text).map(|(offset, _)| offset).collect();
-        if actual != case.breaks {
-            failures.push((line_index + 1, actual, case.breaks));
-        }
+        let actual: Vec<usize> = line_break::linebreaks(&case.text)
+            .map(|(offset, _)| offset)
+            .collect();
+        assert_eq!(actual, case.breaks, "Unicode data line {}", line_index + 1);
         cases += 1;
     }
-    let failure_lines: Vec<usize> = failures.iter().map(|failure| failure.0).collect();
-    assert_eq!(
-        failure_lines,
-        KNOWN_DEVIATIONS,
-        "line-break conformance changed; first={:?}; last={:?}",
-        failures.first(),
-        failures.last()
-    );
     assert!(cases > 7_000, "expected the complete line-break test data");
 }
 

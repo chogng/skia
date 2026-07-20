@@ -1,10 +1,10 @@
 use unicode_bidi::{BidiInfo, LTR_LEVEL, RTL_LEVEL};
-use unicode_linebreak::{BreakOpportunity, linebreaks};
+use unicode_linebreak::BreakOpportunity;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     FontCollection, FontFace, FontMetrics, ShapedParagraph, TextDecorationMetrics, TextDirection,
-    TextError, TextErrorCode, TextStyleSpan, valid_language_tag,
+    TextError, TextErrorCode, TextStyleSpan, line_break::linebreaks, valid_language_tag,
 };
 
 /// Decoration lines requested for every non-empty line in one text layout.

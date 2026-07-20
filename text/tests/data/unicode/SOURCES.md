@@ -25,7 +25,7 @@ SKIA_UNICODE_CONFORMANCE_DIR=target/unicode-conformance \
   cargo test -p skia-text --test unicode_conformance -- --ignored
 ```
 
-The grapheme and bidi files are strict conformance gates. The line-break test
-also locks the 59 known deviations in `unicode-linebreak 0.1.5`; any new
-deviation, unexpected behavior change, or repaired case that has not been
-removed from the baseline fails the suite.
+All three files are strict conformance gates. The line-break adapter applies
+the test file's documented regex-number tailoring and covers the Unicode 15
+LB30 East-Asian-width exception plus LB30b potential-emoji rule that are not
+represented by `unicode-linebreak 0.1.5`'s pair table.

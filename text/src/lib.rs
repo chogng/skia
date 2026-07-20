@@ -11,6 +11,7 @@
 mod collection;
 mod font;
 mod layout;
+mod line_break;
 
 pub(crate) fn valid_language_tag(language: &str) -> bool {
     !language.is_empty()
