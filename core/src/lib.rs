@@ -8,9 +8,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod clip;
 mod display_list;
 mod paint;
 
+pub use clip::ClipOp;
 #[cfg(feature = "text")]
 pub use display_list::GlyphRunId;
 pub use display_list::{DisplayList, DisplayListBuilder, DrawCommand, ImageId, PathId};

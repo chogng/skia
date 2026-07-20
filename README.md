@@ -163,6 +163,10 @@ butt/round/square caps, miter/round/bevel joins, miter limits, and canonical
 dash patterns. CPU Canvas and DisplayList replay implement those semantics;
 the generic GPU command preserves the same options and its software reference
 backend replays them without introducing backend-specific stroke types.
+Backend-neutral `ClipOp` defines intersection and difference. CPU Canvas and
+DisplayList replay apply it to rectangles or paths; axis-aligned rectangle
+intersections retain a scissor fast path, while complex clips use a deterministic
+one-byte-per-pixel mask that participates in save and restore.
 Boolean path operations, stroke-to-path expansion,
 path effects, and tangent-/endpoint-defined arc variants remain separate
 geometry-processing work; their design must stay independent of any consumer.

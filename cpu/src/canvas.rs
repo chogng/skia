@@ -1,12 +1,17 @@
+use std::sync::Arc;
+
 use skia_core::{
-    BlendMode, Color, DisplayList, DrawCommand, FillRule, GlyphOutline, GlyphOutlineProvider,
-    GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder, PathVerb, Point,
-    PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, StrokeCap,
-    StrokeJoin, StrokeOptions, TextLayout, TextStyleId, TextUnit, Transform,
+    BlendMode, ClipOp, Color, DisplayList, DrawCommand, FillRule, GlyphOutline,
+    GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder,
+    PathVerb, Point, PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode,
+    StrokeCap, StrokeJoin, StrokeOptions, TextLayout, TextStyleId, TextUnit, Transform,
 };
 use skia_image::Image;
 
-use crate::stroke::{stroke_bounds, stroke_contains, stroke_pieces};
+use crate::{
+    clip::{apply_clip, mask_index},
+    stroke::{stroke_bounds, stroke_contains, stroke_pieces},
+};
 
 /// Limits for one CPU-owned RGBA8 surface and Canvas state stack.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,7 +101,7 @@ impl Surface {
 
     /// Starts one canvas state scope over this surface.
     pub fn canvas(&mut self) -> Canvas<'_> {
-        let clip = DeviceRect {
+        let scissor = DeviceRect {
             left: 0,
             top: 0,
             right: i64::from(self.width),
@@ -106,7 +111,8 @@ impl Surface {
             surface: self,
             state: State {
                 transform: Transform::IDENTITY,
-                clip,
+                scissor,
+                mask: None,
             },
             saves: Vec::new(),
         }
@@ -128,7 +134,15 @@ impl Surface {
                 DrawCommand::Clear(color) => canvas.clear(*color),
                 DrawCommand::Save => canvas.save()?,
                 DrawCommand::Restore => canvas.restore()?,
-                DrawCommand::ClipRect(rect) => canvas.clip_rect(ClipRect::new(*rect))?,
+                DrawCommand::ClipRect { rect, op } => {
+                    canvas.clip_rect_with_op(ClipRect::new(*rect), *op)?
+                }
+                DrawCommand::ClipPath { path, rule, op } => {
+                    let path = list
+                        .path(*path)
+                        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+                    canvas.clip_path(path, *rule, *op)?;
+                }
                 DrawCommand::SetTransform(transform) => canvas.set_transform(*transform),
                 DrawCommand::ConcatTransform(transform) => canvas.concat(*transform)?,
                 DrawCommand::FillPath { path, rule, paint } => {
@@ -181,10 +195,11 @@ impl ClipRect {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct State {
     transform: Transform,
-    clip: DeviceRect,
+    scissor: DeviceRect,
+    mask: Option<Arc<[u8]>>,
 }
 
 /// Mutable CPU drawing context.
@@ -210,7 +225,7 @@ impl Canvas<'_> {
         self.saves
             .try_reserve(1)
             .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
-        self.saves.push(self.state);
+        self.saves.push(self.state.clone());
         Ok(())
     }
 
@@ -236,11 +251,39 @@ impl Canvas<'_> {
 
     /// Intersects the current clip with one transformed axis-aligned rectangle.
     pub fn clip_rect(&mut self, clip: ClipRect) -> Result<(), SkiaError> {
-        if !self.state.transform.is_axis_aligned() {
-            return Err(SkiaError::new(SkiaErrorCode::UnsupportedTransform));
+        self.clip_rect_with_op(clip, ClipOp::Intersect)
+    }
+
+    /// Applies a transformed rectangle to the current clip.
+    pub fn clip_rect_with_op(&mut self, clip: ClipRect, op: ClipOp) -> Result<(), SkiaError> {
+        if op == ClipOp::Intersect && self.state.transform.is_axis_aligned() {
+            self.state.scissor = self.state.scissor.intersection(self.device_rect(clip.0)?);
+            return Ok(());
         }
-        self.state.clip = self.state.clip.intersection(self.device_rect(clip.0)?);
-        Ok(())
+        let rect = clip.0;
+        let transform = self.state.transform;
+        let mut points = Vec::new();
+        points
+            .try_reserve_exact(4)
+            .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
+        points.push(transform.map_point(Point::new(rect.left(), rect.top()))?);
+        points.push(transform.map_point(Point::new(rect.right(), rect.top()))?);
+        points.push(transform.map_point(Point::new(rect.right(), rect.bottom()))?);
+        points.push(transform.map_point(Point::new(rect.left(), rect.bottom()))?);
+        let contour = Contour {
+            points,
+            closed: true,
+        };
+        self.apply_complex_clip(&[contour], FillRule::NonZero, op)
+    }
+
+    /// Applies a transformed path to the current clip.
+    pub fn clip_path(&mut self, path: &Path, rule: FillRule, op: ClipOp) -> Result<(), SkiaError> {
+        let contours = transformed_contours(path, self.state.transform)?;
+        if contours.iter().all(|contour| contour.points.len() < 3) {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
+        }
+        self.apply_complex_clip(&contours, rule, op)
     }
 
     /// Fills one transformed rectangle.
@@ -307,7 +350,7 @@ impl Canvas<'_> {
             return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
         }
         let pieces = stroke_pieces(&contours, options)?;
-        let bounds = stroke_bounds(&contours, options)?.intersection(self.state.clip);
+        let bounds = stroke_bounds(&contours, options)?.intersection(self.state.scissor);
         for y in bounds.top..bounds.bottom {
             for x in bounds.left..bounds.right {
                 let sample = pixel_center(x, y)?;
@@ -336,7 +379,7 @@ impl Canvas<'_> {
             return Err(SkiaError::new(SkiaErrorCode::UnsupportedTransform));
         }
         let rectangle = self.device_rect(destination)?;
-        let clipped = rectangle.intersection(self.state.clip);
+        let clipped = rectangle.intersection(self.state.scissor);
         let width = rectangle.right - rectangle.left;
         let height = rectangle.bottom - rectangle.top;
         if width == 0 || height == 0 {
@@ -616,7 +659,7 @@ impl Canvas<'_> {
         rule: FillRule,
         paint: Paint,
     ) -> Result<(), SkiaError> {
-        let bounds = contour_bounds(contours).intersection(self.state.clip);
+        let bounds = contour_bounds(contours).intersection(self.state.scissor);
         for y in bounds.top..bounds.bottom {
             for x in bounds.left..bounds.right {
                 if contains(contours, pixel_center(x, y)?, rule)? {
@@ -645,6 +688,24 @@ impl Canvas<'_> {
         .normalized())
     }
 
+    fn apply_complex_clip(
+        &mut self,
+        contours: &[Contour],
+        rule: FillRule,
+        op: ClipOp,
+    ) -> Result<(), SkiaError> {
+        self.state.mask = Some(apply_clip(
+            self.surface.width,
+            self.surface.height,
+            self.state.scissor,
+            self.state.mask.as_deref(),
+            contours,
+            rule,
+            op,
+        )?);
+        Ok(())
+    }
+
     fn blend_pixel(&mut self, x: i64, y: i64, paint: Paint) -> Result<(), SkiaError> {
         self.blend_color(x, y, paint.color(), paint.blend_mode())
     }
@@ -662,6 +723,12 @@ impl Canvas<'_> {
             || y >= i64::from(self.surface.height)
         {
             return Ok(());
+        }
+        if let Some(mask) = self.state.mask.as_deref() {
+            let index = mask_index(self.surface.width, x, y)?;
+            if mask[index] == 0 {
+                return Ok(());
+            }
         }
         let index = y
             .checked_mul(i64::from(self.surface.width))
@@ -700,7 +767,7 @@ impl DeviceRect {
         }
     }
 
-    fn intersection(self, other: Self) -> Self {
+    pub(crate) fn intersection(self, other: Self) -> Self {
         let left = self.left.max(other.left);
         let top = self.top.max(other.top);
         let right = self.right.min(other.right).max(left);
@@ -799,7 +866,10 @@ fn scaled_text_coordinate(
         .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))
 }
 
-fn transformed_contours(path: &Path, transform: Transform) -> Result<Vec<Contour>, SkiaError> {
+pub(crate) fn transformed_contours(
+    path: &Path,
+    transform: Transform,
+) -> Result<Vec<Contour>, SkiaError> {
     let mut contours = Vec::new();
     let mut current = Vec::new();
     for verb in path.verbs() {
@@ -1097,7 +1167,11 @@ pub(crate) fn contour_bounds(contours: &[Contour]) -> DeviceRect {
     }
 }
 
-fn contains(contours: &[Contour], sample: Point, rule: FillRule) -> Result<bool, SkiaError> {
+pub(crate) fn contains(
+    contours: &[Contour],
+    sample: Point,
+    rule: FillRule,
+) -> Result<bool, SkiaError> {
     let mut parity = false;
     let mut winding = 0_i32;
     for contour in contours {
@@ -1149,7 +1223,7 @@ fn contains(contours: &[Contour], sample: Point, rule: FillRule) -> Result<bool,
     })
 }
 
-fn pixel_center(x: i64, y: i64) -> Result<Point, SkiaError> {
+pub(crate) fn pixel_center(x: i64, y: i64) -> Result<Point, SkiaError> {
     Ok(Point::new(
         Scalar::from_ratio(
             x.checked_mul(2)

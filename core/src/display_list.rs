@@ -1,6 +1,6 @@
 use crate::{
-    Color, FillRule, Paint, Path, Rect, Scalar, SkiaError, SkiaErrorCode, StrokeCap, StrokeJoin,
-    StrokeOptions, Transform,
+    ClipOp, Color, FillRule, Paint, Path, Rect, Scalar, SkiaError, SkiaErrorCode, StrokeCap,
+    StrokeJoin, StrokeOptions, Transform,
 };
 use skia_image::Image;
 #[cfg(feature = "text")]
@@ -28,8 +28,22 @@ pub enum DrawCommand {
     Save,
     /// Restores the most recently saved state.
     Restore,
-    /// Intersects following draws with a logical rectangle.
-    ClipRect(Rect),
+    /// Applies a logical rectangle to the current clip.
+    ClipRect {
+        /// Logical clip rectangle.
+        rect: Rect,
+        /// Boolean operation against the current clip.
+        op: ClipOp,
+    },
+    /// Applies a registered path to the current clip.
+    ClipPath {
+        /// Local path resource.
+        path: PathId,
+        /// Fill containment rule.
+        rule: FillRule,
+        /// Boolean operation against the current clip.
+        op: ClipOp,
+    },
     /// Replaces the transform for following draws.
     SetTransform(Transform),
     /// Concatenates an affine transform onto the current drawing state.
@@ -171,7 +185,15 @@ impl DisplayListBuilder {
     }
     /// Records an intersection clip rectangle.
     pub fn clip_rect(&mut self, rect: Rect) -> Result<(), SkiaError> {
-        self.push(DrawCommand::ClipRect(rect))
+        self.clip_rect_with_op(rect, ClipOp::Intersect)
+    }
+    /// Records a rectangle clip with an explicit boolean operation.
+    pub fn clip_rect_with_op(&mut self, rect: Rect, op: ClipOp) -> Result<(), SkiaError> {
+        self.push(DrawCommand::ClipRect { rect, op })
+    }
+    /// Records a registered path clip with an explicit fill rule and operation.
+    pub fn clip_path(&mut self, path: PathId, rule: FillRule, op: ClipOp) -> Result<(), SkiaError> {
+        self.push(DrawCommand::ClipPath { path, rule, op })
     }
     /// Records a replacement canvas transform.
     pub fn set_transform(&mut self, transform: Transform) -> Result<(), SkiaError> {

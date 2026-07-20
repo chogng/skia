@@ -1,6 +1,6 @@
 use skia_core::{
-    Color, DisplayListBuilder, DrawCommand, Paint, Scalar, SkiaErrorCode, StrokeCap, StrokeJoin,
-    StrokeOptions, Transform,
+    ClipOp, Color, DisplayListBuilder, DrawCommand, FillRule, Paint, Scalar, SkiaErrorCode,
+    StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
 #[cfg(feature = "text")]
 use skia_core::{FontId, GlyphId, GlyphRun, PositionedGlyph, TextUnit};
@@ -101,6 +101,38 @@ fn display_list_records_generic_transform_concatenation() {
     assert_eq!(
         builder.finish().commands(),
         &[DrawCommand::ConcatTransform(transform)]
+    );
+}
+
+#[test]
+fn display_list_records_rect_and_path_clip_operations() {
+    let mut builder = DisplayListBuilder::new(3).expect("valid limits");
+    let path = builder.add_path(empty_path()).expect("store path");
+    let rect = skia_core::Rect::new(
+        Scalar::ZERO,
+        Scalar::ZERO,
+        Scalar::from_i32(4).expect("right"),
+        Scalar::from_i32(3).expect("bottom"),
+    )
+    .expect("rect");
+    builder.clip_rect(rect).expect("intersection clip");
+    builder
+        .clip_path(path, FillRule::EvenOdd, ClipOp::Difference)
+        .expect("path clip");
+
+    assert_eq!(
+        builder.finish().commands(),
+        &[
+            DrawCommand::ClipRect {
+                rect,
+                op: ClipOp::Intersect,
+            },
+            DrawCommand::ClipPath {
+                path,
+                rule: FillRule::EvenOdd,
+                op: ClipOp::Difference,
+            },
+        ]
     );
 }
 

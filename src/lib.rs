@@ -15,7 +15,7 @@ pub use skia_codec::{
     JpegSubsampling, MetadataPolicy, PngCompression, PngFilter, PngOptions, WebPMode, WebPOptions,
 };
 pub use skia_core::{
-    BlendMode, Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId,
+    BlendMode, ClipOp, Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId,
     FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation, FontVariationAxis,
     FontWidth, GlyphBitmap, GlyphBitmapFormat, GlyphId, GlyphOutline, GlyphOutlineProvider,
     GlyphRun, OutlinePoint, OutlineSegment, Paint, PositionedGlyph, ShapedLine, ShapedParagraph,

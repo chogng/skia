@@ -4,6 +4,7 @@
 #![deny(missing_docs)]
 
 mod canvas;
+mod clip;
 mod stroke;
 
 pub use canvas::{Canvas, ClipRect, Surface, SurfaceLimits};
