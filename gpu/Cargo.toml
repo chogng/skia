@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-skia-core = { path = "../core" }
+skia-core = { path = "../core", default-features = false }
 skia-cpu = { path = "../cpu", optional = true }
 skia-image = { path = "../image" }
 

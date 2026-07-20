@@ -13,12 +13,9 @@
 #[cfg(feature = "software")]
 pub mod software;
 
-use std::{collections::HashMap, fmt};
+use std::fmt;
 
-use skia_core::{
-    BlendMode, Color, FillRule, FontCollection, FontId, GlyphBitmap, GlyphBitmapFormat, GlyphId,
-    GlyphRun, Paint, Path, Point, Rect, Scalar, TextError, TextErrorCode, TextLayout, Transform,
-};
+use skia_core::{BlendMode, Color, FillRule, Paint, Path, Point, Rect, Transform};
 use skia_image::Image;
 
 /// Stable machine-readable GPU command recording failure.
@@ -106,47 +103,6 @@ pub struct GpuImageId(u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GpuGlyphAtlasId(u32);
 
-/// Stable identity of one rasterized glyph inside a GPU atlas.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct GpuGlyphKey {
-    font: FontId,
-    glyph: GlyphId,
-    font_size_bits: i32,
-    format: GlyphBitmapFormat,
-}
-
-impl GpuGlyphKey {
-    /// Creates a cache key from one validated glyph bitmap.
-    pub const fn from_bitmap(bitmap: &GlyphBitmap) -> Self {
-        Self {
-            font: bitmap.font(),
-            glyph: bitmap.glyph(),
-            font_size_bits: bitmap.font_size_bits(),
-            format: bitmap.format(),
-        }
-    }
-
-    /// Returns the immutable font-instance identity.
-    pub const fn font(self) -> FontId {
-        self.font
-    }
-
-    /// Returns the font-local glyph identity.
-    pub const fn glyph(self) -> GlyphId {
-        self.glyph
-    }
-
-    /// Returns the Q16.16 raster size.
-    pub const fn font_size_bits(self) -> i32 {
-        self.font_size_bits
-    }
-
-    /// Returns the atlas sample interpretation.
-    pub const fn format(self) -> GlyphBitmapFormat {
-        self.format
-    }
-}
-
 /// Integer pixel rectangle inside one glyph atlas.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GpuAtlasRect {
@@ -194,302 +150,21 @@ impl GpuAtlasRect {
     }
 }
 
-/// Packed metadata for one glyph bitmap in an atlas.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct GpuGlyphAtlasEntry {
-    key: GpuGlyphKey,
-    source: GpuAtlasRect,
-    left: i32,
-    top: i32,
-}
-
-impl GpuGlyphAtlasEntry {
-    /// Returns the glyph cache key.
-    pub const fn key(self) -> GpuGlyphKey {
-        self.key
-    }
-
-    /// Returns the atlas pixel rectangle.
-    pub const fn source(self) -> GpuAtlasRect {
-        self.source
-    }
-
-    /// Returns the raster placement offset right from the glyph origin.
-    pub const fn left(self) -> i32 {
-        self.left
-    }
-
-    /// Returns the raster placement offset above the glyph baseline.
-    pub const fn top(self) -> i32 {
-        self.top
-    }
-}
-
-/// Immutable RGBA8 glyph atlas and its cache-key index.
+/// Immutable RGBA8 atlas consumed by generic glyph batch commands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpuGlyphAtlas {
     image: Image,
-    entries: HashMap<GpuGlyphKey, GpuGlyphAtlasEntry>,
 }
 
 impl GpuGlyphAtlas {
     /// Wraps one prepacked RGBA8 image for low-level glyph batch recording.
-    ///
-    /// The returned atlas has no cache-key index; use [`GpuGlyphAtlasBuilder`]
-    /// when text-layout lookup is required.
     pub fn from_image(image: Image) -> Self {
-        Self {
-            image,
-            entries: HashMap::new(),
-        }
+        Self { image }
     }
 
     /// Borrows the upload-ready straight-alpha RGBA8 atlas image.
     pub const fn image(&self) -> &Image {
         &self.image
-    }
-
-    /// Resolves one exact glyph cache key.
-    pub fn entry(&self, key: GpuGlyphKey) -> Option<GpuGlyphAtlasEntry> {
-        self.entries.get(&key).copied()
-    }
-
-    fn glyph_entry(
-        &self,
-        font: FontId,
-        glyph: GlyphId,
-        font_size_bits: i32,
-    ) -> Option<GpuGlyphAtlasEntry> {
-        [GlyphBitmapFormat::Alpha8, GlyphBitmapFormat::Rgba8]
-            .into_iter()
-            .find_map(|format| {
-                self.entry(GpuGlyphKey {
-                    font,
-                    glyph,
-                    font_size_bits,
-                    format,
-                })
-            })
-    }
-}
-
-/// Bounded shelf packer for reusable GPU glyph atlases.
-#[derive(Debug)]
-pub struct GpuGlyphAtlasBuilder {
-    width: u32,
-    height: u32,
-    max_glyphs: usize,
-    pixels: Vec<u8>,
-    entries: HashMap<GpuGlyphKey, GpuGlyphAtlasEntry>,
-    cursor_x: u32,
-    cursor_y: u32,
-    row_height: u32,
-}
-
-impl GpuGlyphAtlasBuilder {
-    /// Allocates one transparent, bounded RGBA8 atlas.
-    pub fn new(width: u32, height: u32, max_glyphs: usize) -> Result<Self, GpuCommandError> {
-        if width == 0 || height == 0 || max_glyphs == 0 {
-            return Err(GpuCommandError::new(GpuCommandErrorCode::InvalidLimits));
-        }
-        let length = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|value| value.checked_mul(4))
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit))?;
-        let mut pixels = Vec::new();
-        pixels
-            .try_reserve_exact(length)
-            .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::AllocationFailed))?;
-        pixels.resize(length, 0);
-        Ok(Self {
-            width,
-            height,
-            max_glyphs,
-            pixels,
-            entries: HashMap::new(),
-            cursor_x: 1,
-            cursor_y: 1,
-            row_height: 0,
-        })
-    }
-
-    /// Inserts or reuses one exact glyph bitmap.
-    pub fn insert(&mut self, bitmap: &GlyphBitmap) -> Result<GpuGlyphAtlasEntry, GpuCommandError> {
-        let key = GpuGlyphKey::from_bitmap(bitmap);
-        if let Some(entry) = self.entries.get(&key) {
-            return Ok(*entry);
-        }
-        if self.entries.len() == self.max_glyphs || bitmap.width() == 0 || bitmap.height() == 0 {
-            return Err(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit));
-        }
-        let padded_width = bitmap
-            .width()
-            .checked_add(2)
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-        let padded_height = bitmap
-            .height()
-            .checked_add(2)
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-        if padded_width > self.width || padded_height > self.height {
-            return Err(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit));
-        }
-        if self
-            .cursor_x
-            .checked_add(bitmap.width())
-            .and_then(|value| value.checked_add(1))
-            .is_none_or(|value| value > self.width)
-        {
-            self.cursor_x = 1;
-            self.cursor_y = self
-                .cursor_y
-                .checked_add(self.row_height)
-                .and_then(|value| value.checked_add(1))
-                .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-            self.row_height = 0;
-        }
-        if self
-            .cursor_y
-            .checked_add(bitmap.height())
-            .and_then(|value| value.checked_add(1))
-            .is_none_or(|value| value > self.height)
-        {
-            return Err(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit));
-        }
-        let source = GpuAtlasRect {
-            x: self.cursor_x,
-            y: self.cursor_y,
-            width: bitmap.width(),
-            height: bitmap.height(),
-        };
-        self.copy_bitmap(source, bitmap)?;
-        let entry = GpuGlyphAtlasEntry {
-            key,
-            source,
-            left: bitmap.left(),
-            top: bitmap.top(),
-        };
-        self.entries
-            .try_reserve(1)
-            .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::AllocationFailed))?;
-        self.entries.insert(key, entry);
-        self.cursor_x = self
-            .cursor_x
-            .checked_add(bitmap.width())
-            .and_then(|value| value.checked_add(1))
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-        self.row_height = self.row_height.max(bitmap.height());
-        Ok(entry)
-    }
-
-    /// Rasterizes and inserts every drawable glyph referenced by a text layout.
-    pub fn insert_text_layout(
-        &mut self,
-        layout: &TextLayout,
-        fonts: &FontCollection,
-    ) -> Result<(), GpuCommandError> {
-        for line in layout.lines() {
-            let Some(paragraph) = line.paragraph() else {
-                continue;
-            };
-            for shaped in paragraph.runs() {
-                let run = shaped.glyph_run();
-                let face = fonts
-                    .face(run.font())
-                    .ok_or(GpuCommandError::new(GpuCommandErrorCode::InvalidResource))?;
-                for glyph in run.glyphs() {
-                    if let Some(bitmap) = face
-                        .rasterize_glyph(glyph.glyph(), run.font_size_bits())
-                        .map_err(map_text_error)?
-                    {
-                        self.insert(&bitmap)?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Publishes the immutable atlas and cache-key index.
-    pub fn finish(self) -> Result<GpuGlyphAtlas, GpuCommandError> {
-        let image = Image::from_rgba8(self.width, self.height, self.pixels)
-            .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::InvalidResource))?;
-        Ok(GpuGlyphAtlas {
-            image,
-            entries: self.entries,
-        })
-    }
-
-    fn copy_bitmap(
-        &mut self,
-        destination: GpuAtlasRect,
-        bitmap: &GlyphBitmap,
-    ) -> Result<(), GpuCommandError> {
-        let source_stride = usize::try_from(bitmap.width())
-            .ok()
-            .and_then(|value| value.checked_mul(bitmap.format().bytes_per_pixel()))
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-        let destination_stride = usize::try_from(self.width)
-            .ok()
-            .and_then(|value| value.checked_mul(4))
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-        let destination_row_bytes = usize::try_from(bitmap.width())
-            .ok()
-            .and_then(|value| value.checked_mul(4))
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-        for row in 0..bitmap.height() {
-            let source_start = usize::try_from(row)
-                .ok()
-                .and_then(|value| value.checked_mul(source_stride))
-                .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-            let source_end = source_start
-                .checked_add(source_stride)
-                .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-            let destination_y = destination
-                .y
-                .checked_add(row)
-                .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-            let destination_start = usize::try_from(destination_y)
-                .ok()
-                .and_then(|value| value.checked_mul(destination_stride))
-                .and_then(|value| {
-                    usize::try_from(destination.x)
-                        .ok()
-                        .and_then(|x| x.checked_mul(4))
-                        .and_then(|x| value.checked_add(x))
-                })
-                .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-            let destination_end = destination_start
-                .checked_add(destination_row_bytes)
-                .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-            match bitmap.format() {
-                GlyphBitmapFormat::Alpha8 => {
-                    let source = bitmap
-                        .pixels()
-                        .get(source_start..source_end)
-                        .ok_or(GpuCommandError::new(GpuCommandErrorCode::InvalidResource))?;
-                    let destination = self
-                        .pixels
-                        .get_mut(destination_start..destination_end)
-                        .ok_or(GpuCommandError::new(GpuCommandErrorCode::InvalidResource))?;
-                    for (alpha, pixel) in source.iter().zip(destination.chunks_exact_mut(4)) {
-                        pixel.copy_from_slice(&[255, 255, 255, *alpha]);
-                    }
-                }
-                GlyphBitmapFormat::Rgba8 => {
-                    let source = bitmap
-                        .pixels()
-                        .get(source_start..source_end)
-                        .ok_or(GpuCommandError::new(GpuCommandErrorCode::InvalidResource))?;
-                    let destination = self
-                        .pixels
-                        .get_mut(destination_start..destination_end)
-                        .ok_or(GpuCommandError::new(GpuCommandErrorCode::InvalidResource))?;
-                    destination.copy_from_slice(source);
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -854,93 +529,6 @@ impl GpuCommandEncoder {
         })
     }
 
-    /// Records all raster glyphs in one text layout as one atlas-backed batch.
-    ///
-    /// Empty glyphs and glyphs absent from the supplied atlas are skipped.
-    /// Text decorations remain ordinary rectangle commands so backends can
-    /// batch them with other solid geometry independently.
-    pub fn draw_text_layout_glyphs(
-        &mut self,
-        atlas: GpuGlyphAtlasId,
-        layout: &TextLayout,
-        origin: Point,
-        paint: Paint,
-    ) -> Result<(), GpuCommandError> {
-        let atlas_resource = self
-            .glyph_atlas(atlas)
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::InvalidResource))?;
-        let mut glyphs = Vec::new();
-        for line in layout.lines() {
-            let Some(paragraph) = line.paragraph() else {
-                continue;
-            };
-            let line_x = origin
-                .x()
-                .bits()
-                .checked_add(line.offset_x_bits())
-                .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-            let baseline_y = origin
-                .y()
-                .bits()
-                .checked_add(line.baseline_y_bits())
-                .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-            for shaped in paragraph.runs() {
-                let run = shaped.glyph_run();
-                if shaped.glyph_offsets_x_bits().len() != run.glyphs().len() {
-                    return Err(GpuCommandError::new(GpuCommandErrorCode::InvalidResource));
-                }
-                let run_x = line_x
-                    .checked_add(shaped.origin_x_bits())
-                    .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-                for (glyph, offset_x) in run.glyphs().iter().zip(shaped.glyph_offsets_x_bits()) {
-                    let Some(entry) =
-                        atlas_resource.glyph_entry(run.font(), glyph.glyph(), run.font_size_bits())
-                    else {
-                        continue;
-                    };
-                    if glyphs.len() == self.limits.max_glyphs_per_batch {
-                        return Err(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit));
-                    }
-                    let glyph_x = scaled_glyph_coordinate_bits(glyph.x().bits(), run)?;
-                    let glyph_y = scaled_glyph_coordinate_bits(glyph.y().bits(), run)?;
-                    let bitmap_left = pixel_bits(entry.left())?;
-                    let bitmap_top = pixel_bits(entry.top())?;
-                    let left = run_x
-                        .checked_add(*offset_x)
-                        .and_then(|value| value.checked_add(glyph_x))
-                        .and_then(|value| value.checked_add(bitmap_left))
-                        .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-                    let top = baseline_y
-                        .checked_add(glyph_y)
-                        .and_then(|value| value.checked_sub(bitmap_top))
-                        .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-                    let right = left
-                        .checked_add(pixel_bits_u32(entry.source().width())?)
-                        .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-                    let bottom = top
-                        .checked_add(pixel_bits_u32(entry.source().height())?)
-                        .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-                    let destination = Rect::new(
-                        Scalar::from_bits(left),
-                        Scalar::from_bits(top),
-                        Scalar::from_bits(right),
-                        Scalar::from_bits(bottom),
-                    )
-                    .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-                    glyphs
-                        .try_reserve(1)
-                        .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::AllocationFailed))?;
-                    glyphs.push(GpuGlyphQuad {
-                        source: entry.source(),
-                        destination,
-                        mask: entry.key().format() == GlyphBitmapFormat::Alpha8,
-                    });
-                }
-            }
-        }
-        self.draw_glyph_batch(atlas, glyphs, paint)
-    }
-
     /// Records one pre-positioned glyph batch using a registered atlas.
     pub fn draw_glyph_batch(
         &mut self,
@@ -1035,49 +623,6 @@ fn resource_id(length: usize, max_resources: usize) -> Result<u32, GpuCommandErr
         return Err(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit));
     }
     u32::try_from(length).map_err(|_| GpuCommandError::new(GpuCommandErrorCode::ResourceLimit))
-}
-
-fn map_text_error(error: TextError) -> GpuCommandError {
-    let code = match error.code() {
-        TextErrorCode::AllocationFailed => GpuCommandErrorCode::AllocationFailed,
-        TextErrorCode::NumericOverflow => GpuCommandErrorCode::NumericOverflow,
-        TextErrorCode::ResourceLimit => GpuCommandErrorCode::ResourceLimit,
-        _ => GpuCommandErrorCode::InvalidResource,
-    };
-    GpuCommandError::new(code)
-}
-
-fn scaled_glyph_coordinate_bits(design_bits: i32, run: &GlyphRun) -> Result<i32, GpuCommandError> {
-    let numerator = i128::from(design_bits)
-        .checked_mul(i128::from(run.font_size_bits()))
-        .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-    let denominator = i128::from(64_i32)
-        .checked_mul(i128::from(run.units_per_em()))
-        .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?;
-    let rounded = if numerator >= 0 {
-        numerator
-            .checked_add(denominator / 2)
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?
-            / denominator
-    } else {
-        -((-numerator
-            .checked_add(denominator / 2)
-            .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))?)
-            / denominator)
-    };
-    i32::try_from(rounded).map_err(|_| GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))
-}
-
-fn pixel_bits(value: i32) -> Result<i32, GpuCommandError> {
-    value
-        .checked_mul(1 << 16)
-        .ok_or(GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))
-}
-
-fn pixel_bits_u32(value: u32) -> Result<i32, GpuCommandError> {
-    i32::try_from(value)
-        .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::NumericOverflow))
-        .and_then(pixel_bits)
 }
 
 fn map_axis_aligned_rect(transform: Transform, rect: Rect) -> Result<Rect, GpuCommandError> {

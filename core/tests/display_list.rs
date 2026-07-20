@@ -1,8 +1,8 @@
-use skia_core::{
-    Color, DisplayListBuilder, DrawCommand, FontId, GlyphId, GlyphRun, Paint, PositionedGlyph,
-    Scalar, SkiaErrorCode, TextUnit, Transform,
-};
+use skia_core::{Color, DisplayListBuilder, DrawCommand, Paint, Scalar, SkiaErrorCode, Transform};
+#[cfg(feature = "text")]
+use skia_core::{FontId, GlyphId, GlyphRun, PositionedGlyph, TextUnit};
 
+#[cfg(feature = "text")]
 fn glyph_run() -> GlyphRun {
     GlyphRun::new(
         FontId::new(9),
@@ -20,6 +20,7 @@ fn glyph_run() -> GlyphRun {
 }
 
 #[test]
+#[cfg(feature = "text")]
 fn display_list_owns_and_draws_a_glyph_run() {
     let mut builder = DisplayListBuilder::new(8).expect("valid limits");
     let run = builder.add_glyph_run(glyph_run()).expect("store run");

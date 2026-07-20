@@ -10,4 +10,8 @@ skia-error = { path = "../error" }
 skia-geometry = { path = "../geometry" }
 skia-image = { path = "../image" }
 skia-path = { path = "../path" }
-skia-text = { path = "../text" }
+skia-text = { path = "../text", optional = true }
+
+[features]
+default = ["text"]
+text = ["dep:skia-text"]

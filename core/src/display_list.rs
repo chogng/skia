@@ -1,5 +1,6 @@
 use crate::{Color, FillRule, Paint, Path, Rect, Scalar, SkiaError, SkiaErrorCode, Transform};
 use skia_image::Image;
+#[cfg(feature = "text")]
 use skia_text::GlyphRun;
 
 /// Command-buffer-local identifier for an immutable path resource.
@@ -11,6 +12,7 @@ pub struct PathId(u32);
 pub struct ImageId(u32);
 
 /// Command-buffer-local identifier for an immutable shaped glyph run.
+#[cfg(feature = "text")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GlyphRunId(u32);
 
@@ -59,6 +61,7 @@ pub enum DrawCommand {
         paint: Paint,
     },
     /// Draws one registered shaped glyph run.
+    #[cfg(feature = "text")]
     DrawGlyphRun {
         /// Local shaped glyph-run resource.
         run: GlyphRunId,
@@ -73,6 +76,7 @@ pub struct DisplayList {
     commands: Vec<DrawCommand>,
     paths: Vec<Path>,
     images: Vec<Image>,
+    #[cfg(feature = "text")]
     glyph_runs: Vec<GlyphRun>,
 }
 
@@ -90,6 +94,7 @@ impl DisplayList {
         self.images.get(usize::try_from(id.0).ok()?)
     }
     /// Resolves a local shaped glyph-run resource.
+    #[cfg(feature = "text")]
     pub fn glyph_run(&self, id: GlyphRunId) -> Option<&GlyphRun> {
         self.glyph_runs.get(usize::try_from(id.0).ok()?)
     }
@@ -101,6 +106,7 @@ pub struct DisplayListBuilder {
     commands: Vec<DrawCommand>,
     paths: Vec<Path>,
     images: Vec<Image>,
+    #[cfg(feature = "text")]
     glyph_runs: Vec<GlyphRun>,
     max_items: usize,
 }
@@ -115,6 +121,7 @@ impl DisplayListBuilder {
             commands: Vec::new(),
             paths: Vec::new(),
             images: Vec::new(),
+            #[cfg(feature = "text")]
             glyph_runs: Vec::new(),
             max_items,
         })
@@ -138,6 +145,7 @@ impl DisplayListBuilder {
         Ok(ImageId(id))
     }
     /// Registers immutable shaped glyph output.
+    #[cfg(feature = "text")]
     pub fn add_glyph_run(&mut self, run: GlyphRun) -> Result<GlyphRunId, SkiaError> {
         let id = self.resource_id(self.glyph_runs.len())?;
         self.glyph_runs
@@ -207,6 +215,7 @@ impl DisplayListBuilder {
         })
     }
     /// Records one registered shaped glyph run draw.
+    #[cfg(feature = "text")]
     pub fn draw_glyph_run(&mut self, run: GlyphRunId, paint: Paint) -> Result<(), SkiaError> {
         self.push(DrawCommand::DrawGlyphRun { run, paint })
     }
@@ -227,6 +236,7 @@ impl DisplayListBuilder {
             commands: self.commands,
             paths: self.paths,
             images: self.images,
+            #[cfg(feature = "text")]
             glyph_runs: self.glyph_runs,
         }
     }

@@ -18,6 +18,8 @@ flowchart LR
   api --> core["Skia core semantics"]
   api --> cpu["Skia CPU executor"]
   api --> gpu["Skia GPU executor"]
+  text --> gpu_text["GPU text adapter"]
+  gpu_text --> gpu
 ```
 
 ## Dependency rule
@@ -35,7 +37,13 @@ flowchart LR
   paths and path construction. Their dependencies flow only downward.
 - `skia/core` contains paint and backend-neutral display-list semantics. It
   depends on the foundational crates but never on an executor, platform
-  graphics API, caller-specific parser, document model, or Scene.
+  graphics API, caller-specific parser, document model, or Scene. Its default
+  `text` feature adds glyph-run display-list resources; GPU crates disable that
+  feature because generic atlas submission does not need shaping types.
+- `skia/gpu` owns only generic GPU resources, atlas quads, commands, and backend
+  submission. `skia/gpu/text` is the one-way adapter from font/layout data to
+  those primitives. Hardware backends depend on `skia-gpu`, never on the text
+  adapter, so adding Vulkan or WebGPU does not duplicate shaping or atlas policy.
 - `skia/image` owns the immutable RGBA8 resource representation. `skia/codec`
   parses untrusted, general-purpose image bytes into that representation and
   encodes those resources as general-purpose image formats. It does not depend
@@ -108,12 +116,15 @@ System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, general
 non-CJK inter-character justification, per-span paint and decoration styles, and
 decorative line variants remain upper text-layout responsibilities. GPU glyph
-atlases are available for bitmap text: `GpuGlyphAtlasBuilder` rasterizes and
-packs a `TextLayout`, and `GpuCommandEncoder` records its positioned glyphs as
-one bounded batch. The Metal backend uploads each atlas once per submission and
-draws Alpha8 masks and color glyphs through a real shader pipeline; it currently
-supports source-over blending for this path. Persistent cross-frame atlas cache
-policy remains an upper renderer responsibility.
+atlases are available through the separate `skia-gpu-text` adapter:
+`GpuTextAtlasBuilder` rasterizes and packs a `TextLayout`, while `skia-gpu`
+receives only a generic RGBA atlas and positioned quads. Registration consumes
+the atlas and returns metadata holding an exclusive borrow of its exact encoder
+and command-buffer resource ID, so atlas indices cannot cross command buffers.
+The Metal backend uploads each atlas once per submission and draws Alpha8 masks
+and color glyphs through a real shader pipeline; it currently supports
+source-over blending for this path. Persistent cross-frame atlas cache policy
+remains an upper renderer responsibility.
 
 ## Geometry and transforms
 

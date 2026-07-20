@@ -11,13 +11,16 @@
 mod display_list;
 mod paint;
 
-pub use display_list::{DisplayList, DisplayListBuilder, DrawCommand, GlyphRunId, ImageId, PathId};
+#[cfg(feature = "text")]
+pub use display_list::GlyphRunId;
+pub use display_list::{DisplayList, DisplayListBuilder, DrawCommand, ImageId, PathId};
 pub use paint::{BlendMode, Color, Paint};
 pub use skia_error::{SkiaError, SkiaErrorCode};
 pub use skia_geometry::{Point, Rect, Scalar, Transform};
 pub use skia_path::{
     Angle, ArcDirection, ArcStart, ConicWeight, FillRule, Path, PathBounds, PathBuilder, PathVerb,
 };
+#[cfg(feature = "text")]
 pub use skia_text::{
     FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId, FontLimits, FontMetrics,
     FontSlant, FontStyle, FontTag, FontVariation, FontVariationAxis, FontWidth, GlyphBitmap,

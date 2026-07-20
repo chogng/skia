@@ -473,6 +473,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "skia-gpu-text"
+version = "0.1.0"
+dependencies = [
+ "skia-core",
+ "skia-cpu",
+ "skia-gpu",
+ "skia-image",
+]
+
+[[package]]
 name = "skia-image"
 version = "0.1.0"
 
