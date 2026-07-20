@@ -1815,6 +1815,142 @@ fn selection_rects_follow_clusters_wraps_spacing_bidi_and_synthetic_markers() {
 }
 
 #[test]
+fn gdef_ligature_carets_drive_hit_testing_carets_and_partial_selection() {
+    let face = FontFace::from_bytes(FontId::new(160), toy_ligature_font(Some(&[200, 450])))
+        .expect("ligature font");
+    let shaped = face.shape("ffi", 10 << 16).expect("shape ffi ligature");
+    assert_eq!(shaped.glyphs().len(), 1);
+    assert_eq!(shaped.glyphs()[0].glyph(), GlyphId::new(2));
+    assert_eq!(shaped.glyphs()[0].cluster(), 0);
+
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts.add_face(face).expect("add ligature font");
+    let ltr = fonts
+        .layout_text(
+            "ffi",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("options"),
+        )
+        .expect("LTR ligature layout");
+    for affinity in [TextAffinity::Upstream, TextAffinity::Downstream] {
+        assert_eq!(
+            ltr.caret_for_position(TextPosition::new(1, affinity))
+                .expect("first ligature caret query")
+                .expect("first ligature caret")
+                .x_bits(),
+            2 << 16
+        );
+        assert_eq!(
+            ltr.caret_for_position(TextPosition::new(2, affinity))
+                .expect("second ligature caret query")
+                .expect("second ligature caret")
+                .x_bits(),
+            (4 << 16) + (1 << 15)
+        );
+    }
+    assert_eq!(
+        ltr.hit_test_point(2 << 16, 5 << 16)
+            .expect("hit first ligature caret")
+            .position()
+            .source_offset(),
+        1
+    );
+    let first = ltr.selection_rects(0, 1).expect("select first component");
+    assert_eq!((first[0].left_bits(), first[0].right_bits()), (0, 2 << 16));
+    let middle = ltr.selection_rects(1, 2).expect("select middle component");
+    assert_eq!(
+        (middle[0].left_bits(), middle[0].right_bits()),
+        (2 << 16, (4 << 16) + (1 << 15))
+    );
+    let last = ltr.selection_rects(2, 3).expect("select last component");
+    assert_eq!(
+        (last[0].left_bits(), last[0].right_bits()),
+        ((4 << 16) + (1 << 15), 6 << 16)
+    );
+
+    let rtl = fonts
+        .layout_text(
+            "ابج",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16)
+                .expect("options")
+                .with_base_direction(TextDirection::RightToLeft)
+                .with_alignment(TextAlignment::Left),
+        )
+        .expect("RTL ligature layout");
+    assert_eq!(
+        rtl.caret_for_position(TextPosition::new(2, TextAffinity::Downstream))
+            .expect("RTL first caret query")
+            .expect("RTL first caret")
+            .x_bits(),
+        (4 << 16) + (1 << 15)
+    );
+    assert_eq!(
+        rtl.caret_for_position(TextPosition::new(4, TextAffinity::Downstream))
+            .expect("RTL second caret query")
+            .expect("RTL second caret")
+            .x_bits(),
+        2 << 16
+    );
+    let rtl_first = rtl
+        .selection_rects(0, 2)
+        .expect("select RTL first component");
+    assert_eq!(
+        (rtl_first[0].left_bits(), rtl_first[0].right_bits()),
+        ((4 << 16) + (1 << 15), 6 << 16)
+    );
+
+    let mut atomic_fonts = FontCollection::new(FontCollectionLimits::default());
+    atomic_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(161), toy_ligature_font(None))
+                .expect("ligature font without GDEF"),
+        )
+        .expect("add atomic ligature font");
+    let atomic = atomic_fonts
+        .layout_text(
+            "ffi",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("options"),
+        )
+        .expect("atomic ligature layout");
+    assert_eq!(
+        atomic
+            .caret_for_position(TextPosition::new(1, TextAffinity::Downstream))
+            .expect("atomic caret query"),
+        None
+    );
+    assert_eq!(
+        atomic
+            .selection_rects(0, 1)
+            .expect_err("partial atomic ligature selection must fail")
+            .code(),
+        TextErrorCode::InvalidLayout
+    );
+
+    let mut mismatched_fonts = FontCollection::new(FontCollectionLimits::default());
+    mismatched_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(162), toy_ligature_font(Some(&[300])))
+                .expect("ligature font with mismatched GDEF"),
+        )
+        .expect("add mismatched ligature font");
+    let mismatched = mismatched_fonts
+        .layout_text(
+            "ffi",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("options"),
+        )
+        .expect("mismatched ligature layout");
+    assert_eq!(
+        mismatched
+            .caret_for_position(TextPosition::new(1, TextAffinity::Downstream))
+            .expect("mismatched caret query"),
+        None
+    );
+}
+
+#[test]
 fn cluster_spacing_affects_wraps_carets_bidi_justification_and_ellipsis() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
@@ -2377,6 +2513,35 @@ fn toy_localized_font(characters: &[char]) -> Vec<u8> {
     ])
 }
 
+fn toy_ligature_font(caret_coordinates: Option<&[i16]>) -> Vec<u8> {
+    let outline = glyf_table();
+    let mut glyf = outline.clone();
+    glyf.extend_from_slice(&outline);
+    let mut hhea = hhea_table();
+    put_u16(&mut hhea, 34, 3);
+    let mut hmtx = hmtx_table();
+    push_u16(&mut hmtx, 600);
+    push_i16(&mut hmtx, 0);
+    let mut loca = loca_table();
+    push_u16(&mut loca, 34);
+    let mut maxp = maxp_table();
+    put_u16(&mut maxp, 4, 3);
+    let mut tables = vec![
+        (*b"cmap", cmap_table(&['f', 'i', 'ا', 'ب', 'ج'])),
+        (*b"glyf", glyf),
+        (*b"GSUB", ligature_gsub_table()),
+        (*b"head", head_table()),
+        (*b"hhea", hhea),
+        (*b"hmtx", hmtx),
+        (*b"loca", loca),
+        (*b"maxp", maxp),
+    ];
+    if let Some(coordinates) = caret_coordinates {
+        tables.push((*b"GDEF", ligature_gdef_table(coordinates)));
+    }
+    build_font_from_tables(tables)
+}
+
 fn build_toy_font(
     characters: &[char],
     metadata: Option<(&str, FontStyle)>,
@@ -2490,6 +2655,99 @@ fn localized_gsub_table() -> Vec<u8> {
     table.extend(script_list);
     table.extend(feature_list);
     table.extend(lookup_list);
+    table
+}
+
+fn ligature_gsub_table() -> Vec<u8> {
+    let mut script_list = Vec::new();
+    push_u16(&mut script_list, 2);
+    script_list.extend_from_slice(b"arab");
+    push_u16(&mut script_list, 14);
+    script_list.extend_from_slice(b"latn");
+    push_u16(&mut script_list, 26);
+    for _ in 0..2 {
+        push_u16(&mut script_list, 4);
+        push_u16(&mut script_list, 0);
+        push_u16(&mut script_list, 0);
+        push_u16(&mut script_list, 0xffff);
+        push_u16(&mut script_list, 1);
+        push_u16(&mut script_list, 0);
+    }
+
+    let mut feature_list = Vec::new();
+    push_u16(&mut feature_list, 1);
+    feature_list.extend_from_slice(b"liga");
+    push_u16(&mut feature_list, 8);
+    push_u16(&mut feature_list, 0);
+    push_u16(&mut feature_list, 1);
+    push_u16(&mut feature_list, 0);
+
+    let mut substitution = Vec::new();
+    push_u16(&mut substitution, 1);
+    push_u16(&mut substitution, 8);
+    push_u16(&mut substitution, 1);
+    push_u16(&mut substitution, 14);
+    push_u16(&mut substitution, 1);
+    push_u16(&mut substitution, 1);
+    push_u16(&mut substitution, 1);
+    push_u16(&mut substitution, 1);
+    push_u16(&mut substitution, 4);
+    push_u16(&mut substitution, 2);
+    push_u16(&mut substitution, 3);
+    push_u16(&mut substitution, 1);
+    push_u16(&mut substitution, 1);
+
+    let mut lookup_list = Vec::new();
+    push_u16(&mut lookup_list, 1);
+    push_u16(&mut lookup_list, 4);
+    push_u16(&mut lookup_list, 4);
+    push_u16(&mut lookup_list, 0);
+    push_u16(&mut lookup_list, 1);
+    push_u16(&mut lookup_list, 8);
+    lookup_list.extend(substitution);
+
+    let script_offset = 10_u16;
+    let feature_offset =
+        script_offset + u16::try_from(script_list.len()).expect("small script list");
+    let lookup_offset =
+        feature_offset + u16::try_from(feature_list.len()).expect("small feature list");
+    let mut table = Vec::new();
+    push_u32(&mut table, 0x0001_0000);
+    push_u16(&mut table, script_offset);
+    push_u16(&mut table, feature_offset);
+    push_u16(&mut table, lookup_offset);
+    table.extend(script_list);
+    table.extend(feature_list);
+    table.extend(lookup_list);
+    table
+}
+
+fn ligature_gdef_table(caret_coordinates: &[i16]) -> Vec<u8> {
+    assert!(!caret_coordinates.is_empty());
+    let caret_count = u16::try_from(caret_coordinates.len()).expect("small caret count");
+    let mut table = Vec::new();
+    push_u32(&mut table, 0x0001_0000);
+    push_u16(&mut table, 0);
+    push_u16(&mut table, 0);
+    push_u16(&mut table, 12);
+    push_u16(&mut table, 0);
+
+    push_u16(&mut table, 6);
+    push_u16(&mut table, 1);
+    push_u16(&mut table, 12);
+    push_u16(&mut table, 1);
+    push_u16(&mut table, 1);
+    push_u16(&mut table, 2);
+
+    push_u16(&mut table, caret_count);
+    let caret_values_offset = 2 + caret_count * 2;
+    for index in 0..caret_count {
+        push_u16(&mut table, caret_values_offset + index * 4);
+    }
+    for coordinate in caret_coordinates {
+        push_u16(&mut table, 1);
+        push_i16(&mut table, *coordinate);
+    }
     table
 }
 

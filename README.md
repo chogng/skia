@@ -89,12 +89,15 @@ can also request underline and strike-through lines. Their scaled position and
 thickness come from the collection's primary OpenType face for uniform layout,
 or from the logical line-start span for styled layout, and stay continuous
 across fallback runs; CPU layout drawing paints them after glyph outlines.
-`TextLayout` also maps layout-local points to UTF-8 cluster boundaries and
-resolves source positions back to vertical carets. Upstream/downstream affinity
+`TextLayout` also maps layout-local points to editable UTF-8 boundaries and
+resolves source positions back to vertical carets. Font-provided OpenType GDEF
+ligature caret coordinates add internal stops without dividing shaping output.
+Upstream/downstream affinity
 distinguishes soft-wrap and bidi boundary positions; alignment, justification,
 synthetic hyphens, empty lines, and mixed line metrics are included.
-Cluster-boundary source ranges resolve to line-local `TextSelectionRect`
-geometry. Wrapped ranges split by line, bidi ranges split by visual
+Caret-boundary source ranges resolve to line-local `TextSelectionRect`
+geometry, including partial ligature components when GDEF data is available.
+Wrapped ranges split by line, bidi ranges split by visual
 discontinuity, and synthetic markers remain excluded.
 Line limits default to an all-or-error resource policy. Callers can explicitly
 select clipped output or a grapheme-safe, reshaped final-line ellipsis.
@@ -104,8 +107,7 @@ back to three periods without consuming source bytes.
 System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, general
 non-CJK inter-character justification, per-span paint and decoration styles, and
-decorative line variants remain upper text-layout responsibilities. Ligature
-internal caret data is not exposed. GPU glyph
+decorative line variants remain upper text-layout responsibilities. GPU glyph
 commands, glyph atlases, hinting, and color-font painting are not implemented
 yet.
 

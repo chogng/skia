@@ -110,7 +110,7 @@ pub struct TextHitResult {
 }
 
 impl TextHitResult {
-    /// Returns the nearest cluster-boundary source position.
+    /// Returns the nearest editable source position.
     pub const fn position(self) -> TextPosition {
         self.position
     }
@@ -503,11 +503,13 @@ impl TextLayout {
         self.truncated
     }
 
-    /// Snaps one layout-local Q16.16 point to the nearest shaping-cluster edge.
+    /// Snaps one layout-local Q16.16 point to the nearest editable caret stop.
     ///
     /// Vertical coordinates outside the block clamp to the nearest line.
     /// Horizontal coordinates outside a line clamp to its nearest caret stop.
-    /// Ligatures and other multi-codepoint clusters remain atomic.
+    /// Ligatures expose internal stops only when their font supplies matching
+    /// OpenType GDEF caret coordinates; other multi-codepoint clusters remain
+    /// atomic.
     pub fn hit_test_point(&self, x_bits: i32, y_bits: i32) -> Result<TextHitResult, TextError> {
         let line_index = self.nearest_line_index(y_bits)?;
         let stops = line_caret_stops(&self.lines[line_index])?;
@@ -521,11 +523,12 @@ impl TextLayout {
         })
     }
 
-    /// Resolves a source cluster boundary to a layout-local vertical caret.
+    /// Resolves an editable source boundary to a layout-local vertical caret.
     ///
     /// At soft wraps, `Upstream` selects the preceding line end and
     /// `Downstream` selects the following line start. Returns `Ok(None)` when
-    /// the offset is not a shaped cluster boundary in this layout.
+    /// the offset is neither a shaped cluster edge nor a font-backed ligature
+    /// caret in this layout.
     pub fn caret_for_position(
         &self,
         position: TextPosition,
@@ -547,10 +550,11 @@ impl TextLayout {
         Ok(fallback)
     }
 
-    /// Returns visual rectangles for a cluster-boundary UTF-8 source range.
+    /// Returns visual rectangles for a caret-boundary UTF-8 source range.
     ///
     /// Rectangles are layout-local, ordered by line and visual position, and
     /// include inter-cluster spacing between adjacent selected clusters.
+    /// Font-backed ligature caret coordinates allow partial-ligature ranges.
     /// Synthetic hyphens and ellipses are excluded because they consume no
     /// source bytes. A collapsed range returns no rectangles. Reversed ranges
     /// or endpoints that are not visible cluster boundaries return
@@ -626,11 +630,11 @@ impl TextLayout {
                     while end < glyphs.len() && glyphs[end].cluster() == cluster {
                         end += 1;
                     }
-                    let selected = if shaped.source_start() == shaped.source_end()
+                    let selected_bounds = if shaped.source_start() == shaped.source_end()
                         || cluster < line.source_start
                         || cluster >= line.source_end
                     {
-                        false
+                        None
                     } else {
                         let boundary_index = boundaries
                             .binary_search(&cluster)
@@ -638,10 +642,33 @@ impl TextLayout {
                         let cluster_end = *boundaries
                             .get(boundary_index + 1)
                             .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
-                        cluster >= source_start && cluster_end <= source_end
+                        let selected_start = cluster.max(source_start);
+                        let selected_end = cluster_end.min(source_end);
+                        if selected_start >= selected_end {
+                            None
+                        } else {
+                            let positions = cluster_caret_positions(
+                                line,
+                                shaped,
+                                first,
+                                end,
+                                cluster,
+                                cluster_end,
+                            )?;
+                            let start_bits = positions
+                                .iter()
+                                .find(|position| position.source_offset == selected_start)
+                                .map(|position| position.x_bits)
+                                .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+                            let end_bits = positions
+                                .iter()
+                                .find(|position| position.source_offset == selected_end)
+                                .map(|position| position.x_bits)
+                                .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+                            Some((start_bits.min(end_bits), start_bits.max(end_bits)))
+                        }
                     };
-                    if selected {
-                        let (left_bits, right_bits) = glyph_group_bounds(line, shaped, first, end)?;
+                    if let Some((left_bits, right_bits)) = selected_bounds {
                         active = Some(active.map_or((left_bits, right_bits), |(left, right)| {
                             (left.min(left_bits), right.max(right_bits))
                         }));
@@ -1399,8 +1426,14 @@ fn line_caret_stops(line: &ShapedLine) -> Result<Vec<CaretStop>, TextError> {
     boundaries.dedup();
 
     let mut stops = Vec::new();
+    let ligature_caret_count = paragraph.runs().iter().try_fold(0_usize, |total, shaped| {
+        total
+            .checked_add(shaped.glyph_run().ligature_carets().len())
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))
+    })?;
     let stop_capacity = glyph_count
         .checked_mul(2)
+        .and_then(|value| value.checked_add(ligature_caret_count.checked_mul(2)?))
         .and_then(|value| value.checked_add(2))
         .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
     stops
@@ -1429,10 +1462,16 @@ fn line_caret_stops(line: &ShapedLine) -> Result<Vec<CaretStop>, TextError> {
                 let cluster_end = *boundaries
                     .get(boundary_index + 1)
                     .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
-                let (start_bits, end_bits) = match shaped.direction() {
-                    TextDirection::LeftToRight => (left_bits, right_bits),
-                    TextDirection::RightToLeft => (right_bits, left_bits),
-                };
+                let positions =
+                    cluster_caret_positions(line, shaped, first, end, cluster, cluster_end)?;
+                let start_bits = positions
+                    .first()
+                    .ok_or(TextError::new(TextErrorCode::InvalidLayout))?
+                    .x_bits;
+                let end_bits = positions
+                    .last()
+                    .ok_or(TextError::new(TextErrorCode::InvalidLayout))?
+                    .x_bits;
                 stops.push(CaretStop {
                     position: TextPosition::new(cluster, TextAffinity::Downstream),
                     x_bits: start_bits,
@@ -1441,6 +1480,23 @@ fn line_caret_stops(line: &ShapedLine) -> Result<Vec<CaretStop>, TextError> {
                     position: TextPosition::new(cluster_end, TextAffinity::Upstream),
                     x_bits: end_bits,
                 });
+                for position in positions
+                    .iter()
+                    .skip(1)
+                    .take(positions.len().saturating_sub(2))
+                {
+                    stops.push(CaretStop {
+                        position: TextPosition::new(position.source_offset, TextAffinity::Upstream),
+                        x_bits: position.x_bits,
+                    });
+                    stops.push(CaretStop {
+                        position: TextPosition::new(
+                            position.source_offset,
+                            TextAffinity::Downstream,
+                        ),
+                        x_bits: position.x_bits,
+                    });
+                }
             }
             first = end;
         }
@@ -1475,6 +1531,81 @@ fn line_caret_stops(line: &ShapedLine) -> Result<Vec<CaretStop>, TextError> {
         });
     }
     Ok(stops)
+}
+
+#[derive(Clone, Copy)]
+struct ClusterCaretPosition {
+    source_offset: u32,
+    x_bits: i32,
+}
+
+fn cluster_caret_positions(
+    line: &ShapedLine,
+    shaped: &crate::ShapedRun,
+    first: usize,
+    end: usize,
+    cluster: u32,
+    cluster_end: u32,
+) -> Result<Vec<ClusterCaretPosition>, TextError> {
+    let (left_bits, right_bits) = glyph_group_bounds(line, shaped, first, end)?;
+    let (start_bits, end_bits) = match shaped.direction() {
+        TextDirection::LeftToRight => (left_bits, right_bits),
+        TextDirection::RightToLeft => (right_bits, left_bits),
+    };
+    let run = shaped.glyph_run();
+    let mut positions = Vec::new();
+    positions
+        .try_reserve(run.ligature_carets().len().saturating_add(2))
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    positions.push(ClusterCaretPosition {
+        source_offset: cluster,
+        x_bits: start_bits,
+    });
+    for caret in run.ligature_carets() {
+        if caret.glyph_index < first
+            || caret.glyph_index >= end
+            || caret.source_offset <= cluster
+            || caret.source_offset >= cluster_end
+        {
+            continue;
+        }
+        let glyph = *run
+            .glyphs()
+            .get(caret.glyph_index)
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        let offset_bits = *shaped
+            .glyph_offsets_x_bits()
+            .get(caret.glyph_index)
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        let design_bits = glyph
+            .x()
+            .bits()
+            .checked_add(caret.x.bits())
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        let scaled_bits = scaled_glyph_coordinate_bits(design_bits, run)?;
+        let x_bits = line
+            .offset_x_bits
+            .checked_add(shaped.origin_x_bits())
+            .and_then(|value| value.checked_add(offset_bits))
+            .and_then(|value| value.checked_add(scaled_bits))
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        positions.push(ClusterCaretPosition {
+            source_offset: caret.source_offset,
+            x_bits,
+        });
+    }
+    positions.push(ClusterCaretPosition {
+        source_offset: cluster_end,
+        x_bits: end_bits,
+    });
+    positions.sort_unstable_by_key(|position| position.source_offset);
+    if positions
+        .windows(2)
+        .any(|pair| pair[0].source_offset == pair[1].source_offset)
+    {
+        return Err(TextError::new(TextErrorCode::InvalidLayout));
+    }
+    Ok(positions)
 }
 
 fn glyph_group_bounds(

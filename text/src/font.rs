@@ -1,10 +1,11 @@
 use std::{fmt, sync::Arc};
 
 use rustybuzz::ttf_parser::{self, OutlineBuilder};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment,
-    PositionedGlyph, TextDirection, TextError, TextErrorCode, TextUnit,
+    FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, LigatureCaret, OutlinePoint,
+    OutlineSegment, PositionedGlyph, TextDirection, TextError, TextErrorCode, TextUnit,
 };
 
 /// Standard OpenType width class used during family matching.
@@ -770,6 +771,10 @@ impl FontFace {
                     .map_err(|_| TextError::new(TextErrorCode::InvalidLanguage))?,
             );
         }
+        let shaping_direction = match buffer.direction() {
+            rustybuzz::Direction::RightToLeft => TextDirection::RightToLeft,
+            _ => TextDirection::LeftToRight,
+        };
         let mut features = Vec::new();
         features
             .try_reserve_exact(self.features.len())
@@ -824,7 +829,20 @@ impl FontFace {
                 .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
         }
 
-        GlyphRun::new(self.id, font_size_bits, self.units_per_em, glyphs)
+        let ligature_carets = collect_ligature_carets(
+            face.as_ref(),
+            text,
+            cluster_offset,
+            shaping_direction,
+            &glyphs,
+        )?;
+        GlyphRun::with_ligature_carets(
+            self.id,
+            font_size_bits,
+            self.units_per_em,
+            glyphs,
+            ligature_carets,
+        )
     }
 
     fn parser_face(&self) -> Result<ttf_parser::Face<'_>, TextError> {
@@ -839,6 +857,302 @@ impl FontFace {
         }
         Ok(face)
     }
+}
+
+fn collect_ligature_carets(
+    face: &ttf_parser::Face<'_>,
+    text: &str,
+    cluster_offset: u32,
+    direction: TextDirection,
+    glyphs: &[PositionedGlyph],
+) -> Result<Vec<LigatureCaret>, TextError> {
+    let source_end = u32::try_from(text.len())
+        .ok()
+        .and_then(|length| cluster_offset.checked_add(length))
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let mut cluster_boundaries = Vec::new();
+    cluster_boundaries
+        .try_reserve(glyphs.len().saturating_add(1))
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    cluster_boundaries.push(source_end);
+    cluster_boundaries.extend(glyphs.iter().map(|glyph| glyph.cluster()));
+    cluster_boundaries.sort_unstable();
+    cluster_boundaries.dedup();
+
+    let mut carets = Vec::new();
+    let mut first = 0_usize;
+    while first < glyphs.len() {
+        let cluster = glyphs[first].cluster();
+        let mut end = first + 1;
+        while end < glyphs.len() && glyphs[end].cluster() == cluster {
+            end += 1;
+        }
+        let cluster_index = cluster_boundaries
+            .binary_search(&cluster)
+            .map_err(|_| TextError::new(TextErrorCode::InvalidLayout))?;
+        let cluster_end = *cluster_boundaries
+            .get(cluster_index + 1)
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        let local_start = usize::try_from(
+            cluster
+                .checked_sub(cluster_offset)
+                .ok_or(TextError::new(TextErrorCode::InvalidLayout))?,
+        )
+        .map_err(|_| TextError::new(TextErrorCode::NumericOverflow))?;
+        let local_end = usize::try_from(
+            cluster_end
+                .checked_sub(cluster_offset)
+                .ok_or(TextError::new(TextErrorCode::InvalidLayout))?,
+        )
+        .map_err(|_| TextError::new(TextErrorCode::NumericOverflow))?;
+        if local_start > local_end
+            || local_end > text.len()
+            || !text.is_char_boundary(local_start)
+            || !text.is_char_boundary(local_end)
+        {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        let mut source_boundaries: Vec<u32> = text[local_start..local_end]
+            .grapheme_indices(true)
+            .skip(1)
+            .map(|(relative, _)| {
+                u32::try_from(local_start + relative)
+                    .ok()
+                    .and_then(|offset| cluster_offset.checked_add(offset))
+                    .ok_or(TextError::new(TextErrorCode::NumericOverflow))
+            })
+            .collect::<Result<_, _>>()?;
+        if !source_boundaries.is_empty() {
+            let mut matching = None;
+            for (relative_index, glyph) in glyphs[first..end].iter().enumerate() {
+                let glyph_id = u16::try_from(glyph.glyph().value())
+                    .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+                let coordinates =
+                    gdef_ligature_caret_coordinates(face, glyph_id, source_boundaries.len())?;
+                if coordinates.len() == source_boundaries.len() {
+                    if matching.is_some() {
+                        matching = None;
+                        break;
+                    }
+                    matching = Some((first + relative_index, coordinates));
+                }
+            }
+            if let Some((glyph_index, mut coordinates)) = matching {
+                coordinates.sort_unstable();
+                coordinates.dedup();
+                let advance_bits = glyphs[glyph_index].advance_x().bits();
+                let minimum = advance_bits.min(0);
+                let maximum = advance_bits.max(0);
+                let coordinates_are_internal = coordinates.iter().all(|coordinate| {
+                    i32::try_from(i64::from(*coordinate) * 64)
+                        .is_ok_and(|coordinate| coordinate > minimum && coordinate < maximum)
+                });
+                if coordinates.len() == source_boundaries.len() && coordinates_are_internal {
+                    if direction == TextDirection::RightToLeft {
+                        coordinates.reverse();
+                    }
+                    carets
+                        .try_reserve(source_boundaries.len())
+                        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+                    for (source_offset, coordinate) in source_boundaries.drain(..).zip(coordinates)
+                    {
+                        carets.push(LigatureCaret {
+                            glyph_index,
+                            source_offset,
+                            x: TextUnit::from_i32(coordinate)?,
+                        });
+                    }
+                }
+            }
+        }
+        first = end;
+    }
+    Ok(carets)
+}
+
+fn gdef_ligature_caret_coordinates(
+    face: &ttf_parser::Face<'_>,
+    glyph_id: u16,
+    expected_count: usize,
+) -> Result<Vec<i32>, TextError> {
+    let Some(data) = face.raw_face().table(ttf_parser::Tag::from_bytes(b"GDEF")) else {
+        return Ok(Vec::new());
+    };
+    let version = gdef_u32(data, 0).ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+    if !matches!(version, 0x0001_0000 | 0x0001_0002 | 0x0001_0003) {
+        return Err(TextError::new(TextErrorCode::InvalidFontData));
+    }
+    let list_offset =
+        usize::from(gdef_u16(data, 8).ok_or(TextError::new(TextErrorCode::InvalidFontData))?);
+    if list_offset == 0 {
+        return Ok(Vec::new());
+    }
+    let coverage_offset = usize::from(
+        gdef_u16(data, list_offset).ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+    );
+    let glyph_count = usize::from(
+        gdef_u16(data, list_offset + 2).ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+    );
+    let coverage = list_offset
+        .checked_add(coverage_offset)
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let Some(coverage_index) = gdef_coverage_index(data, coverage, glyph_id)? else {
+        return Ok(Vec::new());
+    };
+    if coverage_index >= glyph_count {
+        return Err(TextError::new(TextErrorCode::InvalidFontData));
+    }
+    let offset_position = list_offset
+        .checked_add(4)
+        .and_then(|offset| offset.checked_add(coverage_index.checked_mul(2)?))
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let ligature_offset = usize::from(
+        gdef_u16(data, offset_position).ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+    );
+    let ligature = list_offset
+        .checked_add(ligature_offset)
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let caret_count = usize::from(
+        gdef_u16(data, ligature).ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+    );
+    if caret_count != expected_count {
+        return Ok(Vec::new());
+    }
+    let mut coordinates = Vec::new();
+    coordinates
+        .try_reserve_exact(caret_count)
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    for index in 0..caret_count {
+        let offset_position = ligature
+            .checked_add(2)
+            .and_then(|offset| offset.checked_add(index.checked_mul(2)?))
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        let caret_offset = usize::from(
+            gdef_u16(data, offset_position)
+                .ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+        );
+        let caret = ligature
+            .checked_add(caret_offset)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        let format = gdef_u16(data, caret).ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+        match format {
+            1 => coordinates.push(i32::from(
+                gdef_i16(data, caret + 2).ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+            )),
+            3 => {
+                let base = i32::from(
+                    gdef_i16(data, caret + 2)
+                        .ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+                );
+                let device_offset = usize::from(
+                    gdef_u16(data, caret + 4)
+                        .ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+                );
+                let variation_delta = if device_offset == 0 {
+                    0
+                } else {
+                    let device = caret
+                        .checked_add(device_offset)
+                        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+                    let outer_index = gdef_u16(data, device)
+                        .ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+                    let inner_index = gdef_u16(data, device + 2)
+                        .ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+                    let delta_format = gdef_u16(data, device + 4)
+                        .ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+                    if delta_format == 0x8000 {
+                        face.tables()
+                            .gdef
+                            .and_then(|gdef| {
+                                gdef.glyph_variation_delta(
+                                    outer_index,
+                                    inner_index,
+                                    face.variation_coordinates(),
+                                )
+                            })
+                            .map_or(0, |delta| delta.round() as i32)
+                    } else {
+                        0
+                    }
+                };
+                coordinates.push(
+                    base.checked_add(variation_delta)
+                        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?,
+                );
+            }
+            2 => return Ok(Vec::new()),
+            _ => return Err(TextError::new(TextErrorCode::InvalidFontData)),
+        }
+    }
+    Ok(coordinates)
+}
+
+fn gdef_coverage_index(
+    data: &[u8],
+    offset: usize,
+    glyph_id: u16,
+) -> Result<Option<usize>, TextError> {
+    let format = gdef_u16(data, offset).ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+    let count = usize::from(
+        gdef_u16(data, offset + 2).ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+    );
+    match format {
+        1 => {
+            for index in 0..count {
+                let position = offset
+                    .checked_add(4)
+                    .and_then(|value| value.checked_add(index.checked_mul(2)?))
+                    .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+                let covered = gdef_u16(data, position)
+                    .ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+                if covered == glyph_id {
+                    return Ok(Some(index));
+                }
+            }
+        }
+        2 => {
+            for index in 0..count {
+                let position = offset
+                    .checked_add(4)
+                    .and_then(|value| value.checked_add(index.checked_mul(6)?))
+                    .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+                let start = gdef_u16(data, position)
+                    .ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+                let end = gdef_u16(data, position + 2)
+                    .ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+                let start_index = usize::from(
+                    gdef_u16(data, position + 4)
+                        .ok_or(TextError::new(TextErrorCode::InvalidFontData))?,
+                );
+                if glyph_id >= start && glyph_id <= end {
+                    return start_index
+                        .checked_add(usize::from(glyph_id - start))
+                        .map(Some)
+                        .ok_or(TextError::new(TextErrorCode::NumericOverflow));
+                }
+            }
+        }
+        _ => return Err(TextError::new(TextErrorCode::InvalidFontData)),
+    }
+    Ok(None)
+}
+
+fn gdef_u16(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(
+        data.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+fn gdef_i16(data: &[u8], offset: usize) -> Option<i16> {
+    Some(i16::from_be_bytes(
+        data.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+fn gdef_u32(data: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        data.get(offset..offset + 4)?.try_into().ok()?,
+    ))
 }
 
 fn preferred_family_name(face: &ttf_parser::Face<'_>) -> Option<String> {

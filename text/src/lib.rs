@@ -265,6 +265,14 @@ pub struct GlyphRun {
     font_size_bits: i32,
     units_per_em: u16,
     glyphs: Vec<PositionedGlyph>,
+    ligature_carets: Vec<LigatureCaret>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LigatureCaret {
+    pub(crate) glyph_index: usize,
+    pub(crate) source_offset: u32,
+    pub(crate) x: TextUnit,
 }
 
 impl GlyphRun {
@@ -289,6 +297,27 @@ impl GlyphRun {
             font_size_bits,
             units_per_em,
             glyphs,
+            ligature_carets: Vec::new(),
+        })
+    }
+
+    pub(crate) fn with_ligature_carets(
+        font: FontId,
+        font_size_bits: i32,
+        units_per_em: u16,
+        glyphs: Vec<PositionedGlyph>,
+        ligature_carets: Vec<LigatureCaret>,
+    ) -> Result<Self, TextError> {
+        let run = Self::new(font, font_size_bits, units_per_em, glyphs)?;
+        if ligature_carets
+            .iter()
+            .any(|caret| caret.glyph_index >= run.glyphs.len())
+        {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        Ok(Self {
+            ligature_carets,
+            ..run
         })
     }
 
@@ -310,6 +339,10 @@ impl GlyphRun {
     /// Borrows shaped glyphs in visual drawing order.
     pub fn glyphs(&self) -> &[PositionedGlyph] {
         &self.glyphs
+    }
+
+    pub(crate) fn ligature_carets(&self) -> &[LigatureCaret] {
+        &self.ligature_carets
     }
 }
 
