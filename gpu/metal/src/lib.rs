@@ -184,11 +184,16 @@ impl MetalBackend {
         let descriptor = RenderPipelineDescriptor::new();
         descriptor.set_vertex_function(Some(&vertex));
         descriptor.set_fragment_function(Some(&fragment));
-        descriptor
+        let solid_attachment = descriptor
             .color_attachments()
             .object_at(0)
-            .ok_or(MetalError::new(MetalErrorCode::PipelineCreationFailed))?
-            .set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+            .ok_or(MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+        solid_attachment.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+        solid_attachment.set_blending_enabled(true);
+        solid_attachment.set_source_rgb_blend_factor(MTLBlendFactor::SourceAlpha);
+        solid_attachment.set_destination_rgb_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
+        solid_attachment.set_source_alpha_blend_factor(MTLBlendFactor::One);
+        solid_attachment.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
         let solid_rect_pipeline = device
             .new_render_pipeline_state(&descriptor)
             .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
@@ -297,11 +302,11 @@ impl GpuBackend for MetalBackend {
         surface: &mut Self::Surface,
         commands: &GpuCommandBuffer,
     ) -> Result<(), Self::Error> {
-        // Keep the validated shader pipeline resident for subsequent FillRect support.
-        let _solid_rect_pipeline = &self.solid_rect_pipeline;
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(_) => {}
+                GpuCommand::FillRect { paint, .. }
+                    if paint.blend_mode() == BlendMode::SourceOver => {}
                 GpuCommand::DrawGlyphs { atlas, paint, .. } => {
                     if paint.blend_mode() != BlendMode::SourceOver
                         || commands.glyph_atlas(*atlas).is_none()
@@ -337,6 +342,21 @@ impl GpuBackend for MetalBackend {
                 GpuCommand::Clear(color) => {
                     encode_clear(command_buffer, surface, *color)?;
                 }
+                GpuCommand::FillRect {
+                    rect,
+                    paint,
+                    transform,
+                    clip,
+                } => {
+                    self.encode_solid_rect(
+                        command_buffer,
+                        surface,
+                        *rect,
+                        *paint,
+                        *transform,
+                        *clip,
+                    )?;
+                }
                 GpuCommand::DrawGlyphs {
                     atlas,
                     glyphs,
@@ -357,9 +377,9 @@ impl GpuBackend for MetalBackend {
                         *clip,
                     )?;
                 }
-                GpuCommand::FillRect { .. }
-                | GpuCommand::FillPath { .. }
-                | GpuCommand::DrawImage { .. } => unreachable!("commands were prevalidated"),
+                GpuCommand::FillPath { .. } | GpuCommand::DrawImage { .. } => {
+                    unreachable!("commands were prevalidated")
+                }
             }
         }
         let blit = command_buffer.new_blit_command_encoder();
@@ -375,6 +395,41 @@ impl GpuBackend for MetalBackend {
 }
 
 impl MetalBackend {
+    #[allow(clippy::too_many_arguments)]
+    fn encode_solid_rect(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: &MetalSurface,
+        rect: Rect,
+        paint: skia_core::Paint,
+        transform: Transform,
+        clip: Option<Rect>,
+    ) -> Result<(), MetalError> {
+        let Some(scissor) = scissor_rect(clip, surface.descriptor) else {
+            return Ok(());
+        };
+        let vertices = solid_rect_vertices(rect, transform)?;
+        let byte_length = u64::try_from(size_of_val(&vertices))
+            .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        let vertex_buffer = self.device.new_buffer_with_data(
+            vertices.as_ptr().cast(),
+            byte_length,
+            MTLResourceOptions::CPUCacheModeDefaultCache,
+        );
+        let descriptor = render_pass(surface, MTLLoadAction::Load)?;
+        let encoder = command_buffer.new_render_command_encoder(descriptor);
+        encoder.set_render_pipeline_state(&self.solid_rect_pipeline);
+        encoder.set_scissor_rect(scissor);
+        encoder.set_vertex_buffer(0, Some(&vertex_buffer), 0);
+        let viewport = viewport_size(surface.descriptor);
+        encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
+        let color = paint_color(paint.color());
+        encoder.set_fragment_bytes(0, size_of_val(&color) as u64, color.as_ptr().cast());
+        encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, vertices.len() as u64);
+        encoder.end_encoding();
+        Ok(())
+    }
+
     fn atlas_texture(&mut self, atlas: &GpuGlyphAtlas) -> Result<Texture, MetalError> {
         let now = self
             .atlas_cache_clock
@@ -529,25 +584,21 @@ impl MetalBackend {
         encoder.set_render_pipeline_state(&self.glyph_pipeline);
         encoder.set_scissor_rect(scissor);
         encoder.set_vertex_buffer(0, Some(&vertex_buffer), 0);
-        let viewport = [
-            surface.descriptor.width() as f32,
-            surface.descriptor.height() as f32,
-        ];
+        let viewport = viewport_size(surface.descriptor);
         encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
-        let [red, green, blue, alpha] = paint.color().channels();
-        let scale = f32::from(u8::MAX);
-        let paint = [
-            f32::from(red) / scale,
-            f32::from(green) / scale,
-            f32::from(blue) / scale,
-            f32::from(alpha) / scale,
-        ];
+        let paint = paint_color(paint.color());
         encoder.set_fragment_bytes(0, size_of_val(&paint) as u64, paint.as_ptr().cast());
         encoder.set_fragment_texture(0, Some(atlas));
         encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, vertices.len() as u64);
         encoder.end_encoding();
         Ok(())
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SolidVertex {
+    position: [f32; 2],
 }
 
 struct CachedAtlasTexture {
@@ -564,6 +615,40 @@ struct GlyphVertex {
     position: [f32; 2],
     atlas_position: [f32; 2],
     mask: u32,
+}
+
+fn solid_rect_vertices(rect: Rect, transform: Transform) -> Result<[SolidVertex; 6], MetalError> {
+    let logical = [
+        Point::new(rect.left(), rect.top()),
+        Point::new(rect.right(), rect.top()),
+        Point::new(rect.left(), rect.bottom()),
+        Point::new(rect.right(), rect.bottom()),
+    ];
+    let mut position = [[0.0; 2]; 4];
+    for (index, point) in logical.into_iter().enumerate() {
+        let mapped = transform
+            .map_point(point)
+            .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        position[index] = [scalar_to_f32(mapped.x()), scalar_to_f32(mapped.y())];
+    }
+    Ok([0, 1, 2, 1, 3, 2].map(|index| SolidVertex {
+        position: position[index],
+    }))
+}
+
+fn viewport_size(descriptor: GpuSurfaceDescriptor) -> [f32; 2] {
+    [descriptor.width() as f32, descriptor.height() as f32]
+}
+
+fn paint_color(color: Color) -> [f32; 4] {
+    let [red, green, blue, alpha] = color.channels();
+    let scale = f32::from(u8::MAX);
+    [
+        f32::from(red) / scale,
+        f32::from(green) / scale,
+        f32::from(blue) / scale,
+        f32::from(alpha) / scale,
+    ]
 }
 
 fn glyph_vertices(

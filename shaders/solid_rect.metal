@@ -8,8 +8,14 @@ struct SolidVertex {
 
 vertex float4 skia_solid_rect_vertex(
     const device SolidVertex* vertices [[buffer(0)]],
+    constant float2& viewport_size [[buffer(1)]],
     uint vertex_id [[vertex_id]]) {
-    return float4(vertices[vertex_id].position, 0.0, 1.0);
+    float2 position = vertices[vertex_id].position;
+    return float4(
+        position.x / viewport_size.x * 2.0 - 1.0,
+        1.0 - position.y / viewport_size.y * 2.0,
+        0.0,
+        1.0);
 }
 
 fragment float4 skia_solid_rect_fragment(

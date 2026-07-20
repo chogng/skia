@@ -1,4 +1,4 @@
-use skia_core::{Color, Paint, Rect, Scalar};
+use skia_core::{BlendMode, Color, Paint, Rect, Scalar, Transform};
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandBuffer, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphAtlasKey,
     GpuGlyphQuad, GpuSurfaceDescriptor,
@@ -41,7 +41,7 @@ fn metal_backend_fails_closed_for_unimplemented_draw_commands() {
                 Scalar::from_i32(1).unwrap(),
             )
             .unwrap(),
-            Paint::new(Color::BLACK),
+            Paint::new(Color::BLACK).with_blend_mode(BlendMode::Multiply),
         )
         .unwrap();
     assert_eq!(
@@ -51,6 +51,45 @@ fn metal_backend_fails_closed_for_unimplemented_draw_commands() {
             .code(),
         MetalErrorCode::UnsupportedCommand
     );
+}
+
+#[test]
+fn metal_backend_fills_transformed_clipped_rectangles_on_hardware() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 3).unwrap())
+        .unwrap();
+    let source = Color::rgba(255, 0, 0, 128);
+    let mut commands = GpuCommandEncoder::new(2).unwrap();
+    commands.clear(Color::BLACK).unwrap();
+    commands.save().unwrap();
+    commands.set_transform(Transform::translate(
+        Scalar::from_i32(1).unwrap(),
+        Scalar::ZERO,
+    ));
+    commands.clip_rect(rect(0, 0, 2, 2)).unwrap();
+    commands
+        .fill_rect(rect(0, 0, 3, 3), Paint::new(source))
+        .unwrap();
+    commands.restore().unwrap();
+    backend.submit(&mut surface, &commands.finish()).unwrap();
+
+    let pixels = surface.read_rgba8().unwrap();
+    let filled = source
+        .composite(Color::BLACK, BlendMode::SourceOver)
+        .channels();
+    for y in 0..3 {
+        for x in 0..4 {
+            let expected = if (1..3).contains(&x) && y < 2 {
+                filled
+            } else {
+                Color::BLACK.channels()
+            };
+            assert_eq!(pixel(&pixels, 4, x, y), expected, "pixel ({x}, {y})");
+        }
+    }
 }
 
 #[test]
@@ -160,6 +199,11 @@ fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
         Scalar::from_i32(bottom).unwrap(),
     )
     .unwrap()
+}
+
+fn pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+    let offset = (y * width + x) * 4;
+    pixels[offset..offset + 4].try_into().unwrap()
 }
 
 fn backend_or_skip() -> Option<MetalBackend> {

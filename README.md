@@ -129,8 +129,9 @@ atlases are available through the separate `skia-gpu-text` adapter:
 layout positions into owned generic quads without borrowing an encoder. The
 caller then explicitly registers `into_gpu_atlas()` and records the quads with
 `skia-gpu`, keeping data adaptation separate from command ordering. The Metal
-backend draws Alpha8 masks and color glyphs through a real shader pipeline; it
-currently supports source-over blending for this path. `TextAtlasCache` retains
+backend draws transformed/scissored solid rectangles, Alpha8 masks, and color
+glyphs through real shader pipelines; these paths currently support
+source-over blending. `TextAtlasCache` retains
 bounded immutable packed atlases with least-recently-used eviction, while stable
 generic atlas keys let Metal retain and reuse a separately bounded native
 texture across submissions. Both layers expose hit, upload, and eviction stats;
