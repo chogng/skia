@@ -62,7 +62,11 @@ flowchart LR
 
 `skia/text` owns portable font identities, ordered in-memory font collections,
 shaped glyph runs, source UTF-8 clusters, bidi visual runs, and validated
-vector outlines. `FontFace` owns TrueType/OpenType data and provides
+vector outlines. These remain one cohesive crate: its root only assembles and
+re-exports the public API, while internal modules separate foundational glyph
+types, outline contracts, font processing, collections, and layout. This is a
+source-organization boundary, not a new dependency or runtime boundary.
+`FontFace` owns TrueType/OpenType data and provides
 segment-level shaping plus outline resolution. A face also exposes its preferred
 OpenType family name, normalized weight/width/slant, and variable-font axes.
 Validated Q16.16 axis coordinates create immutable instances with distinct
