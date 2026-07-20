@@ -220,3 +220,10 @@ rustc --version
 ```sh
 cargo test --workspace --all-features
 ```
+
+只验证上层公开图片 codec 契约时，运行根 crate 的 facade 集成测试；该测试不直接引用
+`skia-codec`、`image` 或具体格式实现 crate：
+
+```sh
+cargo test --test codec_api
+```
