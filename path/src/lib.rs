@@ -1,5 +1,5 @@
-use pdf_rs_skia_error::{SkiaError, SkiaErrorCode};
-use pdf_rs_skia_geometry::{Point, Rect, Scalar, Transform};
+use skia_error::{SkiaError, SkiaErrorCode};
+use skia_geometry::{Point, Rect, Scalar, Transform};
 
 mod arc;
 mod bounds;

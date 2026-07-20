@@ -1,4 +1,4 @@
-use pdf_rs_skia_geometry::{Point, Scalar};
+use skia_geometry::{Point, Scalar};
 
 use super::{PathBounds, max_scalar, min_scalar};
 

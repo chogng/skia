@@ -1,5 +1,5 @@
-use pdf_rs_skia_error::{SkiaError, SkiaErrorCode};
-use pdf_rs_skia_geometry::Rect;
+use skia_error::{SkiaError, SkiaErrorCode};
+use skia_geometry::Rect;
 
 use super::{
     Angle, ArcDirection, ArcStart, PathBuilder, build_ellipse_arc, build_rotated_ellipse_arc,

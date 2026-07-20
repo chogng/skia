@@ -1,6 +1,6 @@
 use crate::{Color, FillRule, Paint, Path, Rect, Scalar, SkiaError, SkiaErrorCode, Transform};
-use pdf_rs_skia_image::Image;
-use pdf_rs_skia_text::GlyphRun;
+use skia_image::Image;
+use skia_text::GlyphRun;
 
 /// Command-buffer-local identifier for an immutable path resource.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

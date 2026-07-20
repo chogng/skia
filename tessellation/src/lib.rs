@@ -10,8 +10,8 @@
 
 use std::fmt;
 
-use pdf_rs_skia_geometry::Point;
-use pdf_rs_skia_path::{Path, PathVerb};
+use skia_geometry::Point;
+use skia_path::{Path, PathVerb};
 
 /// Stable tessellation failure code.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

@@ -1,6 +1,6 @@
 # 上层集成的绘制命令对照表
 
-本文是实现 `pdf-rs-skia` **上层集成层**时使用的能力对照表，不是让 PDF.rs 或其他
+本文是实现 `skia` **上层集成层**时使用的能力对照表，不是让上游调用方
 调用方直接依赖 `Canvas`、`DisplayListBuilder` 或 `GpuCommandEncoder` 的 API 文档。
 这些类型记录的是 Skia 下层目前能执行或编码的绘制能力；上层集成层应根据本表把上游
 请求转换为合适的下层调用。
@@ -8,7 +8,7 @@
 ## 调用方向与职责
 
 ```text
-PDF.rs / 其他上游
+上游调用方
   └─ 描述“画什么”、页面/资源数据、目标与渲染选项
        └─ Skia 上层集成层
             ├─ 校验请求、管理资源生命周期与缓存
@@ -19,12 +19,11 @@ PDF.rs / 其他上游
 
 上游不应直接创建 `Canvas`、`Surface`、`DisplayListBuilder`、`GpuCommandEncoder` 或选择
 执行后端。它只提供渲染意图、目标描述与必要的源数据；Skia 上层负责将这些内容传递给
-下层。这个方向与 PDFium 的 `FPDF_RenderPage*` 入口一致：入口建立 render context 和
-device，随后由内部 renderer 与 device 完成实际绘制。
+下层。入口负责建立渲染上下文和目标，随后由内部 renderer 与 device 完成实际绘制。
 
 当前仓库中的 `Canvas`、`DisplayList` 和 GPU encoder 是下层能力，尚不是统一的上层
 `RenderRequest` / `RenderTarget` 接口。本文用于约束该集成层未来应覆盖哪些能力，不能
-据此把下层类型泄露给 PDF.rs。
+据此把下层类型泄露给上游调用方。
 
 ### 位图输入
 
@@ -183,3 +182,13 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 源码入口：Geometry 在 `geometry/src/lib.rs`，Path 在 `path/src/lib.rs`，CPU Canvas 在
 `cpu/src/canvas.rs`，DisplayList 在 `core/src/display_list.rs`，GPU 命令层在
 `gpu/src/lib.rs`，Metal 后端在 `gpu/metal/src/lib.rs`。
+
+## Rust 工具链维护
+
+本仓库使用 `rustup` 管理 Cargo 与 Rust 工具链。更新 stable 工具链（以及 Cargo）后，用以下命令确认版本：
+
+```sh
+rustup update stable
+cargo --version
+rustc --version
+```

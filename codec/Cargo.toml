@@ -1,5 +1,5 @@
 [package]
-name = "pdf-rs-skia-codec"
+name = "skia-codec"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,4 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
-pdf-rs-skia-image = { path = "../image" }
+skia-image = { path = "../image" }

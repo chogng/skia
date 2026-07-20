@@ -1,4 +1,4 @@
-use pdf_rs_skia_text::{
+use skia_text::{
     FontId, GlyphId, GlyphRun, OutlinePoint, OutlineSegment, PositionedGlyph, TextErrorCode,
     TextUnit,
 };
@@ -43,7 +43,7 @@ fn glyph_run_rejects_ambiguous_input() {
 fn outline_rejects_open_or_out_of_order_contours() {
     let point = OutlinePoint::new(TextUnit::ZERO, TextUnit::ZERO);
     assert_eq!(
-        pdf_rs_skia_text::GlyphOutline::new(
+        skia_text::GlyphOutline::new(
             FontId::new(1),
             GlyphId::new(1),
             vec![OutlineSegment::LineTo(point)],
@@ -53,7 +53,7 @@ fn outline_rejects_open_or_out_of_order_contours() {
         TextErrorCode::InvalidOutline
     );
     assert_eq!(
-        pdf_rs_skia_text::GlyphOutline::new(
+        skia_text::GlyphOutline::new(
             FontId::new(1),
             GlyphId::new(1),
             vec![OutlineSegment::MoveTo(point)],

@@ -38,7 +38,7 @@ fn main() {
         return;
     }
     println!(
-        "cargo:rustc-env=PDF_RS_SKIA_METAL_LIBRARY={}",
+        "cargo:rustc-env=SKIA_METAL_LIBRARY={}",
         library.display()
     );
 }

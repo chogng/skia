@@ -6,8 +6,8 @@
 
 use std::fmt;
 
-use pdf_rs_skia_core::{Rect, SkiaError, Transform};
-use pdf_rs_skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
+use skia_core::{Rect, SkiaError, Transform};
+use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 
 use crate::{GpuBackend, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor};
 

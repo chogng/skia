@@ -1,13 +1,13 @@
 use std::fmt;
 
-use pdf_rs_skia_core::{
+use skia_core::{
     BlendMode, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, Transform,
 };
-use pdf_rs_skia_gpu::{
+use skia_gpu::{
     GpuBackend, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode, GpuCommandLimits,
     GpuSurfaceDescriptor, software::SoftwareGpuBackend,
 };
-use pdf_rs_skia_image::Image;
+use skia_image::Image;
 
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).unwrap()
@@ -51,7 +51,7 @@ impl GpuBackend for RecordingBackend {
     fn submit(
         &mut self,
         _surface: &mut Self::Surface,
-        commands: &pdf_rs_skia_gpu::GpuCommandBuffer,
+        commands: &skia_gpu::GpuCommandBuffer,
     ) -> Result<(), Self::Error> {
         self.submitted.extend_from_slice(commands.commands());
         Ok(())
@@ -202,7 +202,7 @@ fn software_replay_is_a_pixel_oracle_for_gpu_command_state() {
     assert_eq!(pixel(&surface, 0, 1), [255, 0, 0, 255]);
 }
 
-fn pixel(surface: &pdf_rs_skia_cpu::Surface, x: usize, y: usize) -> [u8; 4] {
+fn pixel(surface: &skia_cpu::Surface, x: usize, y: usize) -> [u8; 4] {
     let offset = (y * surface.width() as usize + x) * 4;
     surface.pixels()[offset..offset + 4].try_into().unwrap()
 }

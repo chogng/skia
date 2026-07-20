@@ -1,5 +1,5 @@
-use pdf_rs_skia_error::{SkiaError, SkiaErrorCode};
-use pdf_rs_skia_geometry::Point;
+use skia_error::{SkiaError, SkiaErrorCode};
+use skia_geometry::Point;
 
 use super::{ConicWeight, Path, PathBuilder, PathVerb};
 

@@ -1,6 +1,6 @@
-use pdf_rs_skia_core::{Color, Paint, Rect, Scalar};
-use pdf_rs_skia_gpu::{GpuBackend, GpuCommandEncoder, GpuSurfaceDescriptor};
-use pdf_rs_skia_metal::{MetalBackend, MetalErrorCode};
+use skia_core::{Color, Paint, Rect, Scalar};
+use skia_gpu::{GpuBackend, GpuCommandEncoder, GpuSurfaceDescriptor};
+use skia_metal::{MetalBackend, MetalErrorCode};
 
 #[test]
 fn metal_backend_allocates_a_native_surface_and_submits_a_clear() {

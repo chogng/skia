@@ -10,7 +10,7 @@
 use std::{fmt, io::Cursor};
 
 use image::{ImageError, ImageFormat, ImageReader, Limits};
-use pdf_rs_skia_image::Image;
+use skia_image::Image;
 
 /// Stable machine-readable image codec failure code.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

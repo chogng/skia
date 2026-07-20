@@ -1,5 +1,5 @@
 [package]
-name = "pdf-rs-skia-image"
+name = "skia-image"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

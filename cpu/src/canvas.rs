@@ -1,9 +1,9 @@
-use pdf_rs_skia_core::{
+use skia_core::{
     BlendMode, Color, DisplayList, DrawCommand, FillRule, GlyphOutline, GlyphOutlineProvider,
     GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder, PathVerb, Point,
     PositionedGlyph, Rect, Scalar, SkiaError, SkiaErrorCode, TextUnit, Transform,
 };
-use pdf_rs_skia_image::Image;
+use skia_image::Image;
 
 /// Limits for one CPU-owned RGBA8 surface and Canvas state stack.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -681,7 +681,7 @@ fn flatten_conic(
     start: Point,
     control: Point,
     end: Point,
-    weight: pdf_rs_skia_core::ConicWeight,
+    weight: skia_core::ConicWeight,
 ) -> Result<(), SkiaError> {
     output
         .try_reserve(usize::try_from(CURVE_STEPS).unwrap_or(usize::MAX))
@@ -702,7 +702,7 @@ fn conic_coordinate(
     start: Scalar,
     control: Scalar,
     end: Scalar,
-    weight: pdf_rs_skia_core::ConicWeight,
+    weight: skia_core::ConicWeight,
     step: i64,
 ) -> Result<Scalar, SkiaError> {
     let inverse = CURVE_STEPS

@@ -1,4 +1,4 @@
-//! macOS Metal submission backend for `pdf-rs-skia-gpu`.
+//! macOS Metal submission backend for `skia-gpu`.
 //!
 //! This initial adapter creates native Metal textures and command buffers, and
 //! executes `Clear` commands as real render passes. Other commands fail closed
@@ -15,8 +15,8 @@ use metal::{
     RenderPassDescriptor, RenderPipelineDescriptor, RenderPipelineState, Texture,
     TextureDescriptor,
 };
-use pdf_rs_skia_core::Color;
-use pdf_rs_skia_gpu::{GpuBackend, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor};
+use skia_core::Color;
+use skia_gpu::{GpuBackend, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor};
 
 /// Stable machine-readable Metal backend failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -120,7 +120,7 @@ impl MetalBackend {
             Device::system_default().ok_or(MetalError::new(MetalErrorCode::DeviceUnavailable))?;
         let queue = device.new_command_queue();
         let library = device
-            .new_library_with_file(env!("PDF_RS_SKIA_METAL_LIBRARY"))
+            .new_library_with_file(env!("SKIA_METAL_LIBRARY"))
             .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
         let vertex = library
             .get_function("skia_solid_rect_vertex", None)

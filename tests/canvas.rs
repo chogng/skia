@@ -1,4 +1,4 @@
-use pdf_rs_skia::{
+use skia::{
     BlendMode, ClipRect, Color, ConicWeight, FillRule, Image, ImageErrorCode, Paint, PathBuilder,
     Point, Rect, Scalar, SkiaErrorCode, Surface, SurfaceLimits, Transform,
 };

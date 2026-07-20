@@ -1,10 +1,10 @@
 [package]
-name = "pdf-rs-skia-cpu"
+name = "skia-cpu"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 
 [dependencies]
-pdf-rs-skia-core = { path = "../core" }
-pdf-rs-skia-image = { path = "../image" }
+skia-core = { path = "../core" }
+skia-image = { path = "../image" }

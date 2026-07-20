@@ -1,4 +1,4 @@
-use pdf_rs_skia_error::{SkiaError, SkiaErrorCode};
+use skia_error::{SkiaError, SkiaErrorCode};
 
 const FRACTION_BITS: i32 = 16;
 const SCALE: i64 = 1_i64 << FRACTION_BITS;
@@ -150,7 +150,7 @@ impl Transform {
         f: Scalar::ZERO,
     };
 
-    /// Creates one affine transform with PDF/Canvas coefficient order `(a, b, c, d, e, f)`.
+    /// Creates one affine transform with Canvas coefficient order `(a, b, c, d, e, f)`.
     pub const fn new(a: Scalar, b: Scalar, c: Scalar, d: Scalar, e: Scalar, f: Scalar) -> Self {
         Self { a, b, c, d, e, f }
     }

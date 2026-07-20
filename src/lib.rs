@@ -7,15 +7,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub use pdf_rs_skia_codec::{CodecError, CodecErrorCode, CodecLimits, ImageCodec};
-pub use pdf_rs_skia_core::{
+pub use skia_codec::{CodecError, CodecErrorCode, CodecLimits, ImageCodec};
+pub use skia_core::{
     BlendMode, Color, FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint,
     OutlineSegment, Paint, PositionedGlyph, TextError, TextErrorCode, TextUnit,
 };
-pub use pdf_rs_skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
-pub use pdf_rs_skia_error::{SkiaError, SkiaErrorCode};
-pub use pdf_rs_skia_geometry::{Point, Rect, Scalar, Transform};
-pub use pdf_rs_skia_image::{Image, ImageError, ImageErrorCode};
-pub use pdf_rs_skia_path::{
+pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
+pub use skia_error::{SkiaError, SkiaErrorCode};
+pub use skia_geometry::{Point, Rect, Scalar, Transform};
+pub use skia_image::{Image, ImageError, ImageErrorCode};
+pub use skia_path::{
     Angle, ArcDirection, ArcStart, ConicWeight, FillRule, Path, PathBounds, PathBuilder, PathVerb,
 };

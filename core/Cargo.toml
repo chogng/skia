@@ -1,13 +1,13 @@
 [package]
-name = "pdf-rs-skia-core"
+name = "skia-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 
 [dependencies]
-pdf-rs-skia-error = { path = "../error" }
-pdf-rs-skia-geometry = { path = "../geometry" }
-pdf-rs-skia-image = { path = "../image" }
-pdf-rs-skia-path = { path = "../path" }
-pdf-rs-skia-text = { path = "../text" }
+skia-error = { path = "../error" }
+skia-geometry = { path = "../geometry" }
+skia-image = { path = "../image" }
+skia-path = { path = "../path" }
+skia-text = { path = "../text" }

@@ -1,4 +1,4 @@
-use pdf_rs_skia_core::{
+use skia_core::{
     Color, DisplayListBuilder, DrawCommand, FontId, GlyphId, GlyphRun, Paint, PositionedGlyph,
     Scalar, SkiaErrorCode, TextUnit, Transform,
 };
@@ -44,7 +44,7 @@ fn stroke_command_rejects_non_positive_width() {
     let error = builder
         .stroke_path(
             path,
-            pdf_rs_skia_core::Scalar::ZERO,
+            skia_core::Scalar::ZERO,
             Paint::new(Color::rgba(0, 0, 0, 255)),
         )
         .expect_err("zero stroke width must fail");
@@ -69,12 +69,12 @@ fn display_list_records_generic_transform_concatenation() {
     );
 }
 
-fn empty_path() -> pdf_rs_skia_core::Path {
-    let mut builder = pdf_rs_skia_core::PathBuilder::new(1).expect("valid path limits");
+fn empty_path() -> skia_core::Path {
+    let mut builder = skia_core::PathBuilder::new(1).expect("valid path limits");
     builder
-        .move_to(pdf_rs_skia_core::Point::new(
-            pdf_rs_skia_core::Scalar::ZERO,
-            pdf_rs_skia_core::Scalar::ZERO,
+        .move_to(skia_core::Point::new(
+            skia_core::Scalar::ZERO,
+            skia_core::Scalar::ZERO,
         ))
         .expect("start path");
     builder.finish().expect("valid one-point path")

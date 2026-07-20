@@ -1,8 +1,8 @@
-use pdf_rs_skia_core::{
+use skia_core::{
     Color, DisplayListBuilder, FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun,
     OutlinePoint, OutlineSegment, Paint, PositionedGlyph, TextError, TextUnit,
 };
-use pdf_rs_skia_cpu::{Surface, SurfaceLimits};
+use skia_cpu::{Surface, SurfaceLimits};
 
 struct SingleGlyphProvider(GlyphOutline);
 

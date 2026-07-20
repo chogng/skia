@@ -1,9 +1,9 @@
-//! Backend-neutral GPU submission contracts for `pdf-rs-skia`.
+//! Backend-neutral GPU submission contracts for `skia`.
 //!
 //! This crate deliberately contains no Metal, Vulkan, OpenGL, WebGPU, window,
 //! thread, or foreign-function binding. Product-specific backend crates own
 //! those details and implement [`GpuBackend`]. The command buffer is reusable
-//! by PDF renderers, editors, and other clients without coupling them to a
+//! by renderers, editors, and other clients without coupling them to a
 //! particular graphics API.
 
 #![forbid(unsafe_code)]
@@ -15,8 +15,8 @@ pub mod software;
 
 use std::fmt;
 
-use pdf_rs_skia_core::{BlendMode, Color, FillRule, Paint, Path, Point, Rect, Transform};
-use pdf_rs_skia_image::Image;
+use skia_core::{BlendMode, Color, FillRule, Paint, Path, Point, Rect, Transform};
+use skia_image::Image;
 
 /// Stable machine-readable GPU command recording failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

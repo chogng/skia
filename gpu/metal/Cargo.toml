@@ -1,5 +1,5 @@
 [package]
-name = "pdf-rs-skia-metal"
+name = "skia-metal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,5 +7,5 @@ publish = false
 
 [dependencies]
 metal = "0.33.0"
-pdf-rs-skia-core = { path = "../../core" }
-pdf-rs-skia-gpu = { path = ".." }
+skia-core = { path = "../../core" }
+skia-gpu = { path = ".." }

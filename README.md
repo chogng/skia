@@ -3,11 +3,12 @@
 `skia/` is an independently developed 2D graphics subsystem and reusable
 library. It owns portable geometry, paths, paints, image resources and codecs,
 text-glyph drawing contracts, display lists, and CPU/GPU execution. It is **not** an
-implementation detail of PDF.rs and it does not model PDF operators or objects.
+implementation detail of a particular caller and it does not model caller-specific
+operators or objects.
 
 ```mermaid
 flowchart LR
-  pdf["PDF.rs adapter"] --> api["Skia public API\npdf-rs-skia facade"]
+  adapter["Upstream adapter"] --> api["Skia public API\nskia facade"]
   other["Other library adapters"] --> api
   api --> geometry["Geometry"]
   api --> path["Path"]
@@ -20,11 +21,11 @@ flowchart LR
 
 ## Dependency rule
 
-- `skia/` (`pdf-rs-skia`) is the only public graphics API for consumers.
+- `skia/` (`skia`) is the only public graphics API for consumers.
   `skia/error`, `skia/geometry`, `skia/path`, `skia/core`, `skia/image`, `skia/codec`, and
   executor crates are implementation crates;
   consumers must not depend on them directly. Skia crates may depend on each
-  other, but never on a PDF.rs document crate or PDF semantic type.
+  other, but never on a caller-specific document crate or semantic type.
 - The facade exports an explicit, stable set of canvas, geometry, paint, path,
   image, text-outline, and error types. It does not expose display-list
   resource IDs, command representations, or backend command encoders.
@@ -33,26 +34,26 @@ flowchart LR
   paths and path construction. Their dependencies flow only downward.
 - `skia/core` contains paint and backend-neutral display-list semantics. It
   depends on the foundational crates but never on an executor, platform
-  graphics API, PDF parser, document model, or Scene.
+  graphics API, caller-specific parser, document model, or Scene.
 - `skia/image` owns the immutable RGBA8 resource representation. `skia/codec`
   translates encoded, general-purpose image bytes into that representation; it
-  does not depend on rendering backends or PDF types. Future encoders belong in
+  does not depend on rendering backends or caller-specific types. Future encoders belong in
   `skia/codec` as well, not in the resource crate.
-- Every consumer, including PDF.rs, calls Skia only through its public API.
-  Each consumer owns its source-domain adapter and reports its rendering
+- Every consumer calls Skia only through its public API. Each consumer owns its
+  source-domain adapter and reports its rendering
   intent, target description, and source data to the Skia upper integration
   layer. That layer owns resource lifetime and executor selection before
   calling lower Skia components.
-- A Skia public type, method, error, or command must not mention PDF objects,
-  operators, page state, or PDF-specific policy. Add an adapter in PDF.rs when
-  such translation is required.
+- A Skia public type, method, error, or command must not mention caller-specific
+  objects, operators, page state, or policy. Perform such translation in the
+  caller's adapter.
 
 ## Geometry and transforms
 
 Paths are immutable geometry resources. `PathBuilder` constructs paths from
-generic 2D primitives; it must not encode PDF path or graphics-state rules.
+generic 2D primitives; it must not encode caller-specific path or graphics-state rules.
 Canvas and display-list transforms are generic affine drawing state that apply
-to subsequent drawing operations. They are not PDF `cm` commands. A consumer
+to subsequent drawing operations. A consumer
 that has a source-specific matrix is responsible for mapping it at its adapter
 boundary.
 

@@ -1,6 +1,6 @@
-use pdf_rs_skia_error::SkiaErrorCode;
-use pdf_rs_skia_geometry::{Point, Rect, Scalar, Transform};
-use pdf_rs_skia_path::{Angle, ArcDirection, ArcStart, ConicWeight, PathBuilder, PathVerb};
+use skia_error::SkiaErrorCode;
+use skia_geometry::{Point, Rect, Scalar, Transform};
+use skia_path::{Angle, ArcDirection, ArcStart, ConicWeight, PathBuilder, PathVerb};
 
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).expect("whole scalar")

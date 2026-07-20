@@ -1,5 +1,5 @@
-use pdf_rs_skia_error::{SkiaError, SkiaErrorCode};
-use pdf_rs_skia_geometry::{Point, Scalar};
+use skia_error::{SkiaError, SkiaErrorCode};
+use skia_geometry::{Point, Scalar};
 
 pub(super) const KAPPA_BITS: i32 = 36_195;
 

@@ -1,7 +1,6 @@
 [package]
-name = "pdf-rs-skia-error"
+name = "skia-error"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
-

@@ -1,4 +1,4 @@
-//! Deterministic CPU executor for `pdf-rs-skia-core` drawing semantics.
+//! Deterministic CPU executor for `skia-core` drawing semantics.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
