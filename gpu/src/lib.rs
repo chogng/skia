@@ -103,6 +103,25 @@ pub struct GpuImageId(u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GpuGlyphAtlasId(u32);
 
+/// Stable caller-owned identity for reusing one immutable atlas across submissions.
+///
+/// Backends verify the atlas content before reusing a resource, so accidental
+/// key reuse cannot substitute different pixels.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GpuGlyphAtlasKey(u64);
+
+impl GpuGlyphAtlasKey {
+    /// Creates one stable atlas cache identity.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the caller-owned identity value.
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
 /// Integer pixel rectangle inside one glyph atlas.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GpuAtlasRect {
@@ -154,17 +173,32 @@ impl GpuAtlasRect {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpuGlyphAtlas {
     image: Image,
+    cache_key: Option<GpuGlyphAtlasKey>,
 }
 
 impl GpuGlyphAtlas {
     /// Wraps one prepacked RGBA8 image for low-level glyph batch recording.
     pub fn from_image(image: Image) -> Self {
-        Self { image }
+        Self {
+            image,
+            cache_key: None,
+        }
+    }
+
+    /// Associates this immutable atlas with a cross-submission cache identity.
+    pub const fn with_cache_key(mut self, cache_key: GpuGlyphAtlasKey) -> Self {
+        self.cache_key = Some(cache_key);
+        self
     }
 
     /// Borrows the upload-ready straight-alpha RGBA8 atlas image.
     pub const fn image(&self) -> &Image {
         &self.image
+    }
+
+    /// Returns the optional cross-submission cache identity.
+    pub const fn cache_key(&self) -> Option<GpuGlyphAtlasKey> {
+        self.cache_key
     }
 }
 

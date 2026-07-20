@@ -3,7 +3,8 @@ use std::fmt;
 use skia_core::{BlendMode, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, Transform};
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode, GpuCommandLimits,
-    GpuGlyphAtlas, GpuGlyphQuad, GpuSurfaceDescriptor, software::SoftwareGpuBackend,
+    GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad, GpuSurfaceDescriptor,
+    software::SoftwareGpuBackend,
 };
 use skia_image::Image;
 
@@ -202,9 +203,11 @@ fn software_replay_is_a_pixel_oracle_for_gpu_command_state() {
 
 #[test]
 fn glyph_atlas_batches_tint_masks_and_preserve_color_glyphs() {
+    let cache_key = GpuGlyphAtlasKey::new(41);
     let atlas = GpuGlyphAtlas::from_image(
         Image::from_rgba8(2, 1, vec![255, 255, 255, 128, 255, 0, 0, 255]).unwrap(),
-    );
+    )
+    .with_cache_key(cache_key);
     let mut encoder = GpuCommandEncoder::new(2).unwrap();
     let atlas = encoder.add_glyph_atlas(atlas).unwrap();
     encoder.clear(Color::BLACK).unwrap();
@@ -227,6 +230,10 @@ fn glyph_atlas_batches_tint_masks_and_preserve_color_glyphs() {
         )
         .unwrap();
     let commands = encoder.finish();
+    assert_eq!(
+        commands.glyph_atlas(atlas).unwrap().cache_key(),
+        Some(cache_key)
+    );
     assert!(matches!(
         commands.commands()[1],
         GpuCommand::DrawGlyphs { ref glyphs, .. } if glyphs.len() == 2

@@ -1,7 +1,8 @@
 //! macOS Metal submission backend for `skia-gpu`.
 //!
 //! This adapter creates native Metal textures and command buffers, executes
-//! clears, and draws atlas-backed glyph batches through Metal shaders. Other
+//! clears, and draws atlas-backed glyph batches through Metal shaders. Stable
+//! atlas keys enable bounded native texture reuse across submissions. Other
 //! drawing commands fail closed until their shader contracts are implemented.
 
 #![forbid(unsafe_code)]
@@ -17,8 +18,12 @@ use metal::{
 };
 use skia_core::{BlendMode, Color, Point, Rect, Scalar, Transform};
 use skia_gpu::{
-    GpuBackend, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphQuad, GpuSurfaceDescriptor,
+    GpuBackend, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad,
+    GpuSurfaceDescriptor,
 };
+
+const DEFAULT_ATLAS_CACHE_CAPACITY: usize = 8;
+const DEFAULT_ATLAS_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Stable machine-readable Metal backend failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -114,6 +119,51 @@ pub struct MetalBackend {
     queue: CommandQueue,
     solid_rect_pipeline: RenderPipelineState,
     glyph_pipeline: RenderPipelineState,
+    atlas_cache_capacity: usize,
+    atlas_cache_max_bytes: u64,
+    atlas_cache_bytes: u64,
+    atlas_cache: Vec<CachedAtlasTexture>,
+    atlas_cache_clock: u64,
+    atlas_cache_hits: u64,
+    atlas_uploads: u64,
+    atlas_evictions: u64,
+}
+
+/// Observable native glyph-atlas texture cache counters.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct MetalAtlasCacheStats {
+    hits: u64,
+    uploads: u64,
+    evictions: u64,
+    entries: usize,
+    retained_bytes: u64,
+}
+
+impl MetalAtlasCacheStats {
+    /// Returns cross-submission native texture reuse count.
+    pub const fn hits(self) -> u64 {
+        self.hits
+    }
+
+    /// Returns the number of atlas images uploaded to native textures.
+    pub const fn uploads(self) -> u64 {
+        self.uploads
+    }
+
+    /// Returns the number of cached native textures evicted or replaced.
+    pub const fn evictions(self) -> u64 {
+        self.evictions
+    }
+
+    /// Returns the current number of retained native atlas textures.
+    pub const fn entries(self) -> usize {
+        self.entries
+    }
+
+    /// Returns the RGBA8 byte size represented by retained native textures.
+    pub const fn retained_bytes(self) -> u64 {
+        self.retained_bytes
+    }
 }
 
 impl MetalBackend {
@@ -169,7 +219,55 @@ impl MetalBackend {
             queue,
             solid_rect_pipeline,
             glyph_pipeline,
+            atlas_cache_capacity: DEFAULT_ATLAS_CACHE_CAPACITY,
+            atlas_cache_max_bytes: DEFAULT_ATLAS_CACHE_BYTES,
+            atlas_cache_bytes: 0,
+            atlas_cache: Vec::new(),
+            atlas_cache_clock: 0,
+            atlas_cache_hits: 0,
+            atlas_uploads: 0,
+            atlas_evictions: 0,
         })
+    }
+
+    /// Opens the default device with an explicit native atlas cache capacity.
+    ///
+    /// A zero capacity disables cross-submission texture retention.
+    pub fn with_atlas_cache_capacity(capacity: usize) -> Result<Self, MetalError> {
+        let mut backend = Self::new()?;
+        backend.atlas_cache_capacity = capacity;
+        Ok(backend)
+    }
+
+    /// Replaces the native atlas cache capacity and immediately evicts excess entries.
+    pub fn set_atlas_cache_capacity(&mut self, capacity: usize) {
+        self.atlas_cache_capacity = capacity;
+        while self.atlas_cache.len() > capacity {
+            self.evict_lru();
+        }
+    }
+
+    /// Replaces the native atlas byte budget and immediately evicts excess entries.
+    ///
+    /// A zero budget disables cross-submission texture retention.
+    pub fn set_atlas_cache_byte_limit(&mut self, max_bytes: u64) {
+        self.atlas_cache_max_bytes = max_bytes;
+        while self.atlas_cache_bytes > max_bytes {
+            if !self.evict_lru() {
+                break;
+            }
+        }
+    }
+
+    /// Returns native atlas texture reuse, upload, and eviction counters.
+    pub const fn atlas_cache_stats(&self) -> MetalAtlasCacheStats {
+        MetalAtlasCacheStats {
+            hits: self.atlas_cache_hits,
+            uploads: self.atlas_uploads,
+            evictions: self.atlas_evictions,
+            entries: self.atlas_cache.len(),
+            retained_bytes: self.atlas_cache_bytes,
+        }
     }
 }
 
@@ -222,8 +320,18 @@ impl GpuBackend for MetalBackend {
             return Ok(());
         }
 
-        let command_buffer = self.queue.new_command_buffer();
         let mut atlas_textures = HashMap::new();
+        for command in commands.commands() {
+            if let GpuCommand::DrawGlyphs { atlas, .. } = command
+                && !atlas_textures.contains_key(atlas)
+            {
+                let atlas_resource = commands
+                    .glyph_atlas(*atlas)
+                    .ok_or(MetalError::new(MetalErrorCode::UnsupportedCommand))?;
+                atlas_textures.insert(*atlas, self.atlas_texture(atlas_resource)?);
+            }
+        }
+        let command_buffer = self.queue.new_command_buffer();
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(color) => {
@@ -236,12 +344,6 @@ impl GpuBackend for MetalBackend {
                     transform,
                     clip,
                 } => {
-                    if !atlas_textures.contains_key(atlas) {
-                        let atlas_resource = commands
-                            .glyph_atlas(*atlas)
-                            .ok_or(MetalError::new(MetalErrorCode::UnsupportedCommand))?;
-                        atlas_textures.insert(*atlas, self.upload_atlas(atlas_resource));
-                    }
                     let texture = atlas_textures
                         .get(atlas)
                         .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
@@ -273,6 +375,105 @@ impl GpuBackend for MetalBackend {
 }
 
 impl MetalBackend {
+    fn atlas_texture(&mut self, atlas: &GpuGlyphAtlas) -> Result<Texture, MetalError> {
+        let now = self
+            .atlas_cache_clock
+            .checked_add(1)
+            .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        self.atlas_cache_clock = now;
+        let Some(cache_key) = atlas.cache_key() else {
+            self.atlas_uploads = self
+                .atlas_uploads
+                .checked_add(1)
+                .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+            return Ok(self.upload_atlas(atlas));
+        };
+        let atlas_bytes = u64::try_from(atlas.image().pixels().len())
+            .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        if self.atlas_cache_capacity == 0
+            || self.atlas_cache_max_bytes == 0
+            || atlas_bytes > self.atlas_cache_max_bytes
+        {
+            self.atlas_uploads = self
+                .atlas_uploads
+                .checked_add(1)
+                .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+            return Ok(self.upload_atlas(atlas));
+        }
+
+        if let Some(index) = self
+            .atlas_cache
+            .iter()
+            .position(|entry| entry.key == cache_key && entry.atlas.image() == atlas.image())
+        {
+            self.atlas_cache_hits = self
+                .atlas_cache_hits
+                .checked_add(1)
+                .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+            self.atlas_cache[index].last_used = now;
+            return Ok(self.atlas_cache[index].texture.clone());
+        }
+
+        if let Some(index) = self
+            .atlas_cache
+            .iter()
+            .position(|entry| entry.key == cache_key)
+        {
+            let removed = self.atlas_cache.remove(index);
+            self.atlas_cache_bytes = self.atlas_cache_bytes.saturating_sub(removed.bytes);
+            self.atlas_evictions = self
+                .atlas_evictions
+                .checked_add(1)
+                .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        }
+        while self.atlas_cache.len() == self.atlas_cache_capacity
+            || self
+                .atlas_cache_bytes
+                .checked_add(atlas_bytes)
+                .is_none_or(|bytes| bytes > self.atlas_cache_max_bytes)
+        {
+            if !self.evict_lru() {
+                break;
+            }
+        }
+        let texture = self.upload_atlas(atlas);
+        self.atlas_uploads = self
+            .atlas_uploads
+            .checked_add(1)
+            .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        self.atlas_cache
+            .try_reserve(1)
+            .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        self.atlas_cache.push(CachedAtlasTexture {
+            key: cache_key,
+            atlas: atlas.clone(),
+            texture: texture.clone(),
+            last_used: now,
+            bytes: atlas_bytes,
+        });
+        self.atlas_cache_bytes = self
+            .atlas_cache_bytes
+            .checked_add(atlas_bytes)
+            .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        Ok(texture)
+    }
+
+    fn evict_lru(&mut self) -> bool {
+        let Some(index) = self
+            .atlas_cache
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(index, _)| index)
+        else {
+            return false;
+        };
+        let removed = self.atlas_cache.remove(index);
+        self.atlas_cache_bytes = self.atlas_cache_bytes.saturating_sub(removed.bytes);
+        self.atlas_evictions = self.atlas_evictions.saturating_add(1);
+        true
+    }
+
     fn upload_atlas(&self, atlas: &GpuGlyphAtlas) -> Texture {
         let image = atlas.image();
         let descriptor = TextureDescriptor::new();
@@ -347,6 +548,14 @@ impl MetalBackend {
         encoder.end_encoding();
         Ok(())
     }
+}
+
+struct CachedAtlasTexture {
+    key: GpuGlyphAtlasKey,
+    atlas: GpuGlyphAtlas,
+    texture: Texture,
+    last_used: u64,
+    bytes: u64,
 }
 
 #[repr(C)]

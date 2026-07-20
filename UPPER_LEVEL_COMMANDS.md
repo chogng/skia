@@ -297,8 +297,17 @@ atlas 使用 1 像素 padding、以 `(FontId, GlyphId, font_size_bits, GlyphBitm
 `skia-gpu` 命令层只认识 RGBA atlas、quad 和 mask 标记，不依赖 `FontFace`、`GlyphBitmap` 或
 `TextLayout`；Metal 等硬件后端也只依赖这层通用协议。
 
-atlas 由 command buffer 持有，Metal 在一次 submit 内对同一 atlas 只上传一次，但当前不跨
-submit 保留原生纹理，因此上层仍应按目标像素密度管理 atlas 生命周期和失效策略。Metal 已真正
+跨帧路径使用有界 `TextAtlasCache`：`get_or_insert_layout` 会复用覆盖所需 glyph 集合的不可变
+atlas（允许 superset hit），未命中时按配置重新 raster/pack，达到 `max_atlases` 后淘汰最久未
+使用项。返回 `Arc<TextAtlas>`，同一对象可登记到多个 frame encoder；`stats()` 暴露 hit、miss、
+eviction 与当前 entry 数。`FontId` 必须继续唯一标识不可变字体实例，字号/format 已包含在 glyph
+身份中；目标像素密度变化时上层仍应选择相应字号或清空 cache。
+
+缓存生成的 `GpuGlyphAtlas` 带稳定 `GpuGlyphAtlasKey`。Metal 默认保留最多 8 个、合计 64 MiB
+RGBA8 数据对应的 native atlas texture，跨 submit 命中时不再上传；
+`set_atlas_cache_capacity` 与 `set_atlas_cache_byte_limit` 可收紧或禁用缓存，
+`atlas_cache_stats()` 暴露 hit/upload/eviction。后端会同时核对完整 atlas image，错误复用同一 key
+不会替换成不同像素。Metal 已真正
 批量绘制 Alpha8 mask 与 RGBA8
 彩色 glyph，目前该路径只接受 `BlendMode::SourceOver`；其他模式返回 `UnsupportedCommand`。
 该 API 不做系统字体发现或平台 LCD subpixel filtering。

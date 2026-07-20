@@ -1,6 +1,7 @@
 use skia_core::{Color, Paint, Rect, Scalar};
 use skia_gpu::{
-    GpuAtlasRect, GpuBackend, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphQuad, GpuSurfaceDescriptor,
+    GpuAtlasRect, GpuBackend, GpuCommandBuffer, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphAtlasKey,
+    GpuGlyphQuad, GpuSurfaceDescriptor,
 };
 use skia_image::Image;
 use skia_metal::{MetalBackend, MetalErrorCode};
@@ -90,6 +91,65 @@ fn metal_backend_draws_mask_and_color_glyphs_on_hardware() {
         surface.read_rgba8().unwrap(),
         [0, 0, 128, 255, 255, 0, 0, 255]
     );
+}
+
+#[test]
+fn metal_backend_reuses_and_evicts_native_atlas_textures_across_submissions() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    backend.set_atlas_cache_capacity(1);
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(1, 1).unwrap())
+        .unwrap();
+    let red = atlas_commands([255, 0, 0, 255], GpuGlyphAtlasKey::new(1));
+    let blue = atlas_commands([0, 0, 255, 255], GpuGlyphAtlasKey::new(1));
+
+    backend.submit(&mut surface, &red).unwrap();
+    assert_eq!(backend.atlas_cache_stats().uploads(), 1);
+    assert_eq!(backend.atlas_cache_stats().hits(), 0);
+    backend.submit(&mut surface, &red).unwrap();
+    assert_eq!(backend.atlas_cache_stats().uploads(), 1);
+    assert_eq!(backend.atlas_cache_stats().hits(), 1);
+
+    backend.submit(&mut surface, &blue).unwrap();
+    assert_eq!(backend.atlas_cache_stats().uploads(), 2);
+    assert_eq!(backend.atlas_cache_stats().evictions(), 1);
+    assert_eq!(backend.atlas_cache_stats().entries(), 1);
+    assert_eq!(surface.read_rgba8().unwrap(), [0, 0, 255, 255]);
+
+    backend.submit(&mut surface, &red).unwrap();
+    assert_eq!(backend.atlas_cache_stats().uploads(), 3);
+    assert_eq!(backend.atlas_cache_stats().evictions(), 2);
+    assert_eq!(backend.atlas_cache_stats().retained_bytes(), 4);
+    assert_eq!(surface.read_rgba8().unwrap(), [255, 0, 0, 255]);
+    backend.set_atlas_cache_byte_limit(0);
+    assert_eq!(backend.atlas_cache_stats().entries(), 0);
+    assert_eq!(backend.atlas_cache_stats().retained_bytes(), 0);
+    assert_eq!(backend.atlas_cache_stats().evictions(), 3);
+}
+
+fn atlas_commands(pixel: [u8; 4], cache_key: GpuGlyphAtlasKey) -> GpuCommandBuffer {
+    let mut commands = GpuCommandEncoder::new(2).unwrap();
+    let atlas = commands
+        .add_glyph_atlas(
+            GpuGlyphAtlas::from_image(Image::from_rgba8(1, 1, pixel.to_vec()).unwrap())
+                .with_cache_key(cache_key),
+        )
+        .unwrap();
+    commands.clear(Color::BLACK).unwrap();
+    commands
+        .draw_glyph_batch(
+            atlas,
+            vec![GpuGlyphQuad::new(
+                GpuAtlasRect::new(0, 0, 1, 1).unwrap(),
+                rect(0, 0, 1, 1),
+                false,
+            )],
+            Paint::new(Color::WHITE),
+        )
+        .unwrap();
+    commands.finish()
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {

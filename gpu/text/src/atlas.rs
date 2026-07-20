@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use skia_core::{FontCollection, FontId, GlyphBitmap, GlyphBitmapFormat, GlyphId, TextLayout};
-use skia_gpu::{GpuAtlasRect, GpuGlyphAtlas};
+use skia_gpu::{GpuAtlasRect, GpuGlyphAtlas, GpuGlyphAtlasKey};
 use skia_image::Image;
 
 use crate::{TextAtlasEntry, TextGlyphKey, TextGpuError, TextGpuErrorCode, error::map_text_error};
@@ -38,6 +38,11 @@ impl TextAtlas {
         [GlyphBitmapFormat::Alpha8, GlyphBitmapFormat::Rgba8]
             .into_iter()
             .find_map(|format| self.entry(TextGlyphKey::new(font, glyph, font_size_bits, format)))
+    }
+
+    pub(crate) fn with_cache_key(mut self, cache_key: GpuGlyphAtlasKey) -> Self {
+        self.atlas = self.atlas.with_cache_key(cache_key);
+        self
     }
 }
 
