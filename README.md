@@ -76,12 +76,14 @@ CPU drawing reuses the ordinary path-fill pipeline. Laid-out lines carry
 physical left/center/right alignment or bidi-aware logical start/end alignment.
 Justified lines preserve shaping output
 and add deterministic per-glyph spacing at interior breakable Unicode spaces,
-including ideographic space while excluding non-breaking spaces. Callers can
-also add signed Q16.16 letter spacing between shaping clusters and word spacing
-after breakable Unicode spaces; wrapping, ellipses, hit testing, and carets all
-use the resulting width without splitting grapheme or shaping clusters.
-Callers can plug language dictionaries into `TextBreakProvider`; the layout engine
-validates UTF-8 grapheme boundaries and supports either glyph-free soft breaks
+including ideographic space while excluding non-breaking spaces. If no such
+space exists, Han, Kana, Hangul, and Bopomofo shaping-cluster boundaries provide
+CJK inter-character justification without splitting marks or ligatures.
+Callers can also add signed Q16.16 letter spacing between shaping clusters and
+word spacing after breakable Unicode spaces; wrapping, ellipses, hit testing,
+and carets all use the resulting width without splitting grapheme or shaping clusters.
+Callers can plug language dictionaries into `TextBreakProvider`; the layout
+engine validates UTF-8 grapheme boundaries and supports either glyph-free soft breaks
 or synthetic visible hyphens without consuming source bytes. Layout options
 can also request underline and strike-through lines. Their scaled position and
 thickness come from the collection's primary OpenType face for uniform layout,
@@ -97,8 +99,8 @@ Ellipses retain styled font size and bidi placement, prefer U+2026, and fall
 back to three periods without consuming source bytes.
 
 System-font discovery, generic-family mapping, variable-font instance selection,
-language-specific font selection, dictionary data and algorithms, non-ASCII
-inter-character justification, per-span paint and decoration styles, and
+language-specific font selection, dictionary data and algorithms, general
+non-CJK inter-character justification, per-span paint and decoration styles, and
 decorative line variants remain upper text-layout responsibilities. Ligature
 internal caret data and selection rectangles are also not exposed. GPU glyph
 commands, glyph atlases, hinting, and color-font painting are not implemented

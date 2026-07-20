@@ -222,10 +222,12 @@ MARK、U+2000–U+2006、U+2008–U+200A、MEDIUM MATHEMATICAL SPACE 和 IDEOGRA
 NBSP、U+2007 FIGURE SPACE 与 NARROW NBSP 明确保持不可断、不可扩展。位移通过
 `ShapedRun::glyph_offsets_x_bits` 按 glyph 保存，
 不修改 shaping cluster 或 bidi run 顺序。默认不处理段落末行；确实需要时显式调用
-`with_justify_last_line(true)`。没有可扩展空格的行回退为逻辑 `Start`，不会伪造字符间距。
-当前尚不做 CJK 等脚本的 inter-character justification。DisplayList 展开布局时除了 run
-origin，还必须应用 line offset 和每个 glyph 的额外 offset；CPU `draw_text_layout` 已自动
-完成这些步骤。
+`with_justify_last_line(true)`。若行内没有可扩展空格，`Justify` 会自动改在 Han、Kana、
+Hangul 与 Bopomofo 的相邻 shaping cluster 之间分配剩余宽度；组合 mark、ligature 内部和
+CJK 标点不会被拆开，跨 fallback/styled run 的相邻 CJK cluster 仍可扩展。若这两类 slot
+都不存在，才回退为逻辑 `Start`。
+DisplayList 展开布局时除了 run origin，还必须应用 line offset 和每个 glyph 的额外 offset；
+CPU `draw_text_layout` 已自动完成这些步骤。
 
 整块 layout 需要下划线或删除线时，使用
 `TextLayoutOptions::with_decoration(TextDecoration::Underline)`、
@@ -249,11 +251,11 @@ path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 
 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
 换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、Unicode
-可断空格 justification、cluster-safe letter/word spacing、全局 OpenType feature、
-BCP 47 language-sensitive shaping、grapheme-safe styled paragraph/multiline
+可断空格与 CJK inter-character justification、cluster-safe letter/word spacing、全局
+OpenType feature、BCP 47 language-sensitive shaping、grapheme-safe styled paragraph/multiline
 layout、line-limit clip/ellipsis、cluster hit testing/caret、实线 underline/strike-through
 和轮廓解析**，但不负责平台字体发现、generic family 映射、
-variable 实例选择策略、语言偏好、内置词典/断字算法、脚本级 inter-character
+variable 实例选择策略、语言偏好、内置词典/断字算法、通用跨脚本 inter-character
 justification、per-span paint/装饰或装饰线变体。
 `shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
 `MissingGlyph`。当前 Unicode line-break 实现把 SA 复杂上下文字系按普通字母处理；泰文、
@@ -404,11 +406,12 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 4. 裁剪仍只有矩形，图片仍是 RGBA8；
 5. 图片不支持非轴对齐变换/过滤，描边样式也只有圆头圆角；
 6. 文本层已有内存字体解析、family/style 匹配、单段落 bidi、跨字体 fallback、metrics、
-   通用换行、可插拔词典断点、hyphenation、对齐、Unicode 空格 justification 与实线装饰，
+   通用换行、可插拔词典断点、hyphenation、对齐、Unicode 空格/CJK inter-character
+   justification 与实线装饰，
    并支持 variable/feature 实例、language-sensitive shaping、cluster-safe letter/word
    spacing、styled paragraph/layout、line-limit clip/ellipsis 与
    cluster hit testing/caret；但仍没有系统字体发现、内置语言词典、variable 实例选择策略、
-   脚本级 inter-character justification、ligature 内部 caret、selection rectangles、
+   通用跨脚本 inter-character justification、ligature 内部 caret、selection rectangles、
    per-span paint/装饰与完整排版；
 7. 路径的几何布尔运算、stroke-to-path 和 path effects 尚未暴露；它们不能由像素混合模式替代。
 

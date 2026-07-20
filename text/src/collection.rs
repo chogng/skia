@@ -291,7 +291,7 @@ impl ShapedParagraph {
         Ok(())
     }
 
-    pub(crate) fn justify_expandable_spaces(
+    pub(crate) fn justify_line(
         &mut self,
         text: &str,
         source_start: usize,
@@ -340,7 +340,43 @@ impl ShapedParagraph {
             }
         }
         if expansion_clusters.is_empty() {
-            return Ok(false);
+            let mut visual_clusters = Vec::new();
+            for run in &self.runs {
+                let glyphs = run.run.glyphs();
+                let mut first = 0_usize;
+                while first < glyphs.len() {
+                    let cluster = glyphs[first].cluster();
+                    if usize::try_from(cluster)
+                        .is_ok_and(|cluster| cluster >= source_start && cluster < source_end)
+                    {
+                        visual_clusters
+                            .try_reserve(1)
+                            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+                        visual_clusters.push(cluster);
+                    }
+                    first += 1;
+                    while first < glyphs.len() && glyphs[first].cluster() == cluster {
+                        first += 1;
+                    }
+                }
+            }
+            for pair in visual_clusters.windows(2) {
+                let first = spacing_character(text, source_start, source_end, pair[0]);
+                let second = spacing_character(text, source_start, source_end, pair[1]);
+                if first.is_some_and(is_cjk_inter_character_unit)
+                    && second.is_some_and(is_cjk_inter_character_unit)
+                {
+                    expansion_clusters
+                        .try_reserve(1)
+                        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+                    expansion_clusters.push(pair[0]);
+                }
+            }
+            expansion_clusters.sort_unstable();
+            expansion_clusters.dedup();
+            if expansion_clusters.is_empty() {
+                return Ok(false);
+            }
         }
 
         let extra_bits = target_advance_bits
@@ -433,6 +469,26 @@ const fn is_expandable_justification_space(character: char) -> bool {
             | '\u{2008}'..='\u{200a}'
             | '\u{205f}'
             | '\u{3000}'
+    )
+}
+
+const fn is_cjk_inter_character_unit(character: char) -> bool {
+    matches!(
+        character,
+        '\u{1100}'..='\u{11ff}'
+            | '\u{2e80}'..='\u{2fdf}'
+            | '\u{3040}'..='\u{30ff}'
+            | '\u{3100}'..='\u{31bf}'
+            | '\u{31f0}'..='\u{31ff}'
+            | '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{a960}'..='\u{a97f}'
+            | '\u{ac00}'..='\u{d7ff}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{ff66}'..='\u{ff9d}'
+            | '\u{ffa0}'..='\u{ffdc}'
+            | '\u{1b000}'..='\u{1b16f}'
+            | '\u{20000}'..='\u{323af}'
     )
 }
 

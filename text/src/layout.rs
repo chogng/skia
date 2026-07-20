@@ -46,6 +46,9 @@ pub enum TextAlignment {
     Right,
     /// Expand interior breakable Unicode spaces to fill eligible lines.
     ///
+    /// When a line has no expandable space, Han, Kana, Hangul, and Bopomofo
+    /// shaping-cluster boundaries are used without splitting marks or ligatures.
+    ///
     /// By default, paragraph-final lines keep start alignment. Use
     /// [`TextLayoutOptions::with_justify_last_line`] to include them.
     Justify,
@@ -1124,7 +1127,7 @@ impl LayoutBuilder<'_> {
                 && !line.ellipsized
                 && let Some(paragraph) = &mut line.paragraph
             {
-                line.justified = paragraph.justify_expandable_spaces(
+                line.justified = paragraph.justify_line(
                     self.text,
                     line.source_start as usize,
                     line.source_end as usize,

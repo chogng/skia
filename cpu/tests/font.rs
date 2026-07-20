@@ -1980,6 +1980,128 @@ fn justification_expands_unicode_spaces_but_not_non_breaking_spaces() {
 }
 
 #[test]
+fn justification_expands_cjk_cluster_boundaries_without_splitting_marks_or_punctuation() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(101),
+                toy_font_for(&[' ', '\u{0301}', '\u{3002}', '\u{4e2d}']),
+            )
+            .expect("CJK font"),
+        )
+        .expect("add CJK font");
+    let justify_final = |width| {
+        TextLayoutOptions::new(width)
+            .expect("options")
+            .with_alignment(TextAlignment::Justify)
+            .with_justify_last_line(true)
+    };
+
+    let cjk = fonts
+        .layout_text(
+            "\u{4e2d}\u{4e2d}\u{4e2d}",
+            10 << 16,
+            justify_final(24 << 16),
+        )
+        .expect("CJK justification");
+    assert!(cjk.lines()[0].justified());
+    assert_eq!(cjk.lines()[0].advance_x_bits(), 24 << 16);
+    assert_eq!(
+        cjk.lines()[0].paragraph().expect("CJK line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 3 << 16, 6 << 16]
+    );
+
+    let marked = fonts
+        .layout_text(
+            "\u{4e2d}\u{0301}\u{4e2d}",
+            10 << 16,
+            justify_final(18 << 16),
+        )
+        .expect("marked CJK justification");
+    assert!(marked.lines()[0].justified());
+    assert_eq!(
+        marked.lines()[0].paragraph().expect("marked line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 0, 6 << 16]
+    );
+
+    let punctuated = fonts
+        .layout_text(
+            "\u{4e2d}\u{3002}\u{4e2d}",
+            10 << 16,
+            justify_final(24 << 16),
+        )
+        .expect("punctuated CJK layout");
+    assert!(!punctuated.lines()[0].justified());
+    assert_eq!(punctuated.lines()[0].advance_x_bits(), 18 << 16);
+
+    let inter_word = fonts
+        .layout_text("\u{4e2d} \u{4e2d}", 10 << 16, justify_final(30 << 16))
+        .expect("inter-word priority");
+    assert!(inter_word.lines()[0].justified());
+    assert_eq!(
+        inter_word.lines()[0]
+            .paragraph()
+            .expect("mixed line")
+            .runs()[0]
+            .glyph_offsets_x_bits(),
+        &[0, 0, 12 << 16]
+    );
+
+    let wrapped = fonts
+        .layout_text(
+            "\u{4e2d}\u{4e2d}\u{4e2d}\u{4e2d}",
+            10 << 16,
+            TextLayoutOptions::new(15 << 16)
+                .expect("wrap options")
+                .with_alignment(TextAlignment::Justify),
+        )
+        .expect("wrapped CJK justification");
+    assert_eq!(wrapped.lines().len(), 2);
+    assert!(wrapped.lines()[0].justified());
+    assert_eq!(wrapped.lines()[0].advance_x_bits(), 15 << 16);
+    assert!(!wrapped.lines()[1].justified());
+    assert_eq!(
+        wrapped
+            .caret_for_position(TextPosition::new(3, TextAffinity::Upstream))
+            .expect("CJK upstream query")
+            .expect("CJK upstream")
+            .x_bits(),
+        6 << 16
+    );
+    assert_eq!(
+        wrapped
+            .caret_for_position(TextPosition::new(3, TextAffinity::Downstream))
+            .expect("CJK downstream query")
+            .expect("CJK downstream")
+            .x_bits(),
+        9 << 16
+    );
+
+    let mut fallback_fonts = FontCollection::new(FontCollectionLimits::default());
+    fallback_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(102), toy_font('\u{4e2d}')).expect("Han primary"),
+        )
+        .expect("add Han primary");
+    fallback_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(103), toy_font('\u{6587}')).expect("Han fallback"),
+        )
+        .expect("add Han fallback");
+    let fallback = fallback_fonts
+        .layout_text("\u{4e2d}\u{6587}", 10 << 16, justify_final(18 << 16))
+        .expect("cross-run CJK justification");
+    let runs = fallback.lines()[0]
+        .paragraph()
+        .expect("fallback CJK line")
+        .runs();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].glyph_offsets_x_bits(), &[0]);
+    assert_eq!(runs[1].glyph_offsets_x_bits(), &[6 << 16]);
+}
+
+#[test]
 fn font_decorations_use_primary_metrics_across_fallback_and_alignment() {
     let primary = FontFace::from_bytes(
         FontId::new(110),
