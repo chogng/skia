@@ -1,9 +1,9 @@
 use skia_core::{
-    Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, FontSlant,
-    FontStyle, FontTag, FontVariation, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider,
-    Paint, Point, Rect, Scalar, SkiaErrorCode, TextAlignment, TextBreakProvider, TextDecoration,
-    TextDirection, TextError, TextErrorCode, TextLayoutOptions, TextWordBreak, TextWordBreakKind,
-    Transform,
+    Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId, FontLimits,
+    FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphId, GlyphOutline,
+    GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAlignment,
+    TextBreakProvider, TextDecoration, TextDirection, TextError, TextErrorCode, TextLayoutOptions,
+    TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -240,6 +240,78 @@ fn variable_font_instances_validate_axes_and_keep_distinct_identities() {
             .expect_err("instance identity must be distinct")
             .code(),
         TextErrorCode::InvalidFontVariation
+    );
+}
+
+#[test]
+fn shaping_feature_instances_propagate_through_paragraph_and_layout() {
+    let base =
+        FontFace::from_bytes(FontId::new(140), toy_kerned_font(&['A'])).expect("kerned font");
+    let default_run = base.shape("AA", 10 << 16).expect("default kerning");
+    assert_eq!(
+        default_run
+            .glyphs()
+            .iter()
+            .map(|glyph| glyph.advance_x().bits())
+            .sum::<i32>(),
+        1_100 * 64
+    );
+
+    let kern = FontTag::new(*b"kern");
+    let disabled_feature = FontFeature::new(kern, 0);
+    assert_eq!(disabled_feature.tag(), kern);
+    assert_eq!(disabled_feature.value(), 0);
+    let disabled = base
+        .instantiate_features(FontId::new(141), &[disabled_feature])
+        .expect("disable kerning");
+    assert_eq!(disabled.features(), &[disabled_feature]);
+    let disabled_run = disabled.shape("AA", 10 << 16).expect("un-kerned shape");
+    assert_eq!(disabled_run.font(), FontId::new(141));
+    assert_eq!(
+        disabled_run
+            .glyphs()
+            .iter()
+            .map(|glyph| glyph.advance_x().bits())
+            .sum::<i32>(),
+        1_200 * 64
+    );
+
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts.add_face(disabled).expect("add feature instance");
+    assert_eq!(
+        fonts
+            .shape_paragraph("AA", 10 << 16)
+            .expect("feature paragraph")
+            .advance_x_bits(),
+        12 << 16
+    );
+    assert_eq!(
+        fonts
+            .layout_text(
+                "AA",
+                10 << 16,
+                TextLayoutOptions::new(20 << 16).expect("options"),
+            )
+            .expect("feature layout")
+            .lines()[0]
+            .advance_x_bits(),
+        12 << 16
+    );
+
+    assert_eq!(
+        base.instantiate_features(base.id(), &[disabled_feature])
+            .expect_err("feature identity must be distinct")
+            .code(),
+        TextErrorCode::InvalidFontFeature
+    );
+    assert_eq!(
+        base.instantiate_features(
+            FontId::new(142),
+            &[disabled_feature, FontFeature::new(kern, 1)],
+        )
+        .expect_err("duplicate tags must fail")
+        .code(),
+        TextErrorCode::InvalidFontFeature
     );
 }
 
@@ -1064,21 +1136,26 @@ fn toy_font(character: char) -> Vec<u8> {
 }
 
 fn toy_font_for(characters: &[char]) -> Vec<u8> {
-    build_toy_font(characters, None, false)
+    build_toy_font(characters, None, false, false)
 }
 
 fn toy_styled_font(characters: &[char], family: &str, style: FontStyle) -> Vec<u8> {
-    build_toy_font(characters, Some((family, style)), false)
+    build_toy_font(characters, Some((family, style)), false, false)
 }
 
 fn toy_variable_font(characters: &[char], family: &str) -> Vec<u8> {
-    build_toy_font(characters, Some((family, FontStyle::NORMAL)), true)
+    build_toy_font(characters, Some((family, FontStyle::NORMAL)), true, false)
+}
+
+fn toy_kerned_font(characters: &[char]) -> Vec<u8> {
+    build_toy_font(characters, None, false, true)
 }
 
 fn build_toy_font(
     characters: &[char],
     metadata: Option<(&str, FontStyle)>,
     variable: bool,
+    kerned: bool,
 ) -> Vec<u8> {
     let mut tables = vec![
         (*b"cmap", cmap_table(characters)),
@@ -1096,6 +1173,9 @@ fn build_toy_font(
     }
     if variable {
         tables.push((*b"fvar", fvar_table()));
+    }
+    if kerned {
+        tables.push((*b"kern", kern_table()));
     }
     tables.sort_unstable_by_key(|(tag, _)| *tag);
     let table_count = u16::try_from(tables.len()).expect("small table count");
@@ -1189,6 +1269,19 @@ fn fvar_table() -> Vec<u8> {
     put_u32(&mut table, 24, 400 << 16);
     put_u32(&mut table, 28, 900 << 16);
     put_u16(&mut table, 34, 256);
+    table
+}
+
+fn kern_table() -> Vec<u8> {
+    let mut table = vec![0; 24];
+    put_u16(&mut table, 2, 1);
+    put_u16(&mut table, 6, 20);
+    put_u16(&mut table, 8, 1);
+    put_u16(&mut table, 10, 1);
+    put_u16(&mut table, 12, 6);
+    put_u16(&mut table, 18, 1);
+    put_u16(&mut table, 20, 1);
+    put_i16(&mut table, 22, -100);
     table
 }
 

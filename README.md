@@ -59,6 +59,8 @@ segment-level shaping plus outline resolution. A face also exposes its preferred
 OpenType family name, normalized weight/width/slant, and variable-font axes.
 Validated Q16.16 axis coordinates create immutable instances with distinct
 `FontId` values, and consistently affect shaping, metrics, and outlines.
+Immutable feature instances also apply global OpenType values such as `kern=0`
+through every single-run, fallback, bidi, and multiline shaping path.
 `FontCollection` provides deterministic CSS-like family/style matching,
 performs grapheme-level ordered fallback, and shapes one unwrapped bidi
 paragraph into positioned visual runs. It also exposes scaled baseline metrics
@@ -78,8 +80,9 @@ across fallback runs; CPU layout drawing paints them after glyph outlines.
 System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, non-ASCII
 inter-character justification, per-span decoration styles, and decorative line
-variants remain upper text-layout responsibilities. GPU glyph commands, glyph
-atlases, hinting, and color-font painting are not implemented yet.
+variants remain upper text-layout responsibilities. Per-range feature values
+also require upper-layer span segmentation. GPU glyph commands, glyph atlases,
+hinting, and color-font painting are not implemented yet.
 
 ## Geometry and transforms
 

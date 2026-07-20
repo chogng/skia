@@ -18,7 +18,7 @@ pub use collection::{
     FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection,
 };
 pub use font::{
-    FontFace, FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation,
+    FontFace, FontFeature, FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation,
     FontVariationAxis, FontWidth, TextDecorationMetrics,
 };
 pub use layout::{
@@ -43,6 +43,8 @@ pub enum TextErrorCode {
     InvalidFontStyle,
     /// A variable-font instance identity or coordinate request is invalid.
     InvalidFontVariation,
+    /// A shaping-feature instance identity or feature set is invalid.
+    InvalidFontFeature,
     /// A language tag is empty or structurally invalid.
     InvalidLanguage,
     /// A language break provider returned a non-grapheme or out-of-word offset.

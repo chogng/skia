@@ -15,12 +15,12 @@ pub use skia_codec::{
     JpegSubsampling, MetadataPolicy, PngCompression, PngFilter, PngOptions, WebPMode, WebPOptions,
 };
 pub use skia_core::{
-    BlendMode, Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits,
-    FontMetrics, FontSlant, FontStyle, FontTag, FontVariation, FontVariationAxis, FontWidth,
-    GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, Paint,
-    PositionedGlyph, ShapedLine, ShapedParagraph, ShapedRun, TextAlignment, TextBreakProvider,
-    TextDecoration, TextDecorationMetrics, TextDirection, TextError, TextErrorCode, TextLayout,
-    TextLayoutOptions, TextUnit, TextWordBreak, TextWordBreakKind,
+    BlendMode, Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId,
+    FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation, FontVariationAxis,
+    FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment,
+    Paint, PositionedGlyph, ShapedLine, ShapedParagraph, ShapedRun, TextAlignment,
+    TextBreakProvider, TextDecoration, TextDecorationMetrics, TextDirection, TextError,
+    TextErrorCode, TextLayout, TextLayoutOptions, TextUnit, TextWordBreak, TextWordBreakKind,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};

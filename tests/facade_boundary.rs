@@ -24,4 +24,5 @@ fn public_facade_does_not_transparently_reexport_implementation_crates() {
     assert!(facade.contains("FontTag"));
     assert!(facade.contains("FontVariation"));
     assert!(facade.contains("FontVariationAxis"));
+    assert!(facade.contains("FontFeature"));
 }

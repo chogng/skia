@@ -191,6 +191,30 @@ impl FontVariation {
     }
 }
 
+/// One global OpenType shaping feature value.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FontFeature {
+    tag: FontTag,
+    value: u32,
+}
+
+impl FontFeature {
+    /// Creates one global shaping feature, such as `kern=0` or `liga=1`.
+    pub const fn new(tag: FontTag, value: u32) -> Self {
+        Self { tag, value }
+    }
+
+    /// Returns the four-byte OpenType feature tag.
+    pub const fn tag(self) -> FontTag {
+        self.tag
+    }
+
+    /// Returns the feature value forwarded to the shaping engine.
+    pub const fn value(self) -> u32 {
+        self.value
+    }
+}
+
 /// Resource ceilings applied while loading and using one font face.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FontLimits {
@@ -334,6 +358,7 @@ pub struct FontFace {
     style: FontStyle,
     variation_axes: Vec<FontVariationAxis>,
     variations: Vec<FontVariation>,
+    features: Vec<FontFeature>,
     limits: FontLimits,
 }
 
@@ -350,6 +375,7 @@ impl fmt::Debug for FontFace {
             .field("style", &self.style)
             .field("variation_axes", &self.variation_axes)
             .field("variations", &self.variations)
+            .field("features", &self.features)
             .field("limits", &self.limits)
             .finish()
     }
@@ -421,6 +447,7 @@ impl FontFace {
             style,
             variation_axes,
             variations: Vec::new(),
+            features: Vec::new(),
             limits,
         })
     }
@@ -463,6 +490,11 @@ impl FontFace {
     /// Borrows non-default coordinates applied to this immutable face instance.
     pub fn variations(&self) -> &[FontVariation] {
         &self.variations
+    }
+
+    /// Borrows global OpenType features applied by this immutable face instance.
+    pub fn features(&self) -> &[FontFeature] {
+        &self.features
     }
 
     /// Creates an immutable variable-font instance with a new stable identity.
@@ -517,6 +549,42 @@ impl FontFace {
         let mut instance = self.clone();
         instance.id = id;
         instance.variations = instance_variations;
+        Ok(instance)
+    }
+
+    /// Creates an immutable shaping-feature instance with a new stable identity.
+    ///
+    /// Tags must be unique. Unsupported tags remain valid and are ignored by
+    /// fonts that do not provide the corresponding OpenType feature.
+    pub fn instantiate_features(
+        &self,
+        id: FontId,
+        features: &[FontFeature],
+    ) -> Result<Self, TextError> {
+        const MAX_FEATURES: usize = 256;
+        if id == self.id {
+            return Err(TextError::new(TextErrorCode::InvalidFontFeature));
+        }
+        if features.len() > MAX_FEATURES {
+            return Err(TextError::new(TextErrorCode::ResourceLimit));
+        }
+        for (index, feature) in features.iter().enumerate() {
+            if features[..index]
+                .iter()
+                .any(|existing| existing.tag == feature.tag)
+            {
+                return Err(TextError::new(TextErrorCode::InvalidFontFeature));
+            }
+        }
+        let mut instance_features = Vec::new();
+        instance_features
+            .try_reserve_exact(features.len())
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        instance_features.extend_from_slice(features);
+        instance_features.sort_unstable_by_key(|feature| feature.tag);
+        let mut instance = self.clone();
+        instance.id = id;
+        instance.features = instance_features;
         Ok(instance)
     }
 
@@ -670,7 +738,18 @@ impl FontFace {
                 TextDirection::RightToLeft => rustybuzz::Direction::RightToLeft,
             });
         }
-        let output = rustybuzz::shape(&face, &[], buffer);
+        let mut features = Vec::new();
+        features
+            .try_reserve_exact(self.features.len())
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        for feature in &self.features {
+            features.push(rustybuzz::Feature::new(
+                feature.tag.parser_tag(),
+                feature.value,
+                ..,
+            ));
+        }
+        let output = rustybuzz::shape(&face, &features, buffer);
         if output.is_empty() {
             return Err(TextError::new(TextErrorCode::EmptyGlyphRun));
         }
