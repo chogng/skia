@@ -1,6 +1,10 @@
 use std::{fmt, sync::Arc};
 
 use rustybuzz::ttf_parser::{self, OutlineBuilder};
+use swash::{
+    FontRef,
+    scale::{Render, ScaleContext, Source, StrikeWith, image::Content},
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
@@ -223,6 +227,126 @@ pub struct FontLimits {
     max_text_bytes: usize,
     max_glyphs_per_run: usize,
     max_outline_segments: usize,
+}
+
+/// Pixel format of one hinted glyph bitmap.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GlyphBitmapFormat {
+    /// One eight-bit coverage value per pixel. The caller supplies the paint color.
+    Alpha8,
+    /// Four straight RGBA8 channels per pixel supplied by the font.
+    Rgba8,
+}
+
+impl GlyphBitmapFormat {
+    /// Returns the tightly packed byte count for one pixel.
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Alpha8 => 1,
+            Self::Rgba8 => 4,
+        }
+    }
+}
+
+/// One hinted raster glyph positioned relative to its baseline origin.
+///
+/// `left` moves right from the glyph origin. `top` is the signed baseline-to-
+/// bitmap-top offset: on a top-left-origin canvas, subtract it from the
+/// baseline Y coordinate. The bitmap is tightly packed in row-major order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlyphBitmap {
+    font: FontId,
+    glyph: GlyphId,
+    font_size_bits: i32,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+    format: GlyphBitmapFormat,
+    pixels: Vec<u8>,
+}
+
+impl GlyphBitmap {
+    fn new(
+        font: FontId,
+        glyph: GlyphId,
+        font_size_bits: i32,
+        left: i32,
+        top: i32,
+        width: u32,
+        height: u32,
+        format: GlyphBitmapFormat,
+        pixels: Vec<u8>,
+    ) -> Result<Self, TextError> {
+        let expected = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(format.bytes_per_pixel()))
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        if pixels.len() != expected {
+            return Err(TextError::new(TextErrorCode::InvalidFontData));
+        }
+        Ok(Self {
+            font,
+            glyph,
+            font_size_bits,
+            left,
+            top,
+            width,
+            height,
+            format,
+            pixels,
+        })
+    }
+
+    /// Returns the source font identity.
+    pub const fn font(&self) -> FontId {
+        self.font
+    }
+
+    /// Returns the font-local glyph identity.
+    pub const fn glyph(&self) -> GlyphId {
+        self.glyph
+    }
+
+    /// Returns the requested Q16.16 font size used for rasterization.
+    pub const fn font_size_bits(&self) -> i32 {
+        self.font_size_bits
+    }
+
+    /// Returns the horizontal bitmap offset from the glyph origin, in pixels.
+    pub const fn left(&self) -> i32 {
+        self.left
+    }
+
+    /// Returns the signed baseline-to-top bitmap offset, in pixels.
+    pub const fn top(&self) -> i32 {
+        self.top
+    }
+
+    /// Returns the tightly bounded bitmap width in pixels.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Returns the tightly bounded bitmap height in pixels.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Returns whether pixels are alpha coverage or font-provided RGBA color.
+    pub const fn format(&self) -> GlyphBitmapFormat {
+        self.format
+    }
+
+    /// Borrows the row-major, tightly packed bitmap bytes.
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
 }
 
 /// Scaled horizontal-font metrics in Q16.16 canvas units.
@@ -602,6 +726,75 @@ impl FontFace {
     pub fn supports_character(&self, character: char) -> Result<bool, TextError> {
         self.glyph_for_character(character)
             .map(|glyph| glyph.is_some())
+    }
+
+    /// Rasterizes one glyph with embedded font hinting when available.
+    ///
+    /// The renderer first prefers COLR/CPAL color outlines and embedded color
+    /// bitmaps, then falls back to a hinted alpha outline. The returned bitmap
+    /// is positioned relative to the glyph's baseline origin, so callers add
+    /// its `left` offset to the shaped glyph X origin and subtract its `top`
+    /// offset from the baseline Y coordinate on a top-left-origin canvas.
+    ///
+    /// This is a portable, pure-Rust rasterization path. It intentionally does
+    /// not perform platform font discovery or platform-specific subpixel LCD
+    /// filtering.
+    pub fn rasterize_glyph(
+        &self,
+        glyph: GlyphId,
+        font_size_bits: i32,
+    ) -> Result<Option<GlyphBitmap>, TextError> {
+        if font_size_bits <= 0 {
+            return Err(TextError::new(TextErrorCode::InvalidFontSize));
+        }
+        let glyph = u16::try_from(glyph.value())
+            .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+        let font = FontRef::from_index(self.bytes.as_ref(), self.face_index as usize)
+            .ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+        let size = font_size_bits as f32 / 65_536.0;
+        let variations: Vec<([u8; 4], f32)> = self
+            .variations
+            .iter()
+            .map(|variation| {
+                (
+                    variation.tag.bytes(),
+                    variation.value_bits as f32 / 65_536.0,
+                )
+            })
+            .collect();
+        let mut context = ScaleContext::new();
+        let mut scaler = context
+            .builder(font)
+            .size(size)
+            .hint(true)
+            .variations(&variations)
+            .build();
+        let image = Render::new(&[
+            Source::ColorOutline(0),
+            Source::ColorBitmap(StrikeWith::BestFit),
+            Source::Outline,
+        ])
+        .render(&mut scaler, glyph);
+        let Some(image) = image else {
+            return Ok(None);
+        };
+        let format = match image.content {
+            Content::Mask => GlyphBitmapFormat::Alpha8,
+            Content::Color => GlyphBitmapFormat::Rgba8,
+            Content::SubpixelMask => return Err(TextError::new(TextErrorCode::InvalidFontData)),
+        };
+        GlyphBitmap::new(
+            self.id,
+            GlyphId::new(u32::from(glyph)),
+            font_size_bits,
+            image.placement.left,
+            image.placement.top,
+            image.placement.width,
+            image.placement.height,
+            format,
+            image.data,
+        )
+        .map(Some)
     }
 
     /// Returns baseline metrics scaled to one positive Q16.16 font size.

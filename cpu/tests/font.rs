@@ -1,9 +1,10 @@
 use skia_core::{
     Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId, FontLimits,
-    FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphId, GlyphOutline,
-    GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAffinity, TextAlignment,
-    TextBreakProvider, TextDecoration, TextDirection, TextError, TextErrorCode, TextLayoutOptions,
-    TextOverflow, TextPosition, TextStyleSpan, TextWordBreak, TextWordBreakKind, Transform,
+    FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphBitmapFormat, GlyphId,
+    GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAffinity,
+    TextAlignment, TextBreakProvider, TextDecoration, TextDirection, TextError, TextErrorCode,
+    TextLayoutOptions, TextOverflow, TextPosition, TextStyleSpan, TextWordBreak, TextWordBreakKind,
+    Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -41,6 +42,33 @@ fn public_font_loader_rejects_malformed_data() {
     let error = FontFace::from_bytes(FontId::new(1), b"not a font".to_vec())
         .expect_err("malformed font must fail");
     assert_eq!(error.code(), TextErrorCode::InvalidFontData);
+}
+
+#[test]
+fn font_face_rasterizes_hinted_alpha_glyphs_without_native_font_libraries() {
+    let face = FontFace::from_bytes(FontId::new(8), toy_font('A')).expect("load toy font");
+    let glyph = face
+        .glyph_for_character('A')
+        .expect("lookup glyph")
+        .expect("toy font covers A");
+
+    let bitmap = face
+        .rasterize_glyph(glyph, 12 << 16)
+        .expect("rasterize glyph")
+        .expect("A has an outline");
+
+    assert_eq!(bitmap.font(), face.id());
+    assert_eq!(bitmap.glyph(), glyph);
+    assert_eq!(bitmap.font_size_bits(), 12 << 16);
+    assert_eq!(bitmap.format(), GlyphBitmapFormat::Alpha8);
+    assert_eq!(bitmap.format().bytes_per_pixel(), 1);
+    assert!(bitmap.width() > 0);
+    assert!(bitmap.height() > 0);
+    assert_eq!(
+        bitmap.pixels().len(),
+        bitmap.width() as usize * bitmap.height() as usize
+    );
+    assert!(bitmap.pixels().iter().any(|coverage| *coverage != 0));
 }
 
 #[test]

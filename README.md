@@ -108,8 +108,10 @@ System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, general
 non-CJK inter-character justification, per-span paint and decoration styles, and
 decorative line variants remain upper text-layout responsibilities. GPU glyph
-commands, glyph atlases, hinting, and color-font painting are not implemented
-yet.
+commands and glyph atlases are not implemented yet. `FontFace` can however
+rasterize hinted Alpha8 glyphs and COLR/CPAL or embedded-color bitmap glyphs
+through the pure-Rust `swash` path; selecting that bitmap path and caching it
+remain upper renderer responsibilities.
 
 ## Geometry and transforms
 

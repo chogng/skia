@@ -264,6 +264,15 @@ layout，尚无 per-span 颜色/粗细、波浪线/虚线，也没有专用 Disp
 字体字节由 face 自身不可变持有。轮廓的字体坐标会转换为 canvas 向下为正的坐标，再复用普通
 path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 advance，但绘制时不产生路径。
 
+需要小字号像素对齐或彩色 emoji 时，上层可对已选定的 glyph 调用
+`FontFace::rasterize_glyph(glyph, font_size_bits)`。该纯 Rust 路径由 `swash` 执行：它优先采用
+COLR/CPAL 分层颜色轮廓和内嵌彩色 bitmap，再回退到应用嵌入 hint 的 Alpha8 轮廓 bitmap。
+返回的 `GlyphBitmap` 相对 glyph baseline 定位；在 canvas 坐标中绘制时，X 加 `left`，Y 减
+`top`。缓存键至少包含 `font`、`glyph`、`font_size_bits` 和 `format`；Alpha8 必须使用调用方
+`Paint` 的颜色混合，RGBA8 保留字体提供的颜色。当前 CPU
+`Canvas` 的通用文字入口仍以矢量轮廓绘制；上层若选择位图文字，应在设备后端使用该 bitmap
+并按目标像素密度建立 glyph cache。该 API 不做系统字体发现或平台 LCD subpixel filtering。
+
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
 换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、Unicode
 可断空格与 CJK inter-character justification、cluster-safe letter/word spacing、全局

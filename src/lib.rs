@@ -17,11 +17,12 @@ pub use skia_codec::{
 pub use skia_core::{
     BlendMode, Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId,
     FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation, FontVariationAxis,
-    FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment,
-    Paint, PositionedGlyph, ShapedLine, ShapedParagraph, ShapedRun, TextAffinity, TextAlignment,
-    TextBreakProvider, TextCaret, TextDecoration, TextDecorationMetrics, TextDirection, TextError,
-    TextErrorCode, TextHitResult, TextLayout, TextLayoutOptions, TextOverflow, TextPosition,
-    TextSelectionRect, TextStyleSpan, TextUnit, TextWordBreak, TextWordBreakKind,
+    FontWidth, GlyphBitmap, GlyphBitmapFormat, GlyphId, GlyphOutline, GlyphOutlineProvider,
+    GlyphRun, OutlinePoint, OutlineSegment, Paint, PositionedGlyph, ShapedLine, ShapedParagraph,
+    ShapedRun, TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecoration,
+    TextDecorationMetrics, TextDirection, TextError, TextErrorCode, TextHitResult, TextLayout,
+    TextLayoutOptions, TextOverflow, TextPosition, TextSelectionRect, TextStyleSpan, TextUnit,
+    TextWordBreak, TextWordBreakKind,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};

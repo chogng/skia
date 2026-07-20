@@ -28,7 +28,7 @@ pub use collection::{
 };
 pub use font::{
     FontFace, FontFeature, FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation,
-    FontVariationAxis, FontWidth, TextDecorationMetrics,
+    FontVariationAxis, FontWidth, GlyphBitmap, GlyphBitmapFormat, TextDecorationMetrics,
 };
 pub use layout::{
     ShapedLine, TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecoration,
