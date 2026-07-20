@@ -15,6 +15,55 @@ pub enum TextDirection {
     RightToLeft,
 }
 
+/// One contiguous source range with a preferred font instance and font size.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextStyleSpan {
+    source_start: u32,
+    source_end: u32,
+    font: FontId,
+    font_size_bits: i32,
+}
+
+impl TextStyleSpan {
+    /// Creates one non-empty styled UTF-8 byte range.
+    pub const fn new(
+        source_start: u32,
+        source_end: u32,
+        font: FontId,
+        font_size_bits: i32,
+    ) -> Result<Self, TextError> {
+        if source_start >= source_end || font_size_bits <= 0 {
+            return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
+        }
+        Ok(Self {
+            source_start,
+            source_end,
+            font,
+            font_size_bits,
+        })
+    }
+
+    /// Returns the inclusive source UTF-8 byte start.
+    pub const fn source_start(self) -> u32 {
+        self.source_start
+    }
+
+    /// Returns the exclusive source UTF-8 byte end.
+    pub const fn source_end(self) -> u32 {
+        self.source_end
+    }
+
+    /// Returns the preferred immutable font instance.
+    pub const fn font(self) -> FontId {
+        self.font
+    }
+
+    /// Returns the positive Q16.16 font size.
+    pub const fn font_size_bits(self) -> i32 {
+        self.font_size_bits
+    }
+}
+
 /// Resource ceilings for one ordered in-memory font collection.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FontCollectionLimits {
@@ -350,6 +399,29 @@ impl FontCollection {
         self.shape_paragraph_impl(text, font_size_bits, Some(base_direction))
     }
 
+    /// Shapes one styled, unwrapped paragraph with automatic base direction.
+    ///
+    /// Spans must be ordered, contiguous, cover the entire text, and meet only
+    /// at extended-grapheme boundaries. A span's font is tried first for every
+    /// grapheme, followed by the collection's normal fallback order.
+    pub fn shape_styled_paragraph(
+        &self,
+        text: &str,
+        spans: &[TextStyleSpan],
+    ) -> Result<ShapedParagraph, TextError> {
+        self.shape_styled_paragraph_impl(text, spans, None)
+    }
+
+    /// Shapes one styled, unwrapped paragraph with an explicit base direction.
+    pub fn shape_styled_paragraph_with_direction(
+        &self,
+        text: &str,
+        spans: &[TextStyleSpan],
+        base_direction: TextDirection,
+    ) -> Result<ShapedParagraph, TextError> {
+        self.shape_styled_paragraph_impl(text, spans, Some(base_direction))
+    }
+
     pub(crate) fn shape_bidi_line(
         &self,
         text: &str,
@@ -361,7 +433,14 @@ impl FontCollection {
         if line.is_empty() || line.start < paragraph.range.start || line.end > paragraph.range.end {
             return Err(TextError::new(TextErrorCode::InvalidLayout));
         }
-        self.shape_bidi_range(text, font_size_bits, bidi, paragraph, line, 0)
+        self.shape_bidi_range(
+            text,
+            ParagraphStyle::Uniform(font_size_bits),
+            bidi,
+            paragraph,
+            line,
+            0,
+        )
     }
 
     pub(crate) fn append_discretionary_hyphen(
@@ -503,7 +582,38 @@ impl FontCollection {
         let paragraph = &bidi.paragraphs[0];
         self.shape_bidi_range(
             text,
-            font_size_bits,
+            ParagraphStyle::Uniform(font_size_bits),
+            &bidi,
+            paragraph,
+            paragraph.range.clone(),
+            0,
+        )
+    }
+
+    fn shape_styled_paragraph_impl(
+        &self,
+        text: &str,
+        spans: &[TextStyleSpan],
+        base_direction: Option<TextDirection>,
+    ) -> Result<ShapedParagraph, TextError> {
+        if self.faces.is_empty() {
+            return Err(TextError::new(TextErrorCode::EmptyFontCollection));
+        }
+        if text.is_empty() {
+            return Err(TextError::new(TextErrorCode::EmptyText));
+        }
+        if text.len() > self.limits.max_text_bytes || text.len() > u32::MAX as usize {
+            return Err(TextError::new(TextErrorCode::ResourceLimit));
+        }
+        self.validate_style_spans(text, spans)?;
+        let bidi = BidiInfo::new(text, base_direction.map(direction_level));
+        if bidi.paragraphs.len() != 1 {
+            return Err(TextError::new(TextErrorCode::MultipleParagraphs));
+        }
+        let paragraph = &bidi.paragraphs[0];
+        self.shape_bidi_range(
+            text,
+            ParagraphStyle::Spans(spans),
             &bidi,
             paragraph,
             paragraph.range.clone(),
@@ -514,7 +624,7 @@ impl FontCollection {
     fn shape_bidi_range(
         &self,
         text: &str,
-        font_size_bits: i32,
+        style: ParagraphStyle<'_>,
         bidi: &BidiInfo<'_>,
         paragraph: &ParagraphInfo,
         line: std::ops::Range<usize>,
@@ -527,7 +637,13 @@ impl FontCollection {
         for visual_run in visual_runs {
             let direction = level_direction(levels[visual_run.start]);
             let first_segment = logical_segments.len();
-            self.append_fallback_segments(text, visual_run, direction, &mut logical_segments)?;
+            self.append_fallback_segments(
+                text,
+                visual_run,
+                direction,
+                style,
+                &mut logical_segments,
+            )?;
             if direction == TextDirection::RightToLeft {
                 logical_segments[first_segment..].reverse();
             }
@@ -556,7 +672,7 @@ impl FontCollection {
             let face = &self.faces[segment.face_index];
             let run = face.shape_segment(
                 &text[segment.start..segment.end],
-                font_size_bits,
+                segment.font_size_bits,
                 Some(segment.direction),
                 source_start,
             )?;
@@ -566,7 +682,7 @@ impl FontCollection {
             if glyph_count > self.limits.max_glyphs {
                 return Err(TextError::new(TextErrorCode::ResourceLimit));
             }
-            let metrics = face.metrics(font_size_bits)?;
+            let metrics = face.metrics(segment.font_size_bits)?;
             ascent_bits = ascent_bits.max(metrics.ascent_bits());
             descent_bits = descent_bits.max(metrics.descent_bits());
             line_gap_bits = line_gap_bits.max(metrics.line_gap_bits());
@@ -602,6 +718,7 @@ impl FontCollection {
         text: &str,
         source: std::ops::Range<usize>,
         direction: TextDirection,
+        style: ParagraphStyle<'_>,
         output: &mut Vec<LogicalSegment>,
     ) -> Result<(), TextError> {
         let source_text = &text[source.clone()];
@@ -609,14 +726,36 @@ impl FontCollection {
         for (relative_start, grapheme) in source_text.grapheme_indices(true) {
             let start = source.start + relative_start;
             let end = start + grapheme.len();
+            let (preferred_face, font_size_bits) = match style {
+                ParagraphStyle::Spans(spans) => {
+                    let span = spans
+                        .get(spans.partition_point(|span| span.source_end as usize <= start))
+                        .filter(|span| span.source_start as usize <= start)
+                        .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?;
+                    if end > span.source_end as usize {
+                        return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
+                    }
+                    (
+                        Some(
+                            self.faces
+                                .iter()
+                                .position(|face| face.id() == span.font)
+                                .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?,
+                        ),
+                        span.font_size_bits,
+                    )
+                }
+                ParagraphStyle::Uniform(font_size_bits) => (None, font_size_bits),
+            };
             let face_index = self
-                .fallback_face(grapheme)?
+                .fallback_face_with_preferred(grapheme, preferred_face)?
                 .ok_or(TextError::new(TextErrorCode::MissingGlyph))?;
             let can_merge = output.len() > output_start;
             if can_merge
                 && let Some(previous) = output.last_mut()
                 && previous.face_index == face_index
                 && previous.direction == direction
+                && previous.font_size_bits == font_size_bits
                 && previous.end == start
             {
                 previous.end = end;
@@ -632,6 +771,7 @@ impl FontCollection {
                     start,
                     end,
                     direction,
+                    font_size_bits,
                 });
             }
         }
@@ -639,12 +779,52 @@ impl FontCollection {
     }
 
     fn fallback_face(&self, grapheme: &str) -> Result<Option<usize>, TextError> {
+        self.fallback_face_with_preferred(grapheme, None)
+    }
+
+    fn fallback_face_with_preferred(
+        &self,
+        grapheme: &str,
+        preferred: Option<usize>,
+    ) -> Result<Option<usize>, TextError> {
+        if let Some(index) = preferred
+            && supports_grapheme(&self.faces[index], grapheme)?
+        {
+            return Ok(Some(index));
+        }
         for (index, face) in self.faces.iter().enumerate() {
+            if Some(index) == preferred {
+                continue;
+            }
             if supports_grapheme(face, grapheme)? {
                 return Ok(Some(index));
             }
         }
         Ok(None)
+    }
+
+    fn validate_style_spans(&self, text: &str, spans: &[TextStyleSpan]) -> Result<(), TextError> {
+        if spans.is_empty() || spans.len() > self.limits.max_runs {
+            return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
+        }
+        let mut expected_start = 0_usize;
+        for span in spans {
+            let start = span.source_start as usize;
+            let end = span.source_end as usize;
+            if start != expected_start
+                || end > text.len()
+                || !text.is_char_boundary(start)
+                || !text.is_char_boundary(end)
+                || self.face(span.font).is_none()
+            {
+                return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
+            }
+            expected_start = end;
+        }
+        if expected_start != text.len() {
+            return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
+        }
+        Ok(())
     }
 }
 
@@ -667,6 +847,13 @@ struct LogicalSegment {
     start: usize,
     end: usize,
     direction: TextDirection,
+    font_size_bits: i32,
+}
+
+#[derive(Clone, Copy)]
+enum ParagraphStyle<'a> {
+    Uniform(i32),
+    Spans(&'a [TextStyleSpan]),
 }
 
 fn supports_grapheme(face: &FontFace, grapheme: &str) -> Result<bool, TextError> {

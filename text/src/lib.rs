@@ -15,7 +15,7 @@ mod layout;
 use std::fmt;
 
 pub use collection::{
-    FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection,
+    FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection, TextStyleSpan,
 };
 pub use font::{
     FontFace, FontFeature, FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation,
@@ -49,6 +49,8 @@ pub enum TextErrorCode {
     InvalidLanguage,
     /// A language break provider returned a non-grapheme or out-of-word offset.
     InvalidWordBreak,
+    /// Styled paragraph spans are invalid, incomplete, or split a grapheme.
+    InvalidTextStyleSpan,
     /// Font bytes are malformed or omit required tables.
     InvalidFontData,
     /// A font-collection face index is out of bounds.

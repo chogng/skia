@@ -63,10 +63,12 @@ Immutable feature instances also apply global OpenType values such as `kern=0`
 through every single-run, fallback, bidi, and multiline shaping path.
 `FontCollection` provides deterministic CSS-like family/style matching,
 performs grapheme-level ordered fallback, and shapes one unwrapped bidi
-paragraph into positioned visual runs. It also exposes scaled baseline metrics
-and greedy Unicode line layout with bounded line and shaping work. CPU drawing
-reuses the ordinary path-fill pipeline. Laid-out lines carry physical
-left/center/right alignment or bidi-aware logical start/end alignment.
+paragraph into positioned visual runs. Styled paragraph spans can select a
+preferred immutable face instance and Q16.16 size per grapheme-safe source
+range, while retaining fallback and bidi behavior. It also exposes scaled
+baseline metrics and greedy Unicode line layout with bounded line and shaping
+work. CPU drawing reuses the ordinary path-fill pipeline. Laid-out lines carry
+physical left/center/right alignment or bidi-aware logical start/end alignment.
 Justified lines preserve shaping output
 and add deterministic per-glyph spacing at interior breakable Unicode spaces,
 including ideographic space while excluding non-breaking spaces. Callers can
@@ -80,8 +82,8 @@ across fallback runs; CPU layout drawing paints them after glyph outlines.
 System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, non-ASCII
 inter-character justification, per-span decoration styles, and decorative line
-variants remain upper text-layout responsibilities. Per-range feature values
-also require upper-layer span segmentation. GPU glyph commands, glyph atlases,
+variants remain upper text-layout responsibilities. Multiline styled layout and
+per-span paint remain upper-layer operations. GPU glyph commands, glyph atlases,
 hinting, and color-font painting are not implemented yet.
 
 ## Geometry and transforms

@@ -107,6 +107,21 @@ cluster、字形位置和 advance 的 `GlyphRun`。
 `ShapedParagraph`。每个 `ShapedRun` 保留原始 UTF-8 范围、全局 cluster、方向和 Q16.16 横向
 origin。
 
+同一未换行段落需要混合字体实例或字号时，为全文构造有序、连续、无重叠的
+`TextStyleSpan::new(source_start, source_end, preferred_font_id, font_size_bits)` 列表，再调用
+`shape_styled_paragraph`；强制基方向时使用 `shape_styled_paragraph_with_direction`。spans
+必须完整覆盖 UTF-8 文本，边界必须落在 extended grapheme 之间，指定的 `FontId` 必须已经
+加入 collection，否则返回 `InvalidTextStyleSpan`。
+
+每个 grapheme 会先尝试 span 的 preferred face，再按 collection 原顺序 fallback；因此
+fallback 不会因样式分段失效。不同字号会保存在各自 `GlyphRun`，paragraph metrics 取实际
+使用 runs 的最大 ascent/descent/line gap。span 也可引用 variable/feature instance，从而
+实现未换行段落内的 per-range axis 或 OpenType feature。
+
+当前 `TextStyleSpan` 只携带字体实例和字号，不携带颜色或装饰：颜色属于 `Paint`，上层需要按
+`ShapedRun` 拆分绘制时选择不同 paint。`layout_text` 目前仍是统一字号和统一装饰的 multiline
+API；跨行 styled text 尚需上层分段，后续再下沉为专用 styled layout。
+
 CPU 即时绘制使用
 `Canvas::draw_shaped_paragraph(&paragraph, &collection, baseline_origin, paint)`。它逐个应用 run
 origin，且成功或失败都会恢复 canvas 状态。单 run 仍可调用
@@ -179,10 +194,10 @@ path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 
 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
 换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、Unicode
-可断空格 justification、全局 OpenType feature、实线 underline/strike-through 和轮廓
-解析**，但不负责平台字体发现、generic family 映射、variable 实例选择策略、语言偏好、
-内置词典/断字算法、脚本级 inter-character justification、per-range feature、per-span
-装饰或装饰线变体。
+可断空格 justification、全局 OpenType feature、grapheme-safe styled paragraph、实线
+underline/strike-through 和轮廓解析**，但不负责平台字体发现、generic family 映射、
+variable 实例选择策略、语言偏好、内置词典/断字算法、脚本级 inter-character
+justification、multiline styled layout、per-span paint/装饰或装饰线变体。
 `shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
 `MissingGlyph`。当前 Unicode line-break 实现把 SA 复杂上下文字系按普通字母处理；泰文、
 老挝文、高棉文和缅甸文需要上层通过 `TextBreakProvider` 接入合适的 `Soft` 词典边界。
@@ -333,9 +348,9 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 5. 图片不支持非轴对齐变换/过滤，描边样式也只有圆头圆角；
 6. 文本层已有内存字体解析、family/style 匹配、单段落 bidi、跨字体 fallback、metrics、
    通用换行、可插拔词典断点、hyphenation、对齐、Unicode 空格 justification 与实线装饰，
-   并支持 variable 实例与全局 OpenType feature；但仍没有系统字体发现、内置语言词典、
-   variable 实例选择策略、脚本级 inter-character justification、per-range feature、
-   per-span 装饰与完整排版；
+   并支持 variable/feature 实例与 styled paragraph；但仍没有系统字体发现、内置语言词典、
+   variable 实例选择策略、脚本级 inter-character justification、multiline styled layout、
+   per-span paint/装饰与完整排版；
 7. 路径的几何布尔运算、stroke-to-path 和 path effects 尚未暴露；它们不能由像素混合模式替代。
 
 源码入口：Geometry 在 `geometry/src/lib.rs`，Path 在 `path/src/lib.rs`，CPU Canvas 在

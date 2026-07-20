@@ -20,7 +20,8 @@ pub use skia_core::{
     FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment,
     Paint, PositionedGlyph, ShapedLine, ShapedParagraph, ShapedRun, TextAlignment,
     TextBreakProvider, TextDecoration, TextDecorationMetrics, TextDirection, TextError,
-    TextErrorCode, TextLayout, TextLayoutOptions, TextUnit, TextWordBreak, TextWordBreakKind,
+    TextErrorCode, TextLayout, TextLayoutOptions, TextStyleSpan, TextUnit, TextWordBreak,
+    TextWordBreakKind,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};

@@ -3,7 +3,7 @@ use skia_core::{
     FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphId, GlyphOutline,
     GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAlignment,
     TextBreakProvider, TextDecoration, TextDirection, TextError, TextErrorCode, TextLayoutOptions,
-    TextWordBreak, TextWordBreakKind, Transform,
+    TextStyleSpan, TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -312,6 +312,91 @@ fn shaping_feature_instances_propagate_through_paragraph_and_layout() {
         .expect_err("duplicate tags must fail")
         .code(),
         TextErrorCode::InvalidFontFeature
+    );
+}
+
+#[test]
+fn styled_paragraphs_select_fonts_sizes_and_grapheme_safe_fallback() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(150), toy_font('A')).expect("A font"))
+        .expect("add A font");
+    fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(151),
+                toy_font_for(&['A', '\u{0301}', '\u{05d0}']),
+            )
+            .expect("fallback font"),
+        )
+        .expect("add fallback font");
+    let text = "A\u{05d0}A";
+    let spans = [
+        TextStyleSpan::new(0, 1, FontId::new(150), 10 << 16).expect("first span"),
+        TextStyleSpan::new(1, 3, FontId::new(150), 20 << 16).expect("fallback span"),
+        TextStyleSpan::new(3, 4, FontId::new(151), 15 << 16).expect("last span"),
+    ];
+    assert_eq!(spans[0].source_start(), 0);
+    assert_eq!(spans[0].source_end(), 1);
+    assert_eq!(spans[0].font(), FontId::new(150));
+    assert_eq!(spans[0].font_size_bits(), 10 << 16);
+
+    let paragraph = fonts
+        .shape_styled_paragraph_with_direction(text, &spans, TextDirection::LeftToRight)
+        .expect("styled bidi paragraph");
+    assert_eq!(paragraph.runs().len(), 3);
+    assert_eq!(paragraph.runs()[0].glyph_run().font(), FontId::new(150));
+    assert_eq!(paragraph.runs()[0].glyph_run().font_size_bits(), 10 << 16);
+    assert_eq!(paragraph.runs()[1].glyph_run().font(), FontId::new(151));
+    assert_eq!(paragraph.runs()[1].glyph_run().font_size_bits(), 20 << 16);
+    assert_eq!(paragraph.runs()[2].glyph_run().font(), FontId::new(151));
+    assert_eq!(paragraph.runs()[2].glyph_run().font_size_bits(), 15 << 16);
+    assert_eq!(paragraph.advance_x_bits(), 27 << 16);
+    assert_eq!(paragraph.metrics().ascent_bits(), 16 << 16);
+    assert_eq!(paragraph.metrics().descent_bits(), 4 << 16);
+
+    let color = [45, 90, 135, 255];
+    let mut surface = Surface::new(30, 24, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas
+        .draw_shaped_paragraph(
+            &paragraph,
+            &fonts,
+            Point::new(scalar(1), scalar(17)),
+            Paint::new(Color::rgba(color[0], color[1], color[2], color[3])),
+        )
+        .expect("draw styled paragraph");
+    drop(canvas);
+    assert_eq!(pixel(&surface, 2, 12), color);
+    assert_eq!(pixel(&surface, 8, 4), color);
+    assert_eq!(pixel(&surface, 20, 7), color);
+
+    let split_grapheme = [
+        TextStyleSpan::new(0, 1, FontId::new(151), 10 << 16).expect("first half"),
+        TextStyleSpan::new(1, 3, FontId::new(151), 10 << 16).expect("second half"),
+    ];
+    assert_eq!(
+        fonts
+            .shape_styled_paragraph("A\u{0301}", &split_grapheme)
+            .expect_err("span must not split a grapheme")
+            .code(),
+        TextErrorCode::InvalidTextStyleSpan
+    );
+    assert_eq!(
+        fonts
+            .shape_styled_paragraph(
+                "AA",
+                &[TextStyleSpan::new(0, 1, FontId::new(150), 10 << 16).expect("partial")],
+            )
+            .expect_err("spans must cover text")
+            .code(),
+        TextErrorCode::InvalidTextStyleSpan
+    );
+    assert_eq!(
+        TextStyleSpan::new(1, 1, FontId::new(150), 10 << 16)
+            .expect_err("empty span")
+            .code(),
+        TextErrorCode::InvalidTextStyleSpan
     );
 }
 
