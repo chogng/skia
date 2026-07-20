@@ -10,7 +10,10 @@ use skia_core::{Paint, Rect, SkiaError, Transform};
 use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 use skia_image::Image;
 
-use crate::{GpuBackend, GpuCommand, GpuCommandBuffer, GpuGlyphQuad, GpuSurfaceDescriptor};
+use crate::{
+    GpuBackend, GpuClipGeometry, GpuClipId, GpuCommand, GpuCommandBuffer, GpuGlyphQuad,
+    GpuSurfaceDescriptor,
+};
 
 /// Source-redacted failure from deterministic command replay.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -67,33 +70,51 @@ impl GpuBackend for SoftwareGpuBackend {
                     rect,
                     paint,
                     transform,
+                    scissor,
                     clip,
-                } => with_state(&mut canvas, *transform, *clip, |canvas| {
-                    canvas.fill_rect(*rect, *paint)
-                })?,
+                } => with_state(
+                    &mut canvas,
+                    commands,
+                    *transform,
+                    *scissor,
+                    *clip,
+                    |canvas| canvas.fill_rect(*rect, *paint),
+                )?,
                 GpuCommand::FillPath {
                     path,
                     rule,
                     paint,
                     transform,
+                    scissor,
                     clip,
                 } => {
                     let path = commands.path(*path).ok_or(SoftwareGpuError)?;
-                    with_state(&mut canvas, *transform, *clip, |canvas| {
-                        canvas.fill_path(path, *rule, *paint)
-                    })?
+                    with_state(
+                        &mut canvas,
+                        commands,
+                        *transform,
+                        *scissor,
+                        *clip,
+                        |canvas| canvas.fill_path(path, *rule, *paint),
+                    )?
                 }
                 GpuCommand::StrokePath {
                     path,
                     options,
                     paint,
                     transform,
+                    scissor,
                     clip,
                 } => {
                     let path = commands.path(*path).ok_or(SoftwareGpuError)?;
-                    with_state(&mut canvas, *transform, *clip, |canvas| {
-                        canvas.stroke_path_with_options(path, options, *paint)
-                    })?
+                    with_state(
+                        &mut canvas,
+                        commands,
+                        *transform,
+                        *scissor,
+                        *clip,
+                        |canvas| canvas.stroke_path_with_options(path, options, *paint),
+                    )?
                 }
                 GpuCommand::DrawImage {
                     image,
@@ -101,18 +122,25 @@ impl GpuBackend for SoftwareGpuBackend {
                     opacity,
                     blend_mode,
                     transform,
+                    scissor,
                     clip,
                 } => {
                     let image = commands.image(*image).ok_or(SoftwareGpuError)?;
-                    with_state(&mut canvas, *transform, *clip, |canvas| {
-                        canvas.draw_image(image, *destination, *opacity, *blend_mode)
-                    })?
+                    with_state(
+                        &mut canvas,
+                        commands,
+                        *transform,
+                        *scissor,
+                        *clip,
+                        |canvas| canvas.draw_image(image, *destination, *opacity, *blend_mode),
+                    )?
                 }
                 GpuCommand::DrawGlyphs {
                     atlas,
                     glyphs,
                     paint,
                     transform,
+                    scissor,
                     clip,
                 } => {
                     let atlas = commands.glyph_atlas(*atlas).ok_or(SoftwareGpuError)?;
@@ -123,12 +151,24 @@ impl GpuBackend for SoftwareGpuBackend {
                                 .map(|image| (image, glyph.destination()))
                         })
                         .collect::<Result<_, _>>()?;
-                    with_state(&mut canvas, *transform, *clip, |canvas| {
-                        for (image, destination) in &images {
-                            canvas.draw_image(image, *destination, u8::MAX, paint.blend_mode())?;
-                        }
-                        Ok(())
-                    })?
+                    with_state(
+                        &mut canvas,
+                        commands,
+                        *transform,
+                        *scissor,
+                        *clip,
+                        |canvas| {
+                            for (image, destination) in &images {
+                                canvas.draw_image(
+                                    image,
+                                    *destination,
+                                    u8::MAX,
+                                    paint.blend_mode(),
+                                )?;
+                            }
+                            Ok(())
+                        },
+                    )?
                 }
             }
         }
@@ -138,21 +178,49 @@ impl GpuBackend for SoftwareGpuBackend {
 
 fn with_state(
     canvas: &mut Canvas<'_>,
+    commands: &GpuCommandBuffer,
     transform: Transform,
-    clip: Option<Rect>,
+    scissor: Option<Rect>,
+    clip: Option<GpuClipId>,
     draw: impl FnOnce(&mut Canvas<'_>) -> Result<(), SkiaError>,
 ) -> Result<(), SoftwareGpuError> {
     canvas.save().map_err(map_error)?;
     let result = (|| {
-        if let Some(clip) = clip {
+        if let Some(scissor) = scissor {
             canvas.set_transform(Transform::IDENTITY);
-            canvas.clip_rect(ClipRect::new(clip))?;
+            canvas.clip_rect(ClipRect::new(scissor))?;
+        }
+        let mut clip_chain = Vec::new();
+        let mut current = clip;
+        while let Some(id) = current {
+            let node = commands.clip_node(id).ok_or_else(invalid_resource)?;
+            clip_chain
+                .try_reserve(1)
+                .map_err(|_| SkiaError::new(skia_core::SkiaErrorCode::AllocationFailed))?;
+            clip_chain.push(node);
+            current = node.parent();
+        }
+        for node in clip_chain.into_iter().rev() {
+            canvas.set_transform(node.transform());
+            match node.geometry() {
+                GpuClipGeometry::Rect(rect) => {
+                    canvas.clip_rect_with_op(ClipRect::new(rect), node.op())?;
+                }
+                GpuClipGeometry::Path { path, rule } => {
+                    let path = commands.path(path).ok_or_else(invalid_resource)?;
+                    canvas.clip_path(path, rule, node.op())?;
+                }
+            }
         }
         canvas.set_transform(transform);
         draw(canvas)
     })();
     let restore = canvas.restore();
     result.and(restore).map_err(map_error)
+}
+
+fn invalid_resource() -> SkiaError {
+    SkiaError::new(skia_core::SkiaErrorCode::InvalidResource)
 }
 
 fn map_error(_: SkiaError) -> SoftwareGpuError {

@@ -305,10 +305,13 @@ impl GpuBackend for MetalBackend {
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(_) => {}
-                GpuCommand::FillRect { paint, .. }
-                    if paint.blend_mode() == BlendMode::SourceOver => {}
-                GpuCommand::DrawGlyphs { atlas, paint, .. } => {
+                GpuCommand::FillRect { paint, clip, .. }
+                    if paint.blend_mode() == BlendMode::SourceOver && clip.is_none() => {}
+                GpuCommand::DrawGlyphs {
+                    atlas, paint, clip, ..
+                } => {
                     if paint.blend_mode() != BlendMode::SourceOver
+                        || clip.is_some()
                         || commands.glyph_atlas(*atlas).is_none()
                     {
                         return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
@@ -347,7 +350,8 @@ impl GpuBackend for MetalBackend {
                     rect,
                     paint,
                     transform,
-                    clip,
+                    scissor,
+                    clip: _,
                 } => {
                     self.encode_solid_rect(
                         command_buffer,
@@ -355,7 +359,7 @@ impl GpuBackend for MetalBackend {
                         *rect,
                         *paint,
                         *transform,
-                        *clip,
+                        *scissor,
                     )?;
                 }
                 GpuCommand::DrawGlyphs {
@@ -363,7 +367,8 @@ impl GpuBackend for MetalBackend {
                     glyphs,
                     paint,
                     transform,
-                    clip,
+                    scissor,
+                    clip: _,
                 } => {
                     let texture = atlas_textures
                         .get(atlas)
@@ -375,7 +380,7 @@ impl GpuBackend for MetalBackend {
                         glyphs,
                         *paint,
                         *transform,
-                        *clip,
+                        *scissor,
                     )?;
                 }
                 GpuCommand::FillPath { .. }

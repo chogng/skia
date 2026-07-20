@@ -1,12 +1,12 @@
 use std::fmt;
 
 use skia_core::{
-    BlendMode, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, StrokeCap, StrokeJoin,
-    StrokeOptions, Transform,
+    BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, StrokeCap,
+    StrokeJoin, StrokeOptions, Transform,
 };
 use skia_gpu::{
-    GpuAtlasRect, GpuBackend, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode, GpuCommandLimits,
-    GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad, GpuSurfaceDescriptor,
+    GpuAtlasRect, GpuBackend, GpuClipGeometry, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode,
+    GpuCommandLimits, GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad, GpuSurfaceDescriptor,
     software::SoftwareGpuBackend,
 };
 use skia_image::Image;
@@ -143,20 +143,28 @@ fn gpu_encoder_scopes_transform_clip_and_resource_limits() {
 
     let commands = encoder.finish();
     let GpuCommand::FillRect {
-        transform, clip, ..
+        transform,
+        scissor,
+        clip,
+        ..
     } = &commands.commands()[0]
     else {
         panic!("expected clipped rectangle command");
     };
     assert_eq!(transform.map_point(point(0, 0)).unwrap(), point(3, 4));
-    assert_eq!(*clip, Some(rect(3, 4, 5, 6)));
+    assert_eq!(*scissor, Some(rect(3, 4, 5, 6)));
+    assert_eq!(*clip, None);
     let GpuCommand::FillRect {
-        transform, clip, ..
+        transform,
+        scissor,
+        clip,
+        ..
     } = &commands.commands()[1]
     else {
         panic!("expected restored rectangle command");
     };
     assert_eq!(*transform, Transform::IDENTITY);
+    assert_eq!(*scissor, None);
     assert_eq!(*clip, None);
 }
 
@@ -171,6 +179,106 @@ fn gpu_empty_scissors_skip_draws_but_not_target_clears() {
     encoder.clear(Color::WHITE).unwrap();
     let commands = encoder.finish();
     assert_eq!(commands.commands(), &[GpuCommand::Clear(Color::WHITE)]);
+}
+
+#[test]
+fn gpu_complex_clips_form_shared_immutable_chains() {
+    let mut path = PathBuilder::new(5).unwrap();
+    path.add_rect(rect(1, 1, 6, 6)).unwrap();
+    let mut encoder = GpuCommandEncoder::new(4).unwrap();
+    let path = encoder.add_path(path.finish().unwrap()).unwrap();
+    encoder
+        .clip_path(path, FillRule::NonZero, ClipOp::Intersect)
+        .unwrap();
+    encoder
+        .fill_rect(rect(0, 0, 7, 7), Paint::new(Color::WHITE))
+        .unwrap();
+    encoder.save().unwrap();
+    encoder
+        .clip_rect_with_op(rect(2, 2, 5, 5), ClipOp::Difference)
+        .unwrap();
+    encoder
+        .fill_rect(rect(0, 0, 7, 7), Paint::new(Color::BLACK))
+        .unwrap();
+    encoder.restore().unwrap();
+    encoder
+        .fill_rect(rect(0, 0, 1, 1), Paint::new(Color::WHITE))
+        .unwrap();
+    let commands = encoder.finish();
+
+    let clips: Vec<_> = commands
+        .commands()
+        .iter()
+        .map(|command| match command {
+            GpuCommand::FillRect { clip, .. } => *clip,
+            _ => panic!("expected fill"),
+        })
+        .collect();
+    let root = clips[0].expect("root clip");
+    let child = clips[1].expect("child clip");
+    assert_eq!(clips[2], Some(root));
+    assert_eq!(commands.clip_node(root).unwrap().parent(), None);
+    assert_eq!(
+        commands.clip_node(root).unwrap().geometry(),
+        GpuClipGeometry::Path {
+            path,
+            rule: FillRule::NonZero,
+        }
+    );
+    assert_eq!(commands.clip_node(child).unwrap().parent(), Some(root));
+    assert_eq!(
+        commands.clip_node(child).unwrap().geometry(),
+        GpuClipGeometry::Rect(rect(2, 2, 5, 5))
+    );
+    assert_eq!(commands.clip_node(child).unwrap().op(), ClipOp::Difference);
+}
+
+#[test]
+fn software_replay_applies_path_and_difference_clips() {
+    let mut path = PathBuilder::new(5).unwrap();
+    path.add_rect(rect(1, 1, 6, 6)).unwrap();
+    let mut encoder = GpuCommandEncoder::new(2).unwrap();
+    let path = encoder.add_path(path.finish().unwrap()).unwrap();
+    encoder
+        .clip_path(path, FillRule::NonZero, ClipOp::Intersect)
+        .unwrap();
+    encoder
+        .clip_rect_with_op(rect(2, 2, 5, 5), ClipOp::Difference)
+        .unwrap();
+    encoder
+        .fill_rect(rect(0, 0, 7, 7), Paint::new(Color::WHITE))
+        .unwrap();
+    let commands = encoder.finish();
+
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(7, 7).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &commands).unwrap();
+
+    assert_eq!(pixel(&surface, 1, 1), Color::WHITE.channels());
+    assert_eq!(pixel(&surface, 3, 3), Color::TRANSPARENT.channels());
+    assert_eq!(pixel(&surface, 5, 5), Color::WHITE.channels());
+    assert_eq!(pixel(&surface, 0, 0), Color::TRANSPARENT.channels());
+}
+
+#[test]
+fn gpu_clip_limits_are_independent_from_draw_commands() {
+    let limits = GpuCommandLimits::new(2, 1, 1, 1)
+        .unwrap()
+        .with_max_clips(1)
+        .unwrap();
+    let mut encoder = GpuCommandEncoder::with_limits(limits).unwrap();
+    encoder
+        .clip_rect_with_op(rect(0, 0, 2, 2), ClipOp::Difference)
+        .unwrap();
+    assert_eq!(
+        encoder
+            .clip_rect_with_op(rect(0, 0, 1, 1), ClipOp::Difference)
+            .unwrap_err()
+            .code(),
+        GpuCommandErrorCode::ResourceLimit
+    );
 }
 
 #[test]
@@ -224,6 +332,7 @@ fn gpu_stroke_commands_preserve_options_and_replay_dashes() {
     let GpuCommand::StrokePath {
         options: recorded,
         transform,
+        scissor,
         clip,
         ..
     } = &commands.commands()[0]
@@ -232,6 +341,7 @@ fn gpu_stroke_commands_preserve_options_and_replay_dashes() {
     };
     assert_eq!(recorded, &options);
     assert_eq!(*transform, Transform::IDENTITY);
+    assert_eq!(*scissor, None);
     assert_eq!(*clip, None);
 
     let mut backend = SoftwareGpuBackend::default();

@@ -15,7 +15,9 @@ pub mod software;
 
 use std::fmt;
 
-use skia_core::{BlendMode, Color, FillRule, Paint, Path, Point, Rect, StrokeOptions, Transform};
+use skia_core::{
+    BlendMode, ClipOp, Color, FillRule, Paint, Path, Point, Rect, StrokeOptions, Transform,
+};
 use skia_image::Image;
 
 /// Stable machine-readable GPU command recording failure.
@@ -94,6 +96,10 @@ impl GpuSurfaceDescriptor {
 /// Opaque, command-buffer-local identifier for one immutable vector path.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GpuPathId(u32);
+
+/// Opaque, command-buffer-local identifier for one immutable clip node.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GpuClipId(u32);
 
 /// Opaque, command-buffer-local identifier for one immutable RGBA8 image.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -242,6 +248,7 @@ pub struct GpuCommandLimits {
     max_commands: usize,
     max_paths: usize,
     max_images: usize,
+    max_clips: usize,
     max_save_depth: usize,
     max_glyphs_per_batch: usize,
 }
@@ -261,9 +268,19 @@ impl GpuCommandLimits {
             max_commands,
             max_paths,
             max_images,
+            max_clips: max_commands,
             max_save_depth,
             max_glyphs_per_batch: max_commands.saturating_mul(1_024),
         })
+    }
+
+    /// Replaces the positive immutable clip-node ceiling.
+    pub const fn with_max_clips(mut self, max_clips: usize) -> Result<Self, GpuCommandError> {
+        if max_clips == 0 {
+            return Err(GpuCommandError::new(GpuCommandErrorCode::InvalidLimits));
+        }
+        self.max_clips = max_clips;
+        Ok(self)
     }
 
     /// Replaces the positive glyph count ceiling for one atlas batch.
@@ -276,6 +293,51 @@ impl GpuCommandLimits {
         }
         self.max_glyphs_per_batch = max_glyphs_per_batch;
         Ok(self)
+    }
+}
+
+/// Geometry retained by one immutable complex clip node.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GpuClipGeometry {
+    /// One logical rectangle.
+    Rect(Rect),
+    /// One command-buffer-local path and its containment rule.
+    Path {
+        /// Path resource local to the command buffer.
+        path: GpuPathId,
+        /// Containment rule used by the clip.
+        rule: FillRule,
+    },
+}
+
+/// One immutable node in a command buffer's persistent complex-clip chain.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GpuClipNode {
+    parent: Option<GpuClipId>,
+    geometry: GpuClipGeometry,
+    op: ClipOp,
+    transform: Transform,
+}
+
+impl GpuClipNode {
+    /// Returns the preceding complex clip node, if any.
+    pub const fn parent(self) -> Option<GpuClipId> {
+        self.parent
+    }
+
+    /// Returns the logical geometry retained by this node.
+    pub const fn geometry(self) -> GpuClipGeometry {
+        self.geometry
+    }
+
+    /// Returns the boolean operation applied by this node.
+    pub const fn op(self) -> ClipOp {
+        self.op
+    }
+
+    /// Returns the logical-to-target transform captured for this geometry.
+    pub const fn transform(self) -> Transform {
+        self.transform
     }
 }
 
@@ -292,8 +354,10 @@ pub enum GpuCommand {
         paint: Paint,
         /// Logical-to-target transform selected when the command was recorded.
         transform: Transform,
-        /// Target-space scissor rectangle, if clipping is active.
-        clip: Option<Rect>,
+        /// Target-space scissor rectangle, if active.
+        scissor: Option<Rect>,
+        /// Tail of the immutable complex-clip chain, if active.
+        clip: Option<GpuClipId>,
     },
     /// Fills one registered vector path.
     FillPath {
@@ -305,8 +369,10 @@ pub enum GpuCommand {
         paint: Paint,
         /// Logical-to-target transform selected when the command was recorded.
         transform: Transform,
-        /// Target-space scissor rectangle, if clipping is active.
-        clip: Option<Rect>,
+        /// Target-space scissor rectangle, if active.
+        scissor: Option<Rect>,
+        /// Tail of the immutable complex-clip chain, if active.
+        clip: Option<GpuClipId>,
     },
     /// Strokes one registered vector path.
     StrokePath {
@@ -318,8 +384,10 @@ pub enum GpuCommand {
         paint: Paint,
         /// Logical-to-target transform selected when the command was recorded.
         transform: Transform,
-        /// Target-space scissor rectangle, if clipping is active.
-        clip: Option<Rect>,
+        /// Target-space scissor rectangle, if active.
+        scissor: Option<Rect>,
+        /// Tail of the immutable complex-clip chain, if active.
+        clip: Option<GpuClipId>,
     },
     /// Draws one registered image into a logical rectangle.
     DrawImage {
@@ -333,8 +401,10 @@ pub enum GpuCommand {
         blend_mode: BlendMode,
         /// Logical-to-target transform selected when the command was recorded.
         transform: Transform,
-        /// Target-space scissor rectangle, if clipping is active.
-        clip: Option<Rect>,
+        /// Target-space scissor rectangle, if active.
+        scissor: Option<Rect>,
+        /// Tail of the immutable complex-clip chain, if active.
+        clip: Option<GpuClipId>,
     },
     /// Draws one atlas-backed batch of positioned glyph quads.
     DrawGlyphs {
@@ -346,8 +416,10 @@ pub enum GpuCommand {
         paint: Paint,
         /// Logical-to-target transform selected when the command was recorded.
         transform: Transform,
-        /// Target-space scissor rectangle, if clipping is active.
-        clip: Option<Rect>,
+        /// Target-space scissor rectangle, if active.
+        scissor: Option<Rect>,
+        /// Tail of the immutable complex-clip chain, if active.
+        clip: Option<GpuClipId>,
     },
 }
 
@@ -355,6 +427,7 @@ pub enum GpuCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpuCommandBuffer {
     commands: Vec<GpuCommand>,
+    clips: Vec<GpuClipNode>,
     paths: Vec<Path>,
     images: Vec<Image>,
     glyph_atlases: Vec<GpuGlyphAtlas>,
@@ -364,6 +437,11 @@ impl GpuCommandBuffer {
     /// Borrows commands in submission order.
     pub fn commands(&self) -> &[GpuCommand] {
         &self.commands
+    }
+
+    /// Resolves an immutable complex clip node referenced by a command.
+    pub fn clip_node(&self, id: GpuClipId) -> Option<GpuClipNode> {
+        self.clips.get(usize::try_from(id.0).ok()?).copied()
     }
 
     /// Resolves a path resource referenced by a command in this buffer.
@@ -386,6 +464,7 @@ impl GpuCommandBuffer {
 #[derive(Debug)]
 pub struct GpuCommandEncoder {
     commands: Vec<GpuCommand>,
+    clips: Vec<GpuClipNode>,
     paths: Vec<Path>,
     images: Vec<Image>,
     glyph_atlases: Vec<GpuGlyphAtlas>,
@@ -397,7 +476,8 @@ pub struct GpuCommandEncoder {
 #[derive(Clone, Copy, Debug)]
 struct GpuState {
     transform: Transform,
-    clip: ClipState,
+    scissor: ClipState,
+    clip: Option<GpuClipId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -422,13 +502,15 @@ impl GpuCommandEncoder {
     pub fn with_limits(limits: GpuCommandLimits) -> Result<Self, GpuCommandError> {
         Ok(Self {
             commands: Vec::new(),
+            clips: Vec::new(),
             paths: Vec::new(),
             images: Vec::new(),
             glyph_atlases: Vec::new(),
             limits,
             state: GpuState {
                 transform: Transform::IDENTITY,
-                clip: ClipState::Unbounded,
+                scissor: ClipState::Unbounded,
+                clip: None,
             },
             saves: Vec::new(),
         })
@@ -470,15 +552,18 @@ impl GpuCommandEncoder {
         Ok(())
     }
 
-    /// Intersects the active target-space scissor with one axis-aligned transformed rectangle.
+    /// Intersects the current clip with one transformed rectangle.
     pub fn clip_rect(&mut self, rect: Rect) -> Result<(), GpuCommandError> {
-        if !self.state.transform.is_axis_aligned() {
-            return Err(GpuCommandError::new(
-                GpuCommandErrorCode::UnsupportedTransform,
-            ));
+        self.clip_rect_with_op(rect, ClipOp::Intersect)
+    }
+
+    /// Applies a transformed rectangle to the current clip.
+    pub fn clip_rect_with_op(&mut self, rect: Rect, op: ClipOp) -> Result<(), GpuCommandError> {
+        if op != ClipOp::Intersect || !self.state.transform.is_axis_aligned() {
+            return self.push_clip(GpuClipGeometry::Rect(rect), op);
         }
         let clip = map_axis_aligned_rect(self.state.transform, rect)?;
-        self.state.clip = match self.state.clip {
+        self.state.scissor = match self.state.scissor {
             ClipState::Unbounded => ClipState::Rect(clip),
             ClipState::Empty => ClipState::Empty,
             ClipState::Rect(current) => intersect_rect(current, clip)
@@ -486,6 +571,19 @@ impl GpuCommandEncoder {
                 .unwrap_or(ClipState::Empty),
         };
         Ok(())
+    }
+
+    /// Applies a registered transformed path to the current clip.
+    pub fn clip_path(
+        &mut self,
+        path: GpuPathId,
+        rule: FillRule,
+        op: ClipOp,
+    ) -> Result<(), GpuCommandError> {
+        if self.path(path).is_none() {
+            return Err(GpuCommandError::new(GpuCommandErrorCode::InvalidResource));
+        }
+        self.push_clip(GpuClipGeometry::Path { path, rule }, op)
     }
 
     /// Registers an immutable vector path and returns its command-buffer-local ID.
@@ -532,7 +630,8 @@ impl GpuCommandEncoder {
             rect,
             paint,
             transform: self.state.transform,
-            clip: self.clip(),
+            scissor: self.scissor(),
+            clip: self.state.clip,
         })
     }
 
@@ -551,7 +650,8 @@ impl GpuCommandEncoder {
             rule,
             paint,
             transform: self.state.transform,
-            clip: self.clip(),
+            scissor: self.scissor(),
+            clip: self.state.clip,
         })
     }
 
@@ -570,7 +670,8 @@ impl GpuCommandEncoder {
             options,
             paint,
             transform: self.state.transform,
-            clip: self.clip(),
+            scissor: self.scissor(),
+            clip: self.state.clip,
         })
     }
 
@@ -591,7 +692,8 @@ impl GpuCommandEncoder {
             opacity,
             blend_mode,
             transform: self.state.transform,
-            clip: self.clip(),
+            scissor: self.scissor(),
+            clip: self.state.clip,
         })
     }
 
@@ -631,7 +733,8 @@ impl GpuCommandEncoder {
             glyphs,
             paint,
             transform: self.state.transform,
-            clip: self.clip(),
+            scissor: self.scissor(),
+            clip: self.state.clip,
         })
     }
 
@@ -639,6 +742,7 @@ impl GpuCommandEncoder {
     pub fn finish(self) -> GpuCommandBuffer {
         GpuCommandBuffer {
             commands: self.commands,
+            clips: self.clips,
             paths: self.paths,
             images: self.images,
             glyph_atlases: self.glyph_atlases,
@@ -646,7 +750,7 @@ impl GpuCommandEncoder {
     }
 
     fn push(&mut self, command: GpuCommand) -> Result<(), GpuCommandError> {
-        if matches!(self.state.clip, ClipState::Empty) {
+        if matches!(self.state.scissor, ClipState::Empty) {
             return Ok(());
         }
         self.push_unclipped(command)
@@ -675,12 +779,30 @@ impl GpuCommandEncoder {
         self.glyph_atlases.get(usize::try_from(id.0).ok()?)
     }
 
-    fn clip(&self) -> Option<Rect> {
-        match self.state.clip {
+    fn scissor(&self) -> Option<Rect> {
+        match self.state.scissor {
             ClipState::Unbounded => None,
             ClipState::Empty => None,
             ClipState::Rect(rect) => Some(rect),
         }
+    }
+
+    fn push_clip(&mut self, geometry: GpuClipGeometry, op: ClipOp) -> Result<(), GpuCommandError> {
+        if matches!(self.state.scissor, ClipState::Empty) {
+            return Ok(());
+        }
+        let id = resource_id(self.clips.len(), self.limits.max_clips)?;
+        self.clips
+            .try_reserve(1)
+            .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::AllocationFailed))?;
+        self.clips.push(GpuClipNode {
+            parent: self.state.clip,
+            geometry,
+            op,
+            transform: self.state.transform,
+        });
+        self.state.clip = Some(GpuClipId(id));
+        Ok(())
     }
 }
 
