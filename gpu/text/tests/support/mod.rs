@@ -10,6 +10,20 @@ pub fn toy_font(character: char) -> Vec<u8> {
     ])
 }
 
+pub fn toy_font_with_decorations(character: char) -> Vec<u8> {
+    build_font_from_tables(vec![
+        (*b"cmap", cmap_table(character)),
+        (*b"glyf", glyf_table()),
+        (*b"head", head_table()),
+        (*b"hhea", hhea_table()),
+        (*b"hmtx", hmtx_table()),
+        (*b"loca", loca_table()),
+        (*b"maxp", maxp_table()),
+        (*b"OS/2", os2_table()),
+        (*b"post", post_table()),
+    ])
+}
+
 fn build_font_from_tables(mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
     tables.sort_unstable_by_key(|(tag, _)| *tag);
     let table_count = u16::try_from(tables.len()).expect("small table count");
@@ -107,6 +121,24 @@ fn maxp_table() -> Vec<u8> {
     let mut table = vec![0; 32];
     put_u32(&mut table, 0, 0x0001_0000);
     put_u16(&mut table, 4, 2);
+    table
+}
+
+fn os2_table() -> Vec<u8> {
+    let mut table = vec![0; 96];
+    put_u16(&mut table, 0, 4);
+    put_u16(&mut table, 4, 400);
+    put_u16(&mut table, 6, 5);
+    put_i16(&mut table, 26, 100);
+    put_i16(&mut table, 28, 300);
+    table
+}
+
+fn post_table() -> Vec<u8> {
+    let mut table = vec![0; 32];
+    put_u32(&mut table, 0, 0x0003_0000);
+    put_i16(&mut table, 8, -100);
+    put_i16(&mut table, 10, 100);
     table
 }
 

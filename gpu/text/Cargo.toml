@@ -13,3 +13,6 @@ skia-image = { path = "../../image" }
 [dev-dependencies]
 skia-cpu = { path = "../../cpu" }
 skia-gpu = { path = "..", features = ["software"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+skia-metal = { path = "../metal" }

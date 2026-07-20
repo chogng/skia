@@ -128,7 +128,10 @@ atlases are available through the separate `skia-gpu-text` adapter:
 `TextAtlasBuilder` rasterizes and packs a `TextLayout`, and `TextAtlas` converts
 layout positions into owned generic quads without borrowing an encoder. The
 caller then explicitly registers `into_gpu_atlas()` and records the quads with
-`skia-gpu`, keeping data adaptation separate from command ordering. The Metal
+`skia-gpu`. `layout_decoration_batches` independently converts resolved
+underline and strike-through metrics into per-style target-space rectangles;
+callers record those through generic `fill_rect` commands. This keeps text data
+adaptation separate from command ordering and hardware backends. The Metal
 backend draws transformed/scissored solid rectangles, Alpha8 masks, and color
 glyphs through real shader pipelines; these paths currently support
 source-over blending. `TextAtlasCache` retains
