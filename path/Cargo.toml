@@ -1,0 +1,11 @@
+[package]
+name = "pdf-rs-skia-path"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+pdf-rs-skia-error = { path = "../error" }
+pdf-rs-skia-geometry = { path = "../geometry" }
+

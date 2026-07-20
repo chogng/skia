@@ -1,0 +1,15 @@
+[package]
+name = "pdf-rs-skia"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+pdf-rs-skia-codec = { path = "codec" }
+pdf-rs-skia-core = { path = "core" }
+pdf-rs-skia-cpu = { path = "cpu" }
+pdf-rs-skia-error = { path = "error" }
+pdf-rs-skia-geometry = { path = "geometry" }
+pdf-rs-skia-image = { path = "image" }
+pdf-rs-skia-path = { path = "path" }
