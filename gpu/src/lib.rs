@@ -15,7 +15,7 @@ pub mod software;
 
 use std::fmt;
 
-use skia_core::{BlendMode, Color, FillRule, Paint, Path, Point, Rect, Transform};
+use skia_core::{BlendMode, Color, FillRule, Paint, Path, Point, Rect, StrokeOptions, Transform};
 use skia_image::Image;
 
 /// Stable machine-readable GPU command recording failure.
@@ -308,6 +308,19 @@ pub enum GpuCommand {
         /// Target-space scissor rectangle, if clipping is active.
         clip: Option<Rect>,
     },
+    /// Strokes one registered vector path.
+    StrokePath {
+        /// Path resource local to this command buffer.
+        path: GpuPathId,
+        /// Cap, join, miter, width, and dash geometry.
+        options: StrokeOptions,
+        /// Immutable source paint.
+        paint: Paint,
+        /// Logical-to-target transform selected when the command was recorded.
+        transform: Transform,
+        /// Target-space scissor rectangle, if clipping is active.
+        clip: Option<Rect>,
+    },
     /// Draws one registered image into a logical rectangle.
     DrawImage {
         /// Image resource local to this command buffer.
@@ -536,6 +549,25 @@ impl GpuCommandEncoder {
         self.push(GpuCommand::FillPath {
             path,
             rule,
+            paint,
+            transform: self.state.transform,
+            clip: self.clip(),
+        })
+    }
+
+    /// Records a stroke of a registered path with explicit geometry options.
+    pub fn stroke_path(
+        &mut self,
+        path: GpuPathId,
+        options: StrokeOptions,
+        paint: Paint,
+    ) -> Result<(), GpuCommandError> {
+        if self.path(path).is_none() {
+            return Err(GpuCommandError::new(GpuCommandErrorCode::InvalidResource));
+        }
+        self.push(GpuCommand::StrokePath {
+            path,
+            options,
             paint,
             transform: self.state.transform,
             clip: self.clip(),

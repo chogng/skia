@@ -1,4 +1,6 @@
-use skia_core::{BlendMode, Color, Paint, Rect, Scalar, Transform};
+use skia_core::{
+    BlendMode, Color, Paint, PathBuilder, Point, Rect, Scalar, StrokeOptions, Transform,
+};
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandBuffer, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphAtlasKey,
     GpuGlyphQuad, GpuSurfaceDescriptor,
@@ -42,6 +44,28 @@ fn metal_backend_fails_closed_for_unimplemented_draw_commands() {
             )
             .unwrap(),
             Paint::new(Color::BLACK).with_blend_mode(BlendMode::Multiply),
+        )
+        .unwrap();
+    assert_eq!(
+        backend
+            .submit(&mut surface, &commands.finish())
+            .unwrap_err()
+            .code(),
+        MetalErrorCode::UnsupportedCommand
+    );
+
+    let mut path = PathBuilder::new(2).unwrap();
+    path.move_to(Point::new(Scalar::ZERO, Scalar::ZERO))
+        .unwrap();
+    path.line_to(Point::new(Scalar::from_i32(2).unwrap(), Scalar::ZERO))
+        .unwrap();
+    let mut commands = GpuCommandEncoder::new(1).unwrap();
+    let path = commands.add_path(path.finish().unwrap()).unwrap();
+    commands
+        .stroke_path(
+            path,
+            StrokeOptions::new(Scalar::from_i32(1).unwrap()).unwrap(),
+            Paint::new(Color::WHITE),
         )
         .unwrap();
     assert_eq!(
@@ -209,7 +233,12 @@ fn pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
 fn backend_or_skip() -> Option<MetalBackend> {
     match MetalBackend::new() {
         Ok(backend) => Some(backend),
-        Err(error) if error.code() == MetalErrorCode::DeviceUnavailable => None,
+        Err(error)
+            if error.code() == MetalErrorCode::DeviceUnavailable
+                && std::env::var_os("SKIA_REQUIRE_METAL_DEVICE").is_none() =>
+        {
+            None
+        }
         Err(error) => panic!("unexpected Metal initialization failure: {error}"),
     }
 }

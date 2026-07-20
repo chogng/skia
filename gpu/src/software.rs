@@ -83,6 +83,18 @@ impl GpuBackend for SoftwareGpuBackend {
                         canvas.fill_path(path, *rule, *paint)
                     })?
                 }
+                GpuCommand::StrokePath {
+                    path,
+                    options,
+                    paint,
+                    transform,
+                    clip,
+                } => {
+                    let path = commands.path(*path).ok_or(SoftwareGpuError)?;
+                    with_state(&mut canvas, *transform, *clip, |canvas| {
+                        canvas.stroke_path_with_options(path, options, *paint)
+                    })?
+                }
                 GpuCommand::DrawImage {
                     image,
                     destination,

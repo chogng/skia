@@ -160,7 +160,9 @@ quadratics retaining their control hull). `DisplayList` and the GPU encoder
 expose both transform replacement and affine concatenation as generic
 graphics-state operations. Backend-neutral `StrokeOptions` defines
 butt/round/square caps, miter/round/bevel joins, miter limits, and canonical
-dash patterns; CPU Canvas and DisplayList replay implement those semantics.
+dash patterns. CPU Canvas and DisplayList replay implement those semantics;
+the generic GPU command preserves the same options and its software reference
+backend replays them without introducing backend-specific stroke types.
 Boolean path operations, stroke-to-path expansion,
 path effects, and tangent-/endpoint-defined arc variants remain separate
 geometry-processing work; their design must stay independent of any consumer.

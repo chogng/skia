@@ -316,6 +316,7 @@ impl GpuBackend for MetalBackend {
                 }
                 GpuCommand::FillRect { .. }
                 | GpuCommand::FillPath { .. }
+                | GpuCommand::StrokePath { .. }
                 | GpuCommand::DrawImage { .. } => {
                     return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
                 }
@@ -377,7 +378,9 @@ impl GpuBackend for MetalBackend {
                         *clip,
                     )?;
                 }
-                GpuCommand::FillPath { .. } | GpuCommand::DrawImage { .. } => {
+                GpuCommand::FillPath { .. }
+                | GpuCommand::StrokePath { .. }
+                | GpuCommand::DrawImage { .. } => {
                     unreachable!("commands were prevalidated")
                 }
             }

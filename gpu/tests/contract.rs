@@ -1,6 +1,9 @@
 use std::fmt;
 
-use skia_core::{BlendMode, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, Transform};
+use skia_core::{
+    BlendMode, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, StrokeCap, StrokeJoin,
+    StrokeOptions, Transform,
+};
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode, GpuCommandLimits,
     GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad, GpuSurfaceDescriptor,
@@ -199,6 +202,49 @@ fn software_replay_is_a_pixel_oracle_for_gpu_command_state() {
     assert_eq!(pixel(&surface, 2, 0), [0, 0, 255, 255]);
     assert_eq!(pixel(&surface, 3, 0), [0, 0, 0, 255]);
     assert_eq!(pixel(&surface, 0, 1), [255, 0, 0, 255]);
+}
+
+#[test]
+fn gpu_stroke_commands_preserve_options_and_replay_dashes() {
+    let mut path = PathBuilder::new(2).unwrap();
+    path.move_to(point(2, 5)).unwrap();
+    path.line_to(point(18, 5)).unwrap();
+    let options = StrokeOptions::new(scalar(2))
+        .unwrap()
+        .with_cap(StrokeCap::Butt)
+        .with_join(StrokeJoin::Bevel)
+        .with_dash_pattern(&[scalar(4), scalar(4)], Scalar::ZERO)
+        .unwrap();
+    let mut encoder = GpuCommandEncoder::new(1).unwrap();
+    let path = encoder.add_path(path.finish().unwrap()).unwrap();
+    encoder
+        .stroke_path(path, options.clone(), Paint::new(Color::WHITE))
+        .unwrap();
+    let commands = encoder.finish();
+    let GpuCommand::StrokePath {
+        options: recorded,
+        transform,
+        clip,
+        ..
+    } = &commands.commands()[0]
+    else {
+        panic!("expected stroke command");
+    };
+    assert_eq!(recorded, &options);
+    assert_eq!(*transform, Transform::IDENTITY);
+    assert_eq!(*clip, None);
+
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(20, 11).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &commands).unwrap();
+    for x in [2, 3, 4, 5, 10, 11, 12, 13] {
+        assert_eq!(pixel(&surface, x, 5), Color::WHITE.channels());
+    }
+    for x in [6, 7, 8, 9, 14, 15, 16, 17] {
+        assert_eq!(pixel(&surface, x, 5), Color::TRANSPARENT.channels());
+    }
 }
 
 #[test]
