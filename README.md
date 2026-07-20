@@ -93,6 +93,9 @@ across fallback runs; CPU layout drawing paints them after glyph outlines.
 resolves source positions back to vertical carets. Upstream/downstream affinity
 distinguishes soft-wrap and bidi boundary positions; alignment, justification,
 synthetic hyphens, empty lines, and mixed line metrics are included.
+Cluster-boundary source ranges resolve to line-local `TextSelectionRect`
+geometry. Wrapped ranges split by line, bidi ranges split by visual
+discontinuity, and synthetic markers remain excluded.
 Line limits default to an all-or-error resource policy. Callers can explicitly
 select clipped output or a grapheme-safe, reshaped final-line ellipsis.
 Ellipses retain styled font size and bidi placement, prefer U+2026, and fall
@@ -102,7 +105,7 @@ System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, general
 non-CJK inter-character justification, per-span paint and decoration styles, and
 decorative line variants remain upper text-layout responsibilities. Ligature
-internal caret data and selection rectangles are also not exposed. GPU glyph
+internal caret data is not exposed. GPU glyph
 commands, glyph atlases, hinting, and color-font painting are not implemented
 yet.
 

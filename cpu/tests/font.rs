@@ -1686,6 +1686,135 @@ fn hit_testing_and_carets_resolve_wraps_alignment_bidi_and_spacing() {
 }
 
 #[test]
+fn selection_rects_follow_clusters_wraps_spacing_bidi_and_synthetic_markers() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(87),
+                toy_font_for(&['A', '\u{05d0}', '\u{05d1}', '\u{2026}', '\u{4e2d}']),
+            )
+            .expect("selection font"),
+        )
+        .expect("add selection font");
+
+    let spaced = fonts
+        .layout_text(
+            "AAA",
+            10 << 16,
+            TextLayoutOptions::new(30 << 16)
+                .expect("spacing options")
+                .with_letter_spacing(2 << 16),
+        )
+        .expect("spaced layout");
+    let selected = spaced.selection_rects(0, 2).expect("spaced selection");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].line_index(), 0);
+    assert_eq!(
+        (
+            selected[0].left_bits(),
+            selected[0].top_bits(),
+            selected[0].right_bits(),
+            selected[0].bottom_bits(),
+        ),
+        (0, 0, 14 << 16, 10 << 16)
+    );
+    let second = spaced.selection_rects(1, 2).expect("second cluster");
+    assert_eq!(
+        (second[0].left_bits(), second[0].right_bits()),
+        (8 << 16, 14 << 16)
+    );
+    assert!(
+        spaced
+            .selection_rects(1, 1)
+            .expect("collapsed selection")
+            .is_empty()
+    );
+
+    let wrapped = fonts
+        .layout_text(
+            "AAAA",
+            10 << 16,
+            TextLayoutOptions::new(12 << 16).expect("wrap options"),
+        )
+        .expect("wrapped layout");
+    let across_lines = wrapped.selection_rects(1, 3).expect("wrapped selection");
+    assert_eq!(across_lines.len(), 2);
+    assert_eq!(
+        (
+            across_lines[0].line_index(),
+            across_lines[0].left_bits(),
+            across_lines[0].right_bits(),
+        ),
+        (0, 6 << 16, 12 << 16)
+    );
+    assert_eq!(
+        (
+            across_lines[1].line_index(),
+            across_lines[1].left_bits(),
+            across_lines[1].right_bits(),
+        ),
+        (1, 0, 6 << 16)
+    );
+
+    let bidi = fonts
+        .layout_text(
+            "A\u{05d0}\u{05d1}A",
+            10 << 16,
+            TextLayoutOptions::new(30 << 16).expect("bidi options"),
+        )
+        .expect("bidi layout");
+    let discontiguous = bidi.selection_rects(0, 3).expect("bidi selection");
+    assert_eq!(discontiguous.len(), 2);
+    assert_eq!(
+        (
+            discontiguous[0].left_bits(),
+            discontiguous[0].right_bits(),
+            discontiguous[1].left_bits(),
+            discontiguous[1].right_bits(),
+        ),
+        (0, 6 << 16, 12 << 16, 18 << 16)
+    );
+
+    let cjk = fonts
+        .layout_text(
+            "\u{4e2d}\u{4e2d}",
+            10 << 16,
+            TextLayoutOptions::new(15 << 16)
+                .expect("CJK options")
+                .with_alignment(TextAlignment::Justify)
+                .with_justify_last_line(true),
+        )
+        .expect("justified CJK layout");
+    let cjk_selection = cjk.selection_rects(0, 6).expect("CJK selection");
+    assert_eq!(
+        (cjk_selection[0].left_bits(), cjk_selection[0].right_bits()),
+        (0, 15 << 16)
+    );
+    assert_eq!(
+        cjk.selection_rects(1, 6)
+            .expect_err("selection must start on a cluster boundary")
+            .code(),
+        TextErrorCode::InvalidLayout
+    );
+
+    let ellipsized = fonts
+        .layout_text(
+            "AAAA",
+            10 << 16,
+            TextLayoutOptions::with_limits(12 << 16, 1, 64)
+                .expect("ellipsis options")
+                .with_overflow(TextOverflow::Ellipsis),
+        )
+        .expect("ellipsized layout");
+    let visible_source = ellipsized
+        .selection_rects(0, 1)
+        .expect("visible source selection");
+    assert_eq!(visible_source[0].right_bits(), 6 << 16);
+    assert_eq!(ellipsized.lines()[0].advance_x_bits(), 12 << 16);
+}
+
+#[test]
 fn cluster_spacing_affects_wraps_carets_bidi_justification_and_ellipsis() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts

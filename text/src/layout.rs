@@ -131,6 +131,43 @@ pub struct TextCaret {
     bottom_bits: i32,
 }
 
+/// One visual highlight rectangle for a logical source selection.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextSelectionRect {
+    line_index: usize,
+    left_bits: i32,
+    top_bits: i32,
+    right_bits: i32,
+    bottom_bits: i32,
+}
+
+impl TextSelectionRect {
+    /// Returns the zero-based line index.
+    pub const fn line_index(self) -> usize {
+        self.line_index
+    }
+
+    /// Returns the inclusive left Q16.16 coordinate.
+    pub const fn left_bits(self) -> i32 {
+        self.left_bits
+    }
+
+    /// Returns the inclusive top Q16.16 coordinate.
+    pub const fn top_bits(self) -> i32 {
+        self.top_bits
+    }
+
+    /// Returns the exclusive right Q16.16 coordinate.
+    pub const fn right_bits(self) -> i32 {
+        self.right_bits
+    }
+
+    /// Returns the exclusive bottom Q16.16 coordinate.
+    pub const fn bottom_bits(self) -> i32 {
+        self.bottom_bits
+    }
+}
+
 impl TextCaret {
     /// Returns the source position represented by this caret.
     pub const fn position(self) -> TextPosition {
@@ -510,6 +547,131 @@ impl TextLayout {
         Ok(fallback)
     }
 
+    /// Returns visual rectangles for a cluster-boundary UTF-8 source range.
+    ///
+    /// Rectangles are layout-local, ordered by line and visual position, and
+    /// include inter-cluster spacing between adjacent selected clusters.
+    /// Synthetic hyphens and ellipses are excluded because they consume no
+    /// source bytes. A collapsed range returns no rectangles. Reversed ranges
+    /// or endpoints that are not visible cluster boundaries return
+    /// [`TextErrorCode::InvalidLayout`].
+    pub fn selection_rects(
+        &self,
+        source_start: u32,
+        source_end: u32,
+    ) -> Result<Vec<TextSelectionRect>, TextError> {
+        if source_start > source_end {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        let mut start_valid = false;
+        let mut end_valid = false;
+        for line in &self.lines {
+            for stop in line_caret_stops(line)? {
+                start_valid |= stop.position.source_offset == source_start;
+                end_valid |= stop.position.source_offset == source_end;
+            }
+        }
+        if !start_valid || !end_valid {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        if source_start == source_end {
+            return Ok(Vec::new());
+        }
+
+        let mut rectangles = Vec::new();
+        for (line_index, line) in self.lines.iter().enumerate() {
+            let Some(paragraph) = line.paragraph() else {
+                continue;
+            };
+            let glyph_count = paragraph.runs().iter().try_fold(0_usize, |total, shaped| {
+                total
+                    .checked_add(shaped.glyph_run().glyphs().len())
+                    .ok_or(TextError::new(TextErrorCode::NumericOverflow))
+            })?;
+            let mut boundaries = Vec::new();
+            boundaries
+                .try_reserve(
+                    glyph_count
+                        .checked_add(2)
+                        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?,
+                )
+                .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+            boundaries.push(line.source_start);
+            boundaries.push(line.source_end);
+            for shaped in paragraph.runs() {
+                for glyph in shaped.glyph_run().glyphs() {
+                    if glyph.cluster() >= line.source_start && glyph.cluster() < line.source_end {
+                        boundaries.push(glyph.cluster());
+                    }
+                }
+            }
+            boundaries.sort_unstable();
+            boundaries.dedup();
+
+            let top_bits = line
+                .baseline_y_bits
+                .checked_sub(line.metrics.ascent_bits())
+                .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+            let bottom_bits = line
+                .baseline_y_bits
+                .checked_add(line.metrics.descent_bits())
+                .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+            let mut active: Option<(i32, i32)> = None;
+            for shaped in paragraph.runs() {
+                let glyphs = shaped.glyph_run().glyphs();
+                let mut first = 0_usize;
+                while first < glyphs.len() {
+                    let cluster = glyphs[first].cluster();
+                    let mut end = first + 1;
+                    while end < glyphs.len() && glyphs[end].cluster() == cluster {
+                        end += 1;
+                    }
+                    let selected = if shaped.source_start() == shaped.source_end()
+                        || cluster < line.source_start
+                        || cluster >= line.source_end
+                    {
+                        false
+                    } else {
+                        let boundary_index = boundaries
+                            .binary_search(&cluster)
+                            .map_err(|_| TextError::new(TextErrorCode::InvalidLayout))?;
+                        let cluster_end = *boundaries
+                            .get(boundary_index + 1)
+                            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+                        cluster >= source_start && cluster_end <= source_end
+                    };
+                    if selected {
+                        let (left_bits, right_bits) = glyph_group_bounds(line, shaped, first, end)?;
+                        active = Some(active.map_or((left_bits, right_bits), |(left, right)| {
+                            (left.min(left_bits), right.max(right_bits))
+                        }));
+                    } else if let Some((left_bits, right_bits)) = active.take() {
+                        push_selection_rect(
+                            &mut rectangles,
+                            line_index,
+                            left_bits,
+                            top_bits,
+                            right_bits,
+                            bottom_bits,
+                        )?;
+                    }
+                    first = end;
+                }
+            }
+            if let Some((left_bits, right_bits)) = active {
+                push_selection_rect(
+                    &mut rectangles,
+                    line_index,
+                    left_bits,
+                    top_bits,
+                    right_bits,
+                    bottom_bits,
+                )?;
+            }
+        }
+        Ok(rectangles)
+    }
+
     fn nearest_line_index(&self, y_bits: i32) -> Result<usize, TextError> {
         let mut nearest = None;
         for (index, line) in self.lines.iter().enumerate() {
@@ -529,6 +691,27 @@ impl TextLayout {
             .map(|(index, _)| index)
             .ok_or(TextError::new(TextErrorCode::InvalidLayout))
     }
+}
+
+fn push_selection_rect(
+    rectangles: &mut Vec<TextSelectionRect>,
+    line_index: usize,
+    left_bits: i32,
+    top_bits: i32,
+    right_bits: i32,
+    bottom_bits: i32,
+) -> Result<(), TextError> {
+    rectangles
+        .try_reserve(1)
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    rectangles.push(TextSelectionRect {
+        line_index,
+        left_bits,
+        top_bits,
+        right_bits,
+        bottom_bits,
+    });
+    Ok(())
 }
 
 impl FontCollection {

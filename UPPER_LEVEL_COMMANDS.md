@@ -191,8 +191,14 @@ top-left 的 Q16.16 值，实际 Canvas 坐标应先减去绘制时传入的 ori
 之前；因此 soft wrap 同一个 UTF-8 offset 可分别定位上一行尾和下一行首，混合 bidi 边界也
 可保留两个不同 X。`TextCaret` 返回 layout-local 的 X、top、bottom 和 line index，已包含
 alignment、justification、styled 行高、空行和 synthetic hyphen。offset 不是 shaping
-cluster boundary 时返回 `Ok(None)`。当前不会伪造 ligature 内部 caret，也还没有 selection
-rectangles API。
+cluster boundary 时返回 `Ok(None)`。当前不会伪造 ligature 内部 caret。
+
+逻辑选择区间使用 `TextLayout::selection_rects(source_start, source_end)` 转为一组
+`TextSelectionRect`。两个 offset 必须是当前可见 layout 的 shaping-cluster boundary，逆序或
+无效边界返回 `InvalidLayout`，折叠区间返回空列表。结果按 line 和视觉顺序排列，给出
+layout-local 的 left/top/right/bottom；跨行选择按行拆分，混合 bidi 中被未选 glyph 隔开的
+区域会拆成多个 rect，相邻已选 cluster 之间的 letter/word/CJK justification 间距会包含在
+合并 rect 内。synthetic hyphen/ellipsis 不消耗 source，因此不会产生选择矩形。
 
 `TextLayoutOptions::with_limits(width, max_lines, max_shaping_attempts)` 的 line limit 默认仍是
 all-or-error：超过时返回 `ResourceLimit`，不返回部分结果。明确允许截断时，再调用
@@ -253,8 +259,8 @@ path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 
 换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、Unicode
 可断空格与 CJK inter-character justification、cluster-safe letter/word spacing、全局
 OpenType feature、BCP 47 language-sensitive shaping、grapheme-safe styled paragraph/multiline
-layout、line-limit clip/ellipsis、cluster hit testing/caret、实线 underline/strike-through
-和轮廓解析**，但不负责平台字体发现、generic family 映射、
+layout、line-limit clip/ellipsis、cluster hit testing/caret/selection rectangles、实线
+underline/strike-through 和轮廓解析**，但不负责平台字体发现、generic family 映射、
 variable 实例选择策略、语言偏好、内置词典/断字算法、通用跨脚本 inter-character
 justification、per-span paint/装饰或装饰线变体。
 `shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
@@ -410,8 +416,8 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
    justification 与实线装饰，
    并支持 variable/feature 实例、language-sensitive shaping、cluster-safe letter/word
    spacing、styled paragraph/layout、line-limit clip/ellipsis 与
-   cluster hit testing/caret；但仍没有系统字体发现、内置语言词典、variable 实例选择策略、
-   通用跨脚本 inter-character justification、ligature 内部 caret、selection rectangles、
+   cluster hit testing/caret/selection rectangles；但仍没有系统字体发现、内置语言词典、
+   variable 实例选择策略、通用跨脚本 inter-character justification、ligature 内部 caret、
    per-span paint/装饰与完整排版；
 7. 路径的几何布尔运算、stroke-to-path 和 path effects 尚未暴露；它们不能由像素混合模式替代。
 

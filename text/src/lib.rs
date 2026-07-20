@@ -31,8 +31,8 @@ pub use font::{
 };
 pub use layout::{
     ShapedLine, TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecoration,
-    TextHitResult, TextLayout, TextLayoutOptions, TextOverflow, TextPosition, TextWordBreak,
-    TextWordBreakKind,
+    TextHitResult, TextLayout, TextLayoutOptions, TextOverflow, TextPosition, TextSelectionRect,
+    TextWordBreak, TextWordBreakKind,
 };
 
 /// Stable machine-readable text-resource failure.
