@@ -63,19 +63,20 @@ runs. It also exposes scaled baseline metrics and greedy Unicode line layout
 with bounded line and shaping work. CPU drawing reuses the ordinary path-fill
 pipeline. Laid-out lines carry physical left/center/right alignment or
 bidi-aware logical start/end alignment. Justified lines preserve shaping output
-and add deterministic per-glyph spacing at interior ASCII spaces. Callers can
-plug language dictionaries into `TextBreakProvider`; the layout engine validates
-UTF-8 grapheme boundaries and supports either glyph-free soft breaks or
-synthetic visible hyphens without consuming source bytes. Layout options can
-also request underline and strike-through lines. Their scaled position and
+and add deterministic per-glyph spacing at interior breakable Unicode spaces,
+including ideographic space while excluding non-breaking spaces. Callers can
+plug language dictionaries into `TextBreakProvider`; the layout engine
+validates UTF-8 grapheme boundaries and supports either glyph-free soft breaks
+or synthetic visible hyphens without consuming source bytes. Layout options
+can also request underline and strike-through lines. Their scaled position and
 thickness come from the collection's primary OpenType face and stay continuous
 across fallback runs; CPU layout drawing paints them after glyph outlines.
 
 System-font discovery, generic-family mapping, variable-font axis selection,
 language-specific font selection, dictionary data and algorithms, non-ASCII
-justification opportunities, per-span decoration styles, and decorative line
-variants remain upper text-layout responsibilities. GPU glyph commands, glyph
-atlases, hinting, and color-font painting are not implemented yet.
+inter-character justification, per-span decoration styles, and decorative
+line variants remain upper text-layout responsibilities. GPU glyph commands,
+glyph atlases, hinting, and color-font painting are not implemented yet.
 
 ## Geometry and transforms
 

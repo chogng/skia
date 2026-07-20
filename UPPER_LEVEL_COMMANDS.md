@@ -124,11 +124,15 @@ LTR 从左开始，RTL 从右开始；`Left` / `Right` 始终使用物理边。`
 是相对 text-block origin 的最终横向位置，`advance_x_bits` 是 justification 后的行宽，
 `TextLayout::container_width_bits` 保留调用方给出的容器宽度。
 
-`Justify` 只扩展行内、非首尾的 ASCII 空格，并通过 `ShapedRun::glyph_offsets_x_bits` 保存
-逐 glyph 的 Q16.16 位移，不修改 shaping cluster 或 bidi run 顺序。默认不处理段落末行；
-确实需要时显式调用 `with_justify_last_line(true)`。没有可扩展空格的行回退为逻辑
-`Start`，不会伪造字符间距。DisplayList 展开布局时除了 run origin，还必须应用 line
-offset 和每个 glyph 的额外 offset；CPU `draw_text_layout` 已自动完成这些步骤。
+`Justify` 扩展行内、非首尾的可断 Unicode space separator：包括 ASCII SPACE、OGHAM SPACE
+MARK、U+2000–U+2006、U+2008–U+200A、MEDIUM MATHEMATICAL SPACE 和 IDEOGRAPHIC SPACE；
+NBSP、U+2007 FIGURE SPACE 与 NARROW NBSP 明确保持不可断、不可扩展。位移通过
+`ShapedRun::glyph_offsets_x_bits` 按 glyph 保存，
+不修改 shaping cluster 或 bidi run 顺序。默认不处理段落末行；确实需要时显式调用
+`with_justify_last_line(true)`。没有可扩展空格的行回退为逻辑 `Start`，不会伪造字符间距。
+当前尚不做 CJK 等脚本的 inter-character justification。DisplayList 展开布局时除了 run
+origin，还必须应用 line offset 和每个 glyph 的额外 offset；CPU `draw_text_layout` 已自动
+完成这些步骤。
 
 整块 layout 需要下划线或删除线时，使用
 `TextLayoutOptions::with_decoration(TextDecoration::Underline)`、
@@ -149,10 +153,10 @@ layout，尚无 per-span 颜色/粗细、波浪线/虚线，也没有专用 Disp
 path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 advance，但绘制时不产生路径。
 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
-换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、ASCII 空格
-justification、实线 underline/strike-through 和轮廓解析**，但不负责平台字体发现、
-generic family 映射、variable axis 实例化、语言偏好、内置词典/断字算法、非 ASCII
-justification、per-span 装饰或装饰线变体。
+换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、Unicode
+可断空格 justification、实线 underline/strike-through 和轮廓解析**，但不负责平台字体
+发现、generic family 映射、variable axis 实例化、语言偏好、内置词典/断字算法、脚本级
+inter-character justification、per-span 装饰或装饰线变体。
 `shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
 `MissingGlyph`。当前 Unicode line-break 实现把 SA 复杂上下文字系按普通字母处理；泰文、
 老挝文、高棉文和缅甸文需要上层通过 `TextBreakProvider` 接入合适的 `Soft` 词典边界。
@@ -302,8 +306,9 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 4. 裁剪仍只有矩形，图片仍是 RGBA8；
 5. 图片不支持非轴对齐变换/过滤，描边样式也只有圆头圆角；
 6. 文本层已有内存字体解析、family/style 匹配、单段落 bidi、跨字体 fallback、metrics、
-   通用换行、可插拔词典断点、hyphenation、对齐与基础 justification，但仍没有系统字体发现、
-   内置语言词典、variable axis、非 ASCII justification、装饰与完整排版；
+   通用换行、可插拔词典断点、hyphenation、对齐、Unicode 空格 justification 与实线装饰，
+   但仍没有系统字体发现、内置语言词典、variable axis、脚本级 inter-character
+   justification、per-span 装饰与完整排版；
 7. 路径的几何布尔运算、stroke-to-path 和 path effects 尚未暴露；它们不能由像素混合模式替代。
 
 源码入口：Geometry 在 `geometry/src/lib.rs`，Path 在 `path/src/lib.rs`，CPU Canvas 在

@@ -44,7 +44,7 @@ pub enum TextAlignment {
     Center,
     /// Align to the physical right edge.
     Right,
-    /// Expand interior ASCII spaces to fill eligible lines.
+    /// Expand interior breakable Unicode spaces to fill eligible lines.
     ///
     /// By default, paragraph-final lines keep start alignment. Use
     /// [`TextLayoutOptions::with_justify_last_line`] to include them.
@@ -642,7 +642,7 @@ impl LayoutBuilder<'_> {
                 && (!paragraph_final || self.options.justify_last_line)
                 && let Some(paragraph) = &mut line.paragraph
             {
-                line.justified = paragraph.justify_ascii_spaces(
+                line.justified = paragraph.justify_expandable_spaces(
                     self.text,
                     line.source_start as usize,
                     line.source_end as usize,

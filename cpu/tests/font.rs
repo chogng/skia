@@ -861,6 +861,46 @@ fn justification_expands_interior_spaces_and_controls_the_final_line() {
 }
 
 #[test]
+fn justification_expands_unicode_spaces_but_not_non_breaking_spaces() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(100),
+                toy_font_for(&['A', '\u{00a0}', '\u{2007}', '\u{202f}', '\u{3000}']),
+            )
+            .expect("Unicode space font"),
+        )
+        .expect("add font");
+    let justify_final = TextLayoutOptions::new(24 << 16)
+        .expect("options")
+        .with_alignment(TextAlignment::Justify)
+        .with_justify_last_line(true);
+
+    let ideographic = fonts
+        .layout_text("A\u{3000}A", 10 << 16, justify_final)
+        .expect("ideographic space layout");
+    assert!(ideographic.lines()[0].justified());
+    assert_eq!(ideographic.lines()[0].advance_x_bits(), 24 << 16);
+    assert_eq!(
+        ideographic.lines()[0].paragraph().expect("line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 0, 6 << 16]
+    );
+
+    for text in ["A\u{00a0}A", "A\u{2007}A", "A\u{202f}A"] {
+        let non_breaking = fonts
+            .layout_text(text, 10 << 16, justify_final)
+            .expect("non-breaking space layout");
+        assert!(!non_breaking.lines()[0].justified());
+        assert_eq!(non_breaking.lines()[0].advance_x_bits(), 18 << 16);
+        assert_eq!(
+            non_breaking.lines()[0].paragraph().expect("line").runs()[0].glyph_offsets_x_bits(),
+            &[0, 0, 0]
+        );
+    }
+}
+
+#[test]
 fn font_decorations_use_primary_metrics_across_fallback_and_alignment() {
     let primary = FontFace::from_bytes(
         FontId::new(110),

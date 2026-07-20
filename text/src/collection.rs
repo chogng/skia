@@ -151,7 +151,7 @@ impl ShapedParagraph {
         self.metrics
     }
 
-    pub(crate) fn justify_ascii_spaces(
+    pub(crate) fn justify_expandable_spaces(
         &mut self,
         text: &str,
         source_start: usize,
@@ -170,12 +170,12 @@ impl ShapedParagraph {
         let line = &text[source_start..source_end];
         let first_non_space = line
             .char_indices()
-            .find(|(_, character)| *character != ' ')
+            .find(|(_, character)| !is_expandable_justification_space(*character))
             .map(|(index, _)| source_start + index);
         let last_non_space_end = line
             .char_indices()
             .rev()
-            .find(|(_, character)| *character != ' ')
+            .find(|(_, character)| !is_expandable_justification_space(*character))
             .map(|(index, character)| source_start + index + character.len_utf8());
         let (Some(first_non_space), Some(last_non_space_end)) =
             (first_non_space, last_non_space_end)
@@ -186,7 +186,7 @@ impl ShapedParagraph {
         let mut expansion_clusters = Vec::new();
         for (relative, character) in line.char_indices() {
             let cluster = source_start + relative;
-            if character == ' '
+            if is_expandable_justification_space(character)
                 && cluster > first_non_space
                 && cluster + character.len_utf8() < last_non_space_end
             {
@@ -247,6 +247,18 @@ impl ShapedParagraph {
         self.advance_x_bits = target_advance_bits;
         Ok(true)
     }
+}
+
+const fn is_expandable_justification_space(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0020}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{2006}'
+            | '\u{2008}'..='\u{200a}'
+            | '\u{205f}'
+            | '\u{3000}'
+    )
 }
 
 /// Ordered font faces used for deterministic grapheme-level fallback.
