@@ -170,6 +170,19 @@ LTR 从左开始，RTL 从右开始；`Left` / `Right` 始终使用物理边。`
 是相对 text-block origin 的最终横向位置，`advance_x_bits` 是 justification 后的行宽，
 `TextLayout::container_width_bits` 保留调用方给出的容器宽度。
 
+点到文本位置的命中使用 `TextLayout::hit_test_point(x_bits, y_bits)`；坐标是相对 layout
+top-left 的 Q16.16 值，实际 Canvas 坐标应先减去绘制时传入的 origin。返回的
+`TextHitResult` 包含最近的 zero-based line index 和 `TextPosition`。布局块外的 Y 会夹到最近
+行，行外的 X 会夹到最近 caret stop。
+
+反向查询使用 `caret_for_position(TextPosition::new(source_offset, affinity))`。
+`TextAffinity::Upstream` 表示前一个 source cluster 之后，`Downstream` 表示后一个 cluster
+之前；因此 soft wrap 同一个 UTF-8 offset 可分别定位上一行尾和下一行首，混合 bidi 边界也
+可保留两个不同 X。`TextCaret` 返回 layout-local 的 X、top、bottom 和 line index，已包含
+alignment、justification、styled 行高、空行和 synthetic hyphen。offset 不是 shaping
+cluster boundary 时返回 `Ok(None)`。当前不会伪造 ligature 内部 caret，也还没有 selection
+rectangles API。
+
 `Justify` 扩展行内、非首尾的可断 Unicode space separator：包括 ASCII SPACE、OGHAM SPACE
 MARK、U+2000–U+2006、U+2008–U+200A、MEDIUM MATHEMATICAL SPACE 和 IDEOGRAPHIC SPACE；
 NBSP、U+2007 FIGURE SPACE 与 NARROW NBSP 明确保持不可断、不可扩展。位移通过
@@ -203,7 +216,8 @@ path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
 换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、Unicode
 可断空格 justification、全局 OpenType feature、grapheme-safe styled paragraph/multiline
-layout、实线 underline/strike-through 和轮廓解析**，但不负责平台字体发现、generic family 映射、
+layout、cluster hit testing/caret、实线 underline/strike-through 和轮廓解析**，但不负责
+平台字体发现、generic family 映射、
 variable 实例选择策略、语言偏好、内置词典/断字算法、脚本级 inter-character
 justification、per-span paint/装饰或装饰线变体。
 `shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
@@ -356,9 +370,9 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 5. 图片不支持非轴对齐变换/过滤，描边样式也只有圆头圆角；
 6. 文本层已有内存字体解析、family/style 匹配、单段落 bidi、跨字体 fallback、metrics、
    通用换行、可插拔词典断点、hyphenation、对齐、Unicode 空格 justification 与实线装饰，
-   并支持 variable/feature 实例与 styled paragraph/layout；但仍没有系统字体发现、内置语言词典、
-   variable 实例选择策略、脚本级 inter-character justification、
-   per-span paint/装饰与完整排版；
+   并支持 variable/feature 实例、styled paragraph/layout 与 cluster hit testing/caret；
+   但仍没有系统字体发现、内置语言词典、variable 实例选择策略、脚本级 inter-character
+   justification、ligature 内部 caret、selection rectangles、per-span paint/装饰与完整排版；
 7. 路径的几何布尔运算、stroke-to-path 和 path effects 尚未暴露；它们不能由像素混合模式替代。
 
 源码入口：Geometry 在 `geometry/src/lib.rs`，Path 在 `path/src/lib.rs`，CPU Canvas 在

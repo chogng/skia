@@ -80,11 +80,16 @@ can also request underline and strike-through lines. Their scaled position and
 thickness come from the collection's primary OpenType face for uniform layout,
 or from the logical line-start span for styled layout, and stay continuous
 across fallback runs; CPU layout drawing paints them after glyph outlines.
+`TextLayout` also maps layout-local points to UTF-8 cluster boundaries and
+resolves source positions back to vertical carets. Upstream/downstream affinity
+distinguishes soft-wrap and bidi boundary positions; alignment, justification,
+synthetic hyphens, empty lines, and mixed line metrics are included.
 
 System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, non-ASCII
 inter-character justification, per-span paint and decoration styles, and
-decorative line variants remain upper text-layout responsibilities. GPU glyph
+decorative line variants remain upper text-layout responsibilities. Ligature
+internal caret data and selection rectangles are also not exposed. GPU glyph
 commands, glyph atlases, hinting, and color-font painting are not implemented
 yet.
 

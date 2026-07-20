@@ -1,9 +1,9 @@
 use skia_core::{
     Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId, FontLimits,
     FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphId, GlyphOutline,
-    GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAlignment,
+    GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAffinity, TextAlignment,
     TextBreakProvider, TextDecoration, TextDirection, TextError, TextErrorCode, TextLayoutOptions,
-    TextStyleSpan, TextWordBreak, TextWordBreakKind, Transform,
+    TextPosition, TextStyleSpan, TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -911,6 +911,22 @@ fn dictionary_hyphenation_wraps_ltr_text_and_draws_synthetic_glyphs() {
     assert_eq!(first.runs()[1].glyph_run().glyphs()[0].cluster(), 2);
     assert_eq!(first.runs()[1].origin_x_bits(), 12 << 16);
     assert_eq!(
+        layout
+            .caret_for_position(TextPosition::new(2, TextAffinity::Upstream))
+            .expect("hyphen upstream query")
+            .expect("hyphen upstream")
+            .x_bits(),
+        18 << 16
+    );
+    assert_eq!(
+        layout
+            .caret_for_position(TextPosition::new(2, TextAffinity::Downstream))
+            .expect("hyphen downstream query")
+            .expect("hyphen downstream")
+            .line_index(),
+        1
+    );
+    assert_eq!(
         (
             layout.lines()[1].source_start(),
             layout.lines()[1].source_end()
@@ -1143,6 +1159,186 @@ fn physical_and_logical_alignment_position_ltr_and_rtl_lines() {
 
     assert_eq!(pixel(&surface, 1, 4), [0, 0, 0, 0]);
     assert_eq!(pixel(&surface, 15, 4), [130, 140, 150, 255]);
+}
+
+#[test]
+fn hit_testing_and_carets_resolve_wraps_alignment_bidi_and_spacing() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(82), toy_font_for(&[' ', 'A'])).expect("LTR font"),
+        )
+        .expect("add LTR font");
+
+    let aligned = fonts
+        .layout_text(
+            "AAA",
+            10 << 16,
+            TextLayoutOptions::new(30 << 16)
+                .expect("options")
+                .with_alignment(TextAlignment::Right),
+        )
+        .expect("right-aligned layout");
+    let caret = aligned
+        .caret_for_position(TextPosition::new(1, TextAffinity::Downstream))
+        .expect("caret query")
+        .expect("cluster boundary");
+    assert_eq!(caret.position().source_offset(), 1);
+    assert_eq!(caret.position().affinity(), TextAffinity::Downstream);
+    assert_eq!(caret.line_index(), 0);
+    assert_eq!(caret.x_bits(), 18 << 16);
+    assert_eq!(caret.top_bits(), 0);
+    assert_eq!(caret.bottom_bits(), 10 << 16);
+    let hit = aligned
+        .hit_test_point(13 << 16, 5 << 16)
+        .expect("aligned hit");
+    assert_eq!(hit.line_index(), 0);
+    assert_eq!(
+        hit.position(),
+        TextPosition::new(0, TextAffinity::Downstream)
+    );
+
+    let wrapped = fonts
+        .layout_text(
+            "AAA",
+            10 << 16,
+            TextLayoutOptions::new(12 << 16).expect("options"),
+        )
+        .expect("wrapped layout");
+    let upstream = wrapped
+        .caret_for_position(TextPosition::new(2, TextAffinity::Upstream))
+        .expect("upstream query")
+        .expect("upstream wrap edge");
+    let downstream = wrapped
+        .caret_for_position(TextPosition::new(2, TextAffinity::Downstream))
+        .expect("downstream query")
+        .expect("downstream wrap edge");
+    assert_eq!((upstream.line_index(), upstream.x_bits()), (0, 12 << 16));
+    assert_eq!((downstream.line_index(), downstream.x_bits()), (1, 0));
+    assert_eq!(
+        wrapped
+            .hit_test_point(0, 15 << 16)
+            .expect("second-line hit")
+            .position(),
+        TextPosition::new(2, TextAffinity::Downstream)
+    );
+    assert!(
+        wrapped
+            .caret_for_position(TextPosition::new(4, TextAffinity::Downstream))
+            .expect("invalid boundary query")
+            .is_none()
+    );
+
+    let justified = fonts
+        .layout_text(
+            "A A",
+            10 << 16,
+            TextLayoutOptions::new(24 << 16)
+                .expect("options")
+                .with_alignment(TextAlignment::Justify)
+                .with_justify_last_line(true),
+        )
+        .expect("justified layout");
+    assert_eq!(
+        justified
+            .caret_for_position(TextPosition::new(2, TextAffinity::Upstream))
+            .expect("upstream spacing query")
+            .expect("upstream spacing edge")
+            .x_bits(),
+        12 << 16
+    );
+    assert_eq!(
+        justified
+            .caret_for_position(TextPosition::new(2, TextAffinity::Downstream))
+            .expect("downstream spacing query")
+            .expect("downstream spacing edge")
+            .x_bits(),
+        18 << 16
+    );
+
+    let mut rtl_fonts = FontCollection::new(FontCollectionLimits::default());
+    rtl_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(83), toy_font_for(&['\u{05d0}', '\u{05d1}']))
+                .expect("RTL font"),
+        )
+        .expect("add RTL font");
+    let rtl = rtl_fonts
+        .layout_text(
+            "\u{05d0}\u{05d1}",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("options"),
+        )
+        .expect("RTL layout");
+    assert_eq!(
+        rtl.caret_for_position(TextPosition::new(0, TextAffinity::Downstream))
+            .expect("RTL start query")
+            .expect("RTL start")
+            .x_bits(),
+        20 << 16
+    );
+    assert_eq!(
+        rtl.caret_for_position(TextPosition::new(4, TextAffinity::Upstream))
+            .expect("RTL end query")
+            .expect("RTL end")
+            .x_bits(),
+        8 << 16
+    );
+    assert_eq!(
+        rtl.hit_test_point(8 << 16, 5 << 16)
+            .expect("RTL hit")
+            .position(),
+        TextPosition::new(4, TextAffinity::Upstream)
+    );
+
+    let mut mixed_fonts = FontCollection::new(FontCollectionLimits::default());
+    mixed_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(84), toy_font_for(&['A', '\u{05d0}']))
+                .expect("mixed bidi font"),
+        )
+        .expect("add mixed font");
+    let mixed = mixed_fonts
+        .layout_text(
+            "A\u{05d0}",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("options"),
+        )
+        .expect("mixed bidi layout");
+    assert_eq!(
+        mixed
+            .caret_for_position(TextPosition::new(1, TextAffinity::Upstream))
+            .expect("mixed upstream query")
+            .expect("mixed upstream")
+            .x_bits(),
+        6 << 16
+    );
+    assert_eq!(
+        mixed
+            .caret_for_position(TextPosition::new(1, TextAffinity::Downstream))
+            .expect("mixed downstream query")
+            .expect("mixed downstream")
+            .x_bits(),
+        12 << 16
+    );
+
+    let trailing = fonts
+        .layout_text(
+            "A\n",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("options"),
+        )
+        .expect("trailing empty line");
+    let empty_caret = trailing
+        .caret_for_position(TextPosition::new(2, TextAffinity::Downstream))
+        .expect("empty-line query")
+        .expect("empty-line caret");
+    assert_eq!(empty_caret.line_index(), 1);
+    assert_eq!(empty_caret.x_bits(), 0);
+    assert_eq!(
+        (empty_caret.top_bits(), empty_caret.bottom_bits()),
+        (10 << 16, 20 << 16)
+    );
 }
 
 #[test]

@@ -51,6 +51,98 @@ pub enum TextAlignment {
     Justify,
 }
 
+/// Selects one visual caret when a source boundary has two layout positions.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TextAffinity {
+    /// Prefer the visual position after the preceding source cluster.
+    Upstream,
+    /// Prefer the visual position before the following source cluster.
+    Downstream,
+}
+
+/// One UTF-8 source boundary and its visual affinity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextPosition {
+    source_offset: u32,
+    affinity: TextAffinity,
+}
+
+impl TextPosition {
+    /// Creates one source position without validating it against a layout.
+    pub const fn new(source_offset: u32, affinity: TextAffinity) -> Self {
+        Self {
+            source_offset,
+            affinity,
+        }
+    }
+
+    /// Returns the UTF-8 byte boundary.
+    pub const fn source_offset(self) -> u32 {
+        self.source_offset
+    }
+
+    /// Returns the visual affinity at an ambiguous boundary.
+    pub const fn affinity(self) -> TextAffinity {
+        self.affinity
+    }
+}
+
+/// A source position selected by a layout-space point.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextHitResult {
+    position: TextPosition,
+    line_index: usize,
+}
+
+impl TextHitResult {
+    /// Returns the nearest cluster-boundary source position.
+    pub const fn position(self) -> TextPosition {
+        self.position
+    }
+
+    /// Returns the selected zero-based line index.
+    pub const fn line_index(self) -> usize {
+        self.line_index
+    }
+}
+
+/// One resolved vertical caret in layout-local Q16.16 coordinates.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextCaret {
+    position: TextPosition,
+    line_index: usize,
+    x_bits: i32,
+    top_bits: i32,
+    bottom_bits: i32,
+}
+
+impl TextCaret {
+    /// Returns the source position represented by this caret.
+    pub const fn position(self) -> TextPosition {
+        self.position
+    }
+
+    /// Returns the zero-based line index.
+    pub const fn line_index(self) -> usize {
+        self.line_index
+    }
+
+    /// Returns the caret's horizontal Q16.16 coordinate.
+    pub const fn x_bits(self) -> i32 {
+        self.x_bits
+    }
+
+    /// Returns the caret's inclusive top Q16.16 coordinate.
+    pub const fn top_bits(self) -> i32 {
+        self.top_bits
+    }
+
+    /// Returns the caret's exclusive bottom Q16.16 coordinate.
+    pub const fn bottom_bits(self) -> i32 {
+        self.bottom_bits
+    }
+}
+
 /// Rendering behavior for one language-specific word-internal break.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TextWordBreakKind {
@@ -306,6 +398,70 @@ impl TextLayout {
     /// Returns the configured Q16.16 line-container width.
     pub const fn container_width_bits(&self) -> i32 {
         self.container_width_bits
+    }
+
+    /// Snaps one layout-local Q16.16 point to the nearest shaping-cluster edge.
+    ///
+    /// Vertical coordinates outside the block clamp to the nearest line.
+    /// Horizontal coordinates outside a line clamp to its nearest caret stop.
+    /// Ligatures and other multi-codepoint clusters remain atomic.
+    pub fn hit_test_point(&self, x_bits: i32, y_bits: i32) -> Result<TextHitResult, TextError> {
+        let line_index = self.nearest_line_index(y_bits)?;
+        let stops = line_caret_stops(&self.lines[line_index])?;
+        let stop = stops
+            .iter()
+            .min_by_key(|stop| i64::from(stop.x_bits).abs_diff(i64::from(x_bits)))
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        Ok(TextHitResult {
+            position: stop.position,
+            line_index,
+        })
+    }
+
+    /// Resolves a source cluster boundary to a layout-local vertical caret.
+    ///
+    /// At soft wraps, `Upstream` selects the preceding line end and
+    /// `Downstream` selects the following line start. Returns `Ok(None)` when
+    /// the offset is not a shaped cluster boundary in this layout.
+    pub fn caret_for_position(
+        &self,
+        position: TextPosition,
+    ) -> Result<Option<TextCaret>, TextError> {
+        let mut fallback = None;
+        for (line_index, line) in self.lines.iter().enumerate() {
+            let stops = line_caret_stops(line)?;
+            for stop in stops {
+                if stop.position.source_offset != position.source_offset {
+                    continue;
+                }
+                let caret = line_caret(line, line_index, position, stop.x_bits)?;
+                if stop.position.affinity == position.affinity {
+                    return Ok(Some(caret));
+                }
+                fallback.get_or_insert(caret);
+            }
+        }
+        Ok(fallback)
+    }
+
+    fn nearest_line_index(&self, y_bits: i32) -> Result<usize, TextError> {
+        let mut nearest = None;
+        for (index, line) in self.lines.iter().enumerate() {
+            let (top_bits, bottom_bits) = line_box_bounds(line)?;
+            let distance = if y_bits < top_bits {
+                i64::from(top_bits) - i64::from(y_bits)
+            } else if y_bits >= bottom_bits {
+                i64::from(y_bits) - i64::from(bottom_bits) + 1
+            } else {
+                0
+            };
+            if nearest.is_none_or(|(_, nearest_distance)| distance < nearest_distance) {
+                nearest = Some((index, distance));
+            }
+        }
+        nearest
+            .map(|(index, _)| index)
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))
     }
 }
 
@@ -765,6 +921,243 @@ impl LayoutBuilder<'_> {
 enum LayoutStyle<'a> {
     Uniform(i32),
     Spans(&'a [TextStyleSpan]),
+}
+
+#[derive(Clone, Copy)]
+struct CaretStop {
+    position: TextPosition,
+    x_bits: i32,
+}
+
+fn line_caret_stops(line: &ShapedLine) -> Result<Vec<CaretStop>, TextError> {
+    let Some(paragraph) = line.paragraph() else {
+        return Ok(vec![
+            CaretStop {
+                position: TextPosition::new(line.source_start, TextAffinity::Upstream),
+                x_bits: line.offset_x_bits,
+            },
+            CaretStop {
+                position: TextPosition::new(line.source_start, TextAffinity::Downstream),
+                x_bits: line.offset_x_bits,
+            },
+        ]);
+    };
+
+    let glyph_count = paragraph.runs().iter().try_fold(0_usize, |total, shaped| {
+        if shaped.glyph_offsets_x_bits().len() != shaped.glyph_run().glyphs().len() {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        total
+            .checked_add(shaped.glyph_run().glyphs().len())
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))
+    })?;
+    let boundary_capacity = glyph_count
+        .checked_add(2)
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let mut boundaries = Vec::new();
+    boundaries
+        .try_reserve(boundary_capacity)
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    boundaries.extend([line.source_start, line.source_end]);
+    for shaped in paragraph.runs() {
+        let run = shaped.glyph_run();
+        for glyph in run.glyphs() {
+            let cluster = glyph.cluster();
+            if cluster >= line.source_start && cluster < line.source_end {
+                boundaries.push(cluster);
+            }
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut stops = Vec::new();
+    let stop_capacity = glyph_count
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(2))
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    stops
+        .try_reserve(stop_capacity)
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    let mut synthetic_line_end = None;
+    for shaped in paragraph.runs() {
+        let run = shaped.glyph_run();
+        let mut first = 0_usize;
+        while first < run.glyphs().len() {
+            let cluster = run.glyphs()[first].cluster();
+            let mut end = first + 1;
+            while end < run.glyphs().len() && run.glyphs()[end].cluster() == cluster {
+                end += 1;
+            }
+            let (left_bits, right_bits) = glyph_group_bounds(line, shaped, first, end)?;
+            if shaped.source_start() == shaped.source_end() && cluster == line.source_end {
+                synthetic_line_end = Some(match shaped.direction() {
+                    TextDirection::LeftToRight => right_bits,
+                    TextDirection::RightToLeft => left_bits,
+                });
+            } else if cluster >= line.source_start && cluster < line.source_end {
+                let boundary_index = boundaries
+                    .binary_search(&cluster)
+                    .map_err(|_| TextError::new(TextErrorCode::InvalidLayout))?;
+                let cluster_end = *boundaries
+                    .get(boundary_index + 1)
+                    .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+                let (start_bits, end_bits) = match shaped.direction() {
+                    TextDirection::LeftToRight => (left_bits, right_bits),
+                    TextDirection::RightToLeft => (right_bits, left_bits),
+                };
+                stops.push(CaretStop {
+                    position: TextPosition::new(cluster, TextAffinity::Downstream),
+                    x_bits: start_bits,
+                });
+                stops.push(CaretStop {
+                    position: TextPosition::new(cluster_end, TextAffinity::Upstream),
+                    x_bits: end_bits,
+                });
+            }
+            first = end;
+        }
+    }
+
+    if let Some(x_bits) = synthetic_line_end {
+        stops.retain(|stop| {
+            stop.position.source_offset != line.source_end
+                || stop.position.affinity != TextAffinity::Upstream
+        });
+        stops.push(CaretStop {
+            position: TextPosition::new(line.source_end, TextAffinity::Upstream),
+            x_bits,
+        });
+    }
+    if !stops.iter().any(|stop| {
+        stop.position.source_offset == line.source_start
+            && stop.position.affinity == TextAffinity::Downstream
+    }) {
+        stops.push(CaretStop {
+            position: TextPosition::new(line.source_start, TextAffinity::Downstream),
+            x_bits: line_edge_for_direction(line, paragraph.base_direction(), true)?,
+        });
+    }
+    if !stops.iter().any(|stop| {
+        stop.position.source_offset == line.source_end
+            && stop.position.affinity == TextAffinity::Upstream
+    }) {
+        stops.push(CaretStop {
+            position: TextPosition::new(line.source_end, TextAffinity::Upstream),
+            x_bits: line_edge_for_direction(line, paragraph.base_direction(), false)?,
+        });
+    }
+    Ok(stops)
+}
+
+fn glyph_group_bounds(
+    line: &ShapedLine,
+    shaped: &crate::ShapedRun,
+    first: usize,
+    end: usize,
+) -> Result<(i32, i32), TextError> {
+    let run = shaped.glyph_run();
+    let offsets = shaped.glyph_offsets_x_bits();
+    let mut left_bits = i32::MAX;
+    let mut right_bits = i32::MIN;
+    for (&glyph, &offset_bits) in run.glyphs()[first..end].iter().zip(&offsets[first..end]) {
+        let glyph_start = scaled_glyph_coordinate_bits(glyph.x().bits(), run)?;
+        let glyph_end_design = glyph
+            .x()
+            .bits()
+            .checked_add(glyph.advance_x().bits())
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        let glyph_end = scaled_glyph_coordinate_bits(glyph_end_design, run)?;
+        let origin = line
+            .offset_x_bits
+            .checked_add(shaped.origin_x_bits())
+            .and_then(|value| value.checked_add(offset_bits))
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        let first_edge = origin
+            .checked_add(glyph_start)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        let second_edge = origin
+            .checked_add(glyph_end)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        left_bits = left_bits.min(first_edge.min(second_edge));
+        right_bits = right_bits.max(first_edge.max(second_edge));
+    }
+    if left_bits == i32::MAX {
+        return Err(TextError::new(TextErrorCode::InvalidLayout));
+    }
+    Ok((left_bits, right_bits))
+}
+
+fn scaled_glyph_coordinate_bits(design_bits: i32, run: &crate::GlyphRun) -> Result<i32, TextError> {
+    let numerator = i128::from(design_bits)
+        .checked_mul(i128::from(run.font_size_bits()))
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let denominator = i128::from(64_i32)
+        .checked_mul(i128::from(run.units_per_em()))
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let rounded = if numerator >= 0 {
+        numerator
+            .checked_add(denominator / 2)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?
+            / denominator
+    } else {
+        -((-numerator
+            .checked_add(denominator / 2)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?)
+            / denominator)
+    };
+    i32::try_from(rounded).map_err(|_| TextError::new(TextErrorCode::NumericOverflow))
+}
+
+fn line_edge_for_direction(
+    line: &ShapedLine,
+    direction: TextDirection,
+    logical_start: bool,
+) -> Result<i32, TextError> {
+    let right_bits = line
+        .offset_x_bits
+        .checked_add(line.advance_x_bits)
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    Ok(match (direction, logical_start) {
+        (TextDirection::LeftToRight, true) | (TextDirection::RightToLeft, false) => {
+            line.offset_x_bits
+        }
+        (TextDirection::LeftToRight, false) | (TextDirection::RightToLeft, true) => right_bits,
+    })
+}
+
+fn line_box_bounds(line: &ShapedLine) -> Result<(i32, i32), TextError> {
+    let top_bits = line
+        .baseline_y_bits
+        .checked_sub(line.metrics.ascent_bits())
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let bottom_bits = top_bits
+        .checked_add(line.metrics.line_height_bits()?)
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    Ok((top_bits, bottom_bits))
+}
+
+fn line_caret(
+    line: &ShapedLine,
+    line_index: usize,
+    position: TextPosition,
+    x_bits: i32,
+) -> Result<TextCaret, TextError> {
+    let top_bits = line
+        .baseline_y_bits
+        .checked_sub(line.metrics.ascent_bits())
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let bottom_bits = line
+        .baseline_y_bits
+        .checked_add(line.metrics.descent_bits())
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    Ok(TextCaret {
+        position,
+        line_index,
+        x_bits,
+        top_bits,
+        bottom_bits,
+    })
 }
 
 struct LineCandidate {

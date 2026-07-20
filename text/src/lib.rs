@@ -22,8 +22,8 @@ pub use font::{
     FontVariationAxis, FontWidth, TextDecorationMetrics,
 };
 pub use layout::{
-    ShapedLine, TextAlignment, TextBreakProvider, TextDecoration, TextLayout, TextLayoutOptions,
-    TextWordBreak, TextWordBreakKind,
+    ShapedLine, TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecoration,
+    TextHitResult, TextLayout, TextLayoutOptions, TextPosition, TextWordBreak, TextWordBreakKind,
 };
 
 /// Stable machine-readable text-resource failure.
