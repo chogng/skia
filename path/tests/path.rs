@@ -1,6 +1,9 @@
 use skia_error::SkiaErrorCode;
 use skia_geometry::{Point, Rect, Scalar, Transform};
-use skia_path::{Angle, ArcDirection, ArcStart, ConicWeight, PathBuilder, PathVerb};
+use skia_path::{
+    Angle, ArcDirection, ArcStart, ConicWeight, PathBuilder, PathVerb, StrokeCap, StrokeJoin,
+    StrokeOptions,
+};
 
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).expect("whole scalar")
@@ -12,6 +15,73 @@ fn point(x: i32, y: i32) -> Point {
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
     Rect::new(scalar(left), scalar(top), scalar(right), scalar(bottom)).expect("positive rectangle")
+}
+
+#[test]
+fn stroke_options_validate_and_canonicalize_geometry() {
+    let options = StrokeOptions::new(scalar(3))
+        .expect("positive width")
+        .with_cap(StrokeCap::Square)
+        .with_join(StrokeJoin::Bevel)
+        .with_miter_limit(scalar(7))
+        .expect("valid miter limit")
+        .with_dash_pattern(&[scalar(2), scalar(3)], scalar(-1))
+        .expect("valid dash pattern");
+    assert_eq!(options.width(), scalar(3));
+    assert_eq!(options.cap(), StrokeCap::Square);
+    assert_eq!(options.join(), StrokeJoin::Bevel);
+    assert_eq!(options.miter_limit(), scalar(7));
+    assert_eq!(options.dash_pattern(), &[scalar(2), scalar(3)]);
+    assert_eq!(options.dash_phase(), scalar(4));
+
+    let defaults = StrokeOptions::new(scalar(1)).expect("default stroke");
+    assert_eq!(defaults.cap(), StrokeCap::Butt);
+    assert_eq!(defaults.join(), StrokeJoin::Miter);
+    assert_eq!(defaults.miter_limit(), scalar(4));
+    assert!(defaults.dash_pattern().is_empty());
+    assert_eq!(defaults.dash_phase(), Scalar::ZERO);
+
+    assert_eq!(
+        StrokeOptions::new(Scalar::ZERO)
+            .expect_err("zero width")
+            .code(),
+        SkiaErrorCode::InvalidGeometry
+    );
+    assert_eq!(
+        StrokeOptions::new(scalar(1))
+            .expect("stroke")
+            .with_miter_limit(Scalar::from_ratio(1, 2).expect("half"))
+            .expect_err("small miter limit")
+            .code(),
+        SkiaErrorCode::InvalidGeometry
+    );
+    assert_eq!(
+        StrokeOptions::new(scalar(1))
+            .expect("stroke")
+            .with_dash_pattern(&[scalar(1)], Scalar::ZERO)
+            .expect_err("odd dash count")
+            .code(),
+        SkiaErrorCode::InvalidGeometry
+    );
+    assert_eq!(
+        StrokeOptions::new(scalar(1))
+            .expect("stroke")
+            .with_dash_pattern(&[scalar(1), Scalar::ZERO], Scalar::ZERO)
+            .expect_err("zero dash interval")
+            .code(),
+        SkiaErrorCode::InvalidGeometry
+    );
+    assert_eq!(
+        StrokeOptions::new(scalar(1))
+            .expect("stroke")
+            .with_dash_pattern(
+                &[Scalar::from_bits(i32::MAX), Scalar::from_bits(i32::MAX),],
+                Scalar::ZERO,
+            )
+            .expect_err("oversized dash cycle")
+            .code(),
+        SkiaErrorCode::NumericOverflow
+    );
 }
 
 #[test]

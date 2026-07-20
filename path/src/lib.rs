@@ -97,6 +97,150 @@ pub enum FillRule {
     NonZero,
 }
 
+/// Shape used at each open end of a stroked contour or dash.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StrokeCap {
+    /// Stops the stroke exactly at the endpoint.
+    Butt,
+    /// Extends the endpoint with a semicircle whose radius is half the width.
+    Round,
+    /// Extends the endpoint by half the width with a rectangular cap.
+    Square,
+}
+
+/// Shape used where two stroked segments meet.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StrokeJoin {
+    /// Extends outer edges to their intersection, subject to the miter limit.
+    Miter,
+    /// Connects outer edges with a circular arc.
+    Round,
+    /// Connects outer edges directly with a bevel edge.
+    Bevel,
+}
+
+/// Backend-neutral geometry options for stroking one path.
+///
+/// The default cap is [`StrokeCap::Butt`], the default join is
+/// [`StrokeJoin::Miter`], and the default miter limit is four times the
+/// half-width. An empty dash pattern means a solid stroke. Non-empty patterns
+/// contain an even number of positive alternating on/off lengths and store a
+/// phase normalized into one complete pattern cycle.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct StrokeOptions {
+    width: Scalar,
+    cap: StrokeCap,
+    join: StrokeJoin,
+    miter_limit: Scalar,
+    dash_pattern: Vec<Scalar>,
+    dash_phase: Scalar,
+}
+
+impl StrokeOptions {
+    const DEFAULT_MITER_LIMIT: Scalar = Scalar::from_bits(4 << 16);
+
+    /// Creates a solid positive-width stroke with butt caps and miter joins.
+    pub fn new(width: Scalar) -> Result<Self, SkiaError> {
+        if width.bits() <= 0 {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        Ok(Self {
+            width,
+            cap: StrokeCap::Butt,
+            join: StrokeJoin::Miter,
+            miter_limit: Self::DEFAULT_MITER_LIMIT,
+            dash_pattern: Vec::new(),
+            dash_phase: Scalar::ZERO,
+        })
+    }
+
+    /// Returns the positive logical stroke width.
+    pub const fn width(&self) -> Scalar {
+        self.width
+    }
+
+    /// Returns the open-contour and dash cap.
+    pub const fn cap(&self) -> StrokeCap {
+        self.cap
+    }
+
+    /// Returns the segment join.
+    pub const fn join(&self) -> StrokeJoin {
+        self.join
+    }
+
+    /// Returns the positive miter-to-half-width ratio limit.
+    pub const fn miter_limit(&self) -> Scalar {
+        self.miter_limit
+    }
+
+    /// Borrows alternating positive on/off dash lengths, or an empty solid pattern.
+    pub fn dash_pattern(&self) -> &[Scalar] {
+        &self.dash_pattern
+    }
+
+    /// Returns the canonical non-negative phase within one dash cycle.
+    pub const fn dash_phase(&self) -> Scalar {
+        self.dash_phase
+    }
+
+    /// Replaces the open-contour and dash cap.
+    pub fn with_cap(mut self, cap: StrokeCap) -> Self {
+        self.cap = cap;
+        self
+    }
+
+    /// Replaces the segment join.
+    pub fn with_join(mut self, join: StrokeJoin) -> Self {
+        self.join = join;
+        self
+    }
+
+    /// Replaces the miter limit, which must be at least one.
+    pub fn with_miter_limit(mut self, miter_limit: Scalar) -> Result<Self, SkiaError> {
+        if miter_limit.bits() < 1 << 16 {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        self.miter_limit = miter_limit;
+        Ok(self)
+    }
+
+    /// Replaces the dash pattern and phase.
+    ///
+    /// Passing an empty slice restores a solid stroke and zero phase. Otherwise
+    /// the slice must have even length and contain only positive values. The
+    /// total cycle must fit in one positive [`Scalar`].
+    pub fn with_dash_pattern(
+        mut self,
+        pattern: &[Scalar],
+        phase: Scalar,
+    ) -> Result<Self, SkiaError> {
+        if pattern.is_empty() {
+            self.dash_pattern.clear();
+            self.dash_phase = Scalar::ZERO;
+            return Ok(self);
+        }
+        if !pattern.len().is_multiple_of(2) || pattern.iter().any(|value| value.bits() <= 0) {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        let total = pattern.iter().try_fold(0_i64, |total, value| {
+            total
+                .checked_add(i64::from(value.bits()))
+                .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))
+        })?;
+        let total =
+            i32::try_from(total).map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+        let mut dash_pattern = Vec::new();
+        dash_pattern
+            .try_reserve_exact(pattern.len())
+            .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
+        dash_pattern.extend_from_slice(pattern);
+        self.dash_pattern = dash_pattern;
+        self.dash_phase = Scalar::from_bits(phase.bits().rem_euclid(total));
+        Ok(self)
+    }
+}
+
 /// One immutable vector-path operation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PathVerb {
