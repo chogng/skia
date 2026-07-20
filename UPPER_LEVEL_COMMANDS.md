@@ -28,12 +28,19 @@
 ### 位图输入
 
 上层收到 PNG、JPEG 或 WebP 的**不可信编码字节**时，应先通过 facade 导出的
-`ImageCodec::decode`（或带调用方配额的 `decode_with_limits`）解码为 `Image`，再登记并
-绘制。`CodecLimits` 必须由处理不可信输入的上层按资源预算收紧；默认值只是通用安全
-上限。需要输出编码图片时，同样调用 `ImageCodec::encode(&image, EncodedImageFormat::...)`；
-PNG 和 WebP 保留 RGBA8 alpha，JPEG 因格式限制会丢弃 alpha，且质量值必须在 1–100。
-`Image` 本身只表示紧密排列、straight-alpha 的 RGBA8 像素，既不识别也不保存编码格式。
-因此 PNG/JPEG/WebP 的 decode 与 encode 都属于 `skia/codec`，而非 `Image` 资源层。
+`ImageCodec::decode`（或带调用方配额的 `decode_with_limits`）解码为 `ImageAsset`，再登记
+其中的 `Image` 并绘制。`ImageAsset` 同时保留可写回的 EXIF；`Image` 记录 RGBA8 像素及其
+`ColorSpace`，ICC profile 仅在它与像素颜色空间一致时写回。`CodecLimits` 必须由处理不可信
+输入的上层按资源预算收紧；默认值只是通用安全上限。
+
+输出图片时，调用 `ImageCodec::encode(&asset, &EncodeOptions::new(...))`，或使用
+`encode_to` 写入受限流。PNG 通过 `PngOptions` 控制 Deflate 和 row filter；JPEG 需要显式
+`JpegOptions`，透明像素必须选择 `JpegAlphaHandling::Flatten`，否则编码失败；WebP 当前只
+能使用 `WebPOptions::lossless_v1()`，请求有损 WebP 会明确返回不支持，不会降级。可选 EXIF
+默认剥离，只有 `MetadataPolicy::Preserve` 才会写入。`EncodeLimits` 应按输出预算收紧。
+
+`ImageCodec` 是唯一的 PNG/JPEG/WebP 文件入口；旧的 `EncodedImageFormat` 和裸 `Image` encode
+接口已移除。
 
 ## 先看结论
 
