@@ -117,14 +117,14 @@ language-specific font selection, dictionary data and algorithms, general
 non-CJK inter-character justification, per-span paint and decoration styles, and
 decorative line variants remain upper text-layout responsibilities. GPU glyph
 atlases are available through the separate `skia-gpu-text` adapter:
-`GpuTextAtlasBuilder` rasterizes and packs a `TextLayout`, while `skia-gpu`
-receives only a generic RGBA atlas and positioned quads. Registration consumes
-the atlas and returns metadata holding an exclusive borrow of its exact encoder
-and command-buffer resource ID, so atlas indices cannot cross command buffers.
-The Metal backend uploads each atlas once per submission and draws Alpha8 masks
-and color glyphs through a real shader pipeline; it currently supports
-source-over blending for this path. Persistent cross-frame atlas cache policy
-remains an upper renderer responsibility.
+`TextAtlasBuilder` rasterizes and packs a `TextLayout`, and `TextAtlas` converts
+layout positions into owned generic quads without borrowing an encoder. The
+caller then explicitly registers `into_gpu_atlas()` and records the quads with
+`skia-gpu`, keeping data adaptation separate from command ordering. The Metal
+backend uploads each atlas once per submission and draws Alpha8 masks and color
+glyphs through a real shader pipeline; it currently supports source-over
+blending for this path. Persistent cross-frame atlas cache policy remains an
+upper renderer responsibility.
 
 ## Geometry and transforms
 
