@@ -6,6 +6,26 @@ use crate::{
     FontCollection, FontMetrics, ShapedParagraph, TextDirection, TextError, TextErrorCode,
 };
 
+/// Horizontal placement policy inside a layout's configured line width.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TextAlignment {
+    /// Align to the paragraph's logical start edge.
+    Start,
+    /// Align to the paragraph's logical end edge.
+    End,
+    /// Align to the physical left edge.
+    Left,
+    /// Center each line.
+    Center,
+    /// Align to the physical right edge.
+    Right,
+    /// Expand interior ASCII spaces to fill eligible lines.
+    ///
+    /// By default, paragraph-final lines keep start alignment. Use
+    /// [`TextLayoutOptions::with_justify_last_line`] to include them.
+    Justify,
+}
+
 /// Width and work ceilings for greedy Unicode line layout.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TextLayoutOptions {
@@ -13,6 +33,8 @@ pub struct TextLayoutOptions {
     max_lines: usize,
     max_shaping_attempts: usize,
     base_direction: Option<TextDirection>,
+    alignment: TextAlignment,
+    justify_last_line: bool,
 }
 
 impl TextLayoutOptions {
@@ -35,12 +57,29 @@ impl TextLayoutOptions {
             max_lines,
             max_shaping_attempts,
             base_direction: None,
+            alignment: TextAlignment::Start,
+            justify_last_line: false,
         })
     }
 
     /// Forces the same bidi base direction for every produced line.
     pub const fn with_base_direction(mut self, direction: TextDirection) -> Self {
         self.base_direction = Some(direction);
+        self
+    }
+
+    /// Selects horizontal placement inside the configured line width.
+    pub const fn with_alignment(mut self, alignment: TextAlignment) -> Self {
+        self.alignment = alignment;
+        self
+    }
+
+    /// Controls whether justification also expands paragraph-final lines.
+    ///
+    /// This option has no effect for alignments other than
+    /// [`TextAlignment::Justify`].
+    pub const fn with_justify_last_line(mut self, justify: bool) -> Self {
+        self.justify_last_line = justify;
         self
     }
 
@@ -63,6 +102,16 @@ impl TextLayoutOptions {
     pub const fn base_direction(self) -> Option<TextDirection> {
         self.base_direction
     }
+
+    /// Returns the horizontal alignment policy.
+    pub const fn alignment(self) -> TextAlignment {
+        self.alignment
+    }
+
+    /// Returns whether paragraph-final lines are eligible for justification.
+    pub const fn justify_last_line(self) -> bool {
+        self.justify_last_line
+    }
 }
 
 /// One positioned line in a laid-out text block.
@@ -71,8 +120,11 @@ pub struct ShapedLine {
     paragraph: Option<ShapedParagraph>,
     source_start: u32,
     source_end: u32,
+    offset_x_bits: i32,
+    advance_x_bits: i32,
     baseline_y_bits: i32,
     hard_break: bool,
+    justified: bool,
     metrics: FontMetrics,
 }
 
@@ -92,6 +144,16 @@ impl ShapedLine {
         self.source_end
     }
 
+    /// Returns the Q16.16 horizontal offset from the text-block origin.
+    pub const fn offset_x_bits(&self) -> i32 {
+        self.offset_x_bits
+    }
+
+    /// Returns the line's final horizontal advance after justification.
+    pub const fn advance_x_bits(&self) -> i32 {
+        self.advance_x_bits
+    }
+
     /// Returns the baseline position relative to the text-block top.
     pub const fn baseline_y_bits(&self) -> i32 {
         self.baseline_y_bits
@@ -100,6 +162,11 @@ impl ShapedLine {
     /// Returns whether an explicit mandatory separator ended this line.
     pub const fn hard_break(&self) -> bool {
         self.hard_break
+    }
+
+    /// Returns whether the line received expanded inter-word spacing.
+    pub const fn justified(&self) -> bool {
+        self.justified
     }
 
     /// Returns this line's baseline metrics.
@@ -114,6 +181,7 @@ pub struct TextLayout {
     lines: Vec<ShapedLine>,
     width_bits: i32,
     height_bits: i32,
+    container_width_bits: i32,
 }
 
 impl TextLayout {
@@ -130,6 +198,11 @@ impl TextLayout {
     /// Returns the sum of all automatic line heights.
     pub const fn height_bits(&self) -> i32 {
         self.height_bits
+    }
+
+    /// Returns the configured Q16.16 line-container width.
+    pub const fn container_width_bits(&self) -> i32 {
+        self.container_width_bits
     }
 }
 
@@ -171,7 +244,6 @@ impl FontCollection {
             options,
             lines: Vec::new(),
             top_bits: 0,
-            width_bits: 0,
             shaping_attempts: 0,
             total_runs: 0,
             total_glyphs: 0,
@@ -237,7 +309,6 @@ struct LayoutBuilder<'a> {
     options: TextLayoutOptions,
     lines: Vec<ShapedLine>,
     top_bits: i32,
-    width_bits: i32,
     shaping_attempts: usize,
     total_runs: usize,
     total_glyphs: usize,
@@ -340,7 +411,6 @@ impl LayoutBuilder<'_> {
             .checked_add(line_height)
             .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
         if let Some(paragraph) = &paragraph {
-            self.width_bits = self.width_bits.max(paragraph.advance_x_bits());
             self.total_runs = self
                 .total_runs
                 .checked_add(paragraph.runs().len())
@@ -369,18 +439,60 @@ impl LayoutBuilder<'_> {
                 .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
             source_end: u32::try_from(source_end)
                 .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
+            offset_x_bits: 0,
+            advance_x_bits: 0,
             baseline_y_bits,
             hard_break,
+            justified: false,
             metrics,
         });
         Ok(())
     }
 
-    fn finish(self) -> Result<TextLayout, TextError> {
+    fn finish(mut self) -> Result<TextLayout, TextError> {
+        let mut width_bits = 0;
+        let line_count = self.lines.len();
+        for (index, line) in self.lines.iter_mut().enumerate() {
+            let paragraph_final = line.hard_break || index + 1 == line_count;
+            let direction = line.paragraph.as_ref().map_or(
+                self.options
+                    .base_direction
+                    .unwrap_or(TextDirection::LeftToRight),
+                |text| text.base_direction(),
+            );
+            if self.options.alignment == TextAlignment::Justify
+                && (!paragraph_final || self.options.justify_last_line)
+                && let Some(paragraph) = &mut line.paragraph
+            {
+                line.justified = paragraph.justify_ascii_spaces(
+                    self.text,
+                    line.source_start as usize,
+                    line.source_end as usize,
+                    self.options.max_width_bits,
+                )?;
+            }
+            line.advance_x_bits = line
+                .paragraph
+                .as_ref()
+                .map_or(0, ShapedParagraph::advance_x_bits);
+            let free_bits = self
+                .options
+                .max_width_bits
+                .saturating_sub(line.advance_x_bits)
+                .max(0);
+            let effective_alignment = if self.options.alignment == TextAlignment::Justify {
+                TextAlignment::Start
+            } else {
+                self.options.alignment
+            };
+            line.offset_x_bits = alignment_offset(effective_alignment, direction, free_bits);
+            width_bits = width_bits.max(line.advance_x_bits);
+        }
         Ok(TextLayout {
             lines: self.lines,
-            width_bits: self.width_bits,
+            width_bits,
             height_bits: self.top_bits,
+            container_width_bits: self.options.max_width_bits,
         })
     }
 }
@@ -409,5 +521,25 @@ fn strip_mandatory_ending(text: &str, start: usize, end: usize) -> usize {
         end - line.chars().next_back().map_or(0, char::len_utf8)
     } else {
         end
+    }
+}
+
+const fn alignment_offset(
+    alignment: TextAlignment,
+    direction: TextDirection,
+    free_bits: i32,
+) -> i32 {
+    match alignment {
+        TextAlignment::Start => match direction {
+            TextDirection::LeftToRight => 0,
+            TextDirection::RightToLeft => free_bits,
+        },
+        TextAlignment::End => match direction {
+            TextDirection::LeftToRight => free_bits,
+            TextDirection::RightToLeft => 0,
+        },
+        TextAlignment::Left | TextAlignment::Justify => 0,
+        TextAlignment::Center => free_bits / 2,
+        TextAlignment::Right => free_bits,
     }
 }

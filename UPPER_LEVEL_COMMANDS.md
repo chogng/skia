@@ -89,15 +89,28 @@ width/height，每个 `ShapedLine` 给出全局 UTF-8 范围、baseline Y、metr
 标记。CPU 用 `Canvas::draw_text_layout(&layout, &collection, top_left, paint)` 一次绘制所有
 非空行。
 
+横向排版通过 `TextLayoutOptions::with_alignment` 选择 `TextAlignment::Start`、`End`、
+`Left`、`Center`、`Right` 或 `Justify`。默认 `Start` 会按每行段落基方向选择物理左右边：
+LTR 从左开始，RTL 从右开始；`Left` / `Right` 始终使用物理边。`ShapedLine::offset_x_bits`
+是相对 text-block origin 的最终横向位置，`advance_x_bits` 是 justification 后的行宽，
+`TextLayout::container_width_bits` 保留调用方给出的容器宽度。
+
+`Justify` 只扩展行内、非首尾的 ASCII 空格，并通过 `ShapedRun::glyph_offsets_x_bits` 保存
+逐 glyph 的 Q16.16 位移，不修改 shaping cluster 或 bidi run 顺序。默认不处理段落末行；
+确实需要时显式调用 `with_justify_last_line(true)`。没有可扩展空格的行回退为逻辑
+`Start`，不会伪造字符间距。DisplayList 展开布局时除了 run origin，还必须应用 line
+offset 和每个 glyph 的额外 offset；CPU `draw_text_layout` 已自动完成这些步骤。
+
 `FontFace` 内部使用纯 Rust `rustybuzz` 完成 shaping，并通过其 `ttf-parser` 解析矢量轮廓；
 字体字节由 face 自身不可变持有。轮廓的字体坐标会转换为 canvas 向下为正的坐标，再复用普通
 path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 advance，但绘制时不产生路径。
 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
-换行和轮廓解析**，但不负责平台字体发现、字体族/字重匹配、语言偏好、词典断词、自动断字、
-对齐、justification 或文本装饰。`shape_paragraph` 只接受一个未换行段落；多段内容应使用
-`layout_text`。缺少覆盖字体会返回 `MissingGlyph`。当前 Unicode line-break 实现把 SA
-复杂上下文字系按普通字母处理，因此泰文、老挝文、高棉文和缅甸文仍需要上层词典分词。
+换行、逻辑/物理对齐、ASCII 空格 justification 和轮廓解析**，但不负责平台字体发现、
+字体族/字重匹配、语言偏好、词典断词、自动断字、非 ASCII justification 或文本装饰。
+`shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
+`MissingGlyph`。当前 Unicode line-break 实现把 SA 复杂上下文字系按普通字母处理，因此
+泰文、老挝文、高棉文和缅甸文仍需要上层词典分词。
 
 ## 先看结论
 
@@ -160,7 +173,7 @@ path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 
 | `draw_image(image, destination, opacity, blend_mode)` | 绘制 RGBA8 图片到目标矩形。 | 最近邻采样；`opacity` 只乘源 alpha；旋转或错切变换被拒绝，尚无逆变换采样和滤镜。 |
 | `draw_glyph_run(run, provider, paint)` | 根据字形轮廓填充一段已整形文字。 | `FontFace` 提供单字体 shaping；`FontCollection` 提供 bidi/fallback 后的多个 run；字体发现仍由上层负责；缺失轮廓会跳过。 |
 | `draw_shaped_paragraph(paragraph, provider, origin, paint)` | 在同一 baseline origin 绘制视觉顺序的所有字体 run。 | `FontCollection` 同时充当多字体轮廓 provider；方法内部隔离每个 run 的状态。 |
-| `draw_text_layout(layout, provider, origin, paint)` | 从 top-left origin 绘制所有非空行。 | baseline、空行和行高由 `TextLayout` 固化；仍复用 paragraph/run/path 管线。 |
+| `draw_text_layout(layout, provider, origin, paint)` | 从 top-left origin 绘制所有非空行。 | baseline、空行、行高、横向对齐和 justification 位移由 `TextLayout` 固化；仍复用 paragraph/run/path 管线。 |
 
 ## 2. DisplayList：下层可移植 CPU 命令表
 

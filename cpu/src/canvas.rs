@@ -360,19 +360,7 @@ impl Canvas<'_> {
         paint: Paint,
     ) -> Result<(), SkiaError> {
         for glyph in run.glyphs() {
-            let Some(outline) = provider
-                .glyph_outline(run.font(), glyph.glyph())
-                .map_err(|_| SkiaError::new(SkiaErrorCode::TextResolverFailed))?
-            else {
-                continue;
-            };
-            if outline.font() != run.font() || outline.glyph() != glyph.glyph() {
-                return Err(SkiaError::new(SkiaErrorCode::TextResolverFailed));
-            }
-            let Some(path) = glyph_path(run, *glyph, &outline)? else {
-                continue;
-            };
-            self.fill_path(&path, FillRule::NonZero, paint)?;
+            self.draw_positioned_glyph(run, *glyph, provider, paint)?;
         }
         Ok(())
     }
@@ -399,7 +387,25 @@ impl Canvas<'_> {
                     .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
                 let run_origin = Scalar::from_bits(run_origin_bits);
                 self.concat(Transform::translate(run_origin, origin.y()))?;
-                self.draw_glyph_run(shaped.glyph_run(), provider, paint)
+                let run = shaped.glyph_run();
+                if shaped.glyph_offsets_x_bits().len() != run.glyphs().len() {
+                    return Err(SkiaError::new(SkiaErrorCode::InvalidResource));
+                }
+                let mut applied_offset_bits = 0_i32;
+                for (glyph, offset_bits) in run.glyphs().iter().zip(shaped.glyph_offsets_x_bits()) {
+                    let delta_bits = offset_bits
+                        .checked_sub(applied_offset_bits)
+                        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                    if delta_bits != 0 {
+                        self.concat(Transform::translate(
+                            Scalar::from_bits(delta_bits),
+                            Scalar::ZERO,
+                        ))?;
+                        applied_offset_bits = *offset_bits;
+                    }
+                    self.draw_positioned_glyph(run, *glyph, provider, paint)?;
+                }
+                Ok(())
             })();
             let restore = self.restore();
             draw.and(restore)?;
@@ -424,14 +430,44 @@ impl Canvas<'_> {
                 .bits()
                 .checked_add(line.baseline_y_bits())
                 .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+            let line_origin_bits = origin
+                .x()
+                .bits()
+                .checked_add(line.offset_x_bits())
+                .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
             self.draw_shaped_paragraph(
                 paragraph,
                 provider,
-                Point::new(origin.x(), Scalar::from_bits(baseline_bits)),
+                Point::new(
+                    Scalar::from_bits(line_origin_bits),
+                    Scalar::from_bits(baseline_bits),
+                ),
                 paint,
             )?;
         }
         Ok(())
+    }
+
+    fn draw_positioned_glyph(
+        &mut self,
+        run: &GlyphRun,
+        glyph: PositionedGlyph,
+        provider: &impl GlyphOutlineProvider,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        let Some(outline) = provider
+            .glyph_outline(run.font(), glyph.glyph())
+            .map_err(|_| SkiaError::new(SkiaErrorCode::TextResolverFailed))?
+        else {
+            return Ok(());
+        };
+        if outline.font() != run.font() || outline.glyph() != glyph.glyph() {
+            return Err(SkiaError::new(SkiaErrorCode::TextResolverFailed));
+        }
+        let Some(path) = glyph_path(run, glyph, &outline)? else {
+            return Ok(());
+        };
+        self.fill_path(&path, FillRule::NonZero, paint)
     }
 
     fn fill_contours(

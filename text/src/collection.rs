@@ -82,6 +82,7 @@ pub struct ShapedRun {
     source_start: u32,
     source_end: u32,
     origin_x_bits: i32,
+    glyph_offsets_x_bits: Vec<i32>,
     direction: TextDirection,
 }
 
@@ -104,6 +105,14 @@ impl ShapedRun {
     /// Returns the run's visual horizontal origin in Q16.16 canvas units.
     pub const fn origin_x_bits(&self) -> i32 {
         self.origin_x_bits
+    }
+
+    /// Borrows additional per-glyph Q16.16 horizontal layout offsets.
+    ///
+    /// The slice has exactly one entry per glyph and contains zeros unless a
+    /// higher-level layout operation, such as justification, moved glyphs.
+    pub fn glyph_offsets_x_bits(&self) -> &[i32] {
+        &self.glyph_offsets_x_bits
     }
 
     /// Returns the resolved embedding direction.
@@ -140,6 +149,103 @@ impl ShapedParagraph {
     /// Returns maximum baseline metrics across fonts used by the paragraph.
     pub const fn metrics(&self) -> FontMetrics {
         self.metrics
+    }
+
+    pub(crate) fn justify_ascii_spaces(
+        &mut self,
+        text: &str,
+        source_start: usize,
+        source_end: usize,
+        target_advance_bits: i32,
+    ) -> Result<bool, TextError> {
+        if source_start > source_end
+            || source_end > text.len()
+            || !text.is_char_boundary(source_start)
+            || !text.is_char_boundary(source_end)
+            || target_advance_bits <= self.advance_x_bits
+        {
+            return Ok(false);
+        }
+
+        let line = &text[source_start..source_end];
+        let first_non_space = line
+            .char_indices()
+            .find(|(_, character)| *character != ' ')
+            .map(|(index, _)| source_start + index);
+        let last_non_space_end = line
+            .char_indices()
+            .rev()
+            .find(|(_, character)| *character != ' ')
+            .map(|(index, character)| source_start + index + character.len_utf8());
+        let (Some(first_non_space), Some(last_non_space_end)) =
+            (first_non_space, last_non_space_end)
+        else {
+            return Ok(false);
+        };
+
+        let mut expansion_clusters = Vec::new();
+        for (relative, character) in line.char_indices() {
+            let cluster = source_start + relative;
+            if character == ' '
+                && cluster > first_non_space
+                && cluster + character.len_utf8() < last_non_space_end
+            {
+                expansion_clusters
+                    .try_reserve(1)
+                    .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+                expansion_clusters.push(
+                    u32::try_from(cluster)
+                        .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
+                );
+            }
+        }
+        if expansion_clusters.is_empty() {
+            return Ok(false);
+        }
+
+        let extra_bits = target_advance_bits
+            .checked_sub(self.advance_x_bits)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        let slot_count = i32::try_from(expansion_clusters.len())
+            .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?;
+        let per_slot = extra_bits / slot_count;
+        let mut remainder = extra_bits % slot_count;
+        let mut cumulative_shift = 0_i32;
+        let mut expanded = Vec::new();
+        expanded
+            .try_reserve_exact(expansion_clusters.len())
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        expanded.resize(expansion_clusters.len(), false);
+
+        for run in &mut self.runs {
+            if run.glyph_offsets_x_bits.len() != run.run.glyphs().len() {
+                return Err(TextError::new(TextErrorCode::InvalidLayout));
+            }
+            for (glyph, offset) in run.run.glyphs().iter().zip(&mut run.glyph_offsets_x_bits) {
+                *offset = cumulative_shift;
+                if let Ok(slot) = expansion_clusters.binary_search(&glyph.cluster())
+                    && !expanded[slot]
+                {
+                    expanded[slot] = true;
+                    let increment = per_slot + i32::from(remainder > 0);
+                    remainder = remainder.saturating_sub(1);
+                    cumulative_shift = cumulative_shift
+                        .checked_add(increment)
+                        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+                }
+            }
+        }
+        if expanded.iter().any(|expanded| !expanded) {
+            for run in &mut self.runs {
+                run.glyph_offsets_x_bits.fill(0);
+            }
+            return Ok(false);
+        }
+        if cumulative_shift != extra_bits {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        self.advance_x_bits = target_advance_bits;
+        Ok(true)
     }
 }
 
@@ -323,7 +429,13 @@ impl FontCollection {
             descent_bits = descent_bits.max(metrics.descent_bits());
             line_gap_bits = line_gap_bits.max(metrics.line_gap_bits());
             let advance = run_advance_bits(&run)?;
+            let mut glyph_offsets_x_bits = Vec::new();
+            glyph_offsets_x_bits
+                .try_reserve_exact(run.glyphs().len())
+                .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+            glyph_offsets_x_bits.resize(run.glyphs().len(), 0);
             runs.push(ShapedRun {
+                glyph_offsets_x_bits,
                 run,
                 source_start,
                 source_end,

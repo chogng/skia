@@ -18,7 +18,7 @@ pub use collection::{
     FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection,
 };
 pub use font::{FontFace, FontLimits, FontMetrics};
-pub use layout::{ShapedLine, TextLayout, TextLayoutOptions};
+pub use layout::{ShapedLine, TextAlignment, TextLayout, TextLayoutOptions};
 
 /// Stable machine-readable text-resource failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

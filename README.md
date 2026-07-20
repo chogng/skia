@@ -59,12 +59,15 @@ segment-level shaping plus outline resolution. `FontCollection` performs
 grapheme-level ordered fallback and shapes one unwrapped bidi paragraph into
 positioned visual runs. It also exposes scaled baseline metrics and greedy
 Unicode line layout with bounded line and shaping work. CPU drawing reuses the
-ordinary path-fill pipeline.
+ordinary path-fill pipeline. Laid-out lines carry physical left/center/right
+alignment or bidi-aware logical start/end alignment. Justified lines preserve
+shaping output and add deterministic per-glyph spacing at interior ASCII spaces.
 
 System-font discovery, family and style matching, language-specific font
-selection, language-dictionary breaking, hyphenation, alignment, justification,
-and decoration remain upper text-layout responsibilities. GPU glyph commands,
-glyph atlases, hinting, and color-font painting are not implemented yet.
+selection, language-dictionary breaking, hyphenation, non-ASCII justification
+opportunities, and decoration remain upper text-layout responsibilities. GPU
+glyph commands, glyph atlases, hinting, and color-font painting are not
+implemented yet.
 
 ## Geometry and transforms
 

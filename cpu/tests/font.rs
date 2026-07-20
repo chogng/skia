@@ -1,7 +1,7 @@
 use skia_core::{
     Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, GlyphId,
-    GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextDirection,
-    TextError, TextErrorCode, TextLayoutOptions, Transform,
+    GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAlignment,
+    TextDirection, TextError, TextErrorCode, TextLayoutOptions, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -369,6 +369,150 @@ fn soft_wrapped_rtl_line_keeps_the_logical_paragraph_base_direction() {
     assert_eq!(rtl_line.base_direction(), TextDirection::LeftToRight);
     assert_eq!(rtl_line.runs()[0].direction(), TextDirection::RightToLeft);
     assert_eq!(rtl_line.runs()[0].glyph_run().glyphs()[0].cluster(), 4);
+}
+
+#[test]
+fn physical_and_logical_alignment_position_ltr_and_rtl_lines() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(80), toy_font('A')).expect("A font"))
+        .expect("add font");
+
+    let layout = |alignment, direction| {
+        fonts
+            .layout_text(
+                "A",
+                10 << 16,
+                TextLayoutOptions::new(20 << 16)
+                    .expect("options")
+                    .with_alignment(alignment)
+                    .with_base_direction(direction),
+            )
+            .expect("aligned layout")
+    };
+
+    let start_ltr = layout(TextAlignment::Start, TextDirection::LeftToRight);
+    let start_rtl = layout(TextAlignment::Start, TextDirection::RightToLeft);
+    let end_rtl = layout(TextAlignment::End, TextDirection::RightToLeft);
+    let centered = layout(TextAlignment::Center, TextDirection::LeftToRight);
+    let right = layout(TextAlignment::Right, TextDirection::LeftToRight);
+
+    assert_eq!(start_ltr.container_width_bits(), 20 << 16);
+    assert_eq!(start_ltr.width_bits(), 6 << 16);
+    assert_eq!(start_ltr.lines()[0].advance_x_bits(), 6 << 16);
+    assert_eq!(start_ltr.lines()[0].offset_x_bits(), 0);
+    assert_eq!(start_rtl.lines()[0].offset_x_bits(), 14 << 16);
+    assert_eq!(end_rtl.lines()[0].offset_x_bits(), 0);
+    assert_eq!(centered.lines()[0].offset_x_bits(), 7 << 16);
+    assert_eq!(right.lines()[0].offset_x_bits(), 14 << 16);
+
+    let mut rtl_fonts = FontCollection::new(FontCollectionLimits::default());
+    rtl_fonts
+        .add_face(FontFace::from_bytes(FontId::new(81), toy_font('\u{05d0}')).expect("Alef font"))
+        .expect("add font");
+    let natural_rtl = rtl_fonts
+        .layout_text(
+            "\u{05d0}",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16).expect("options"),
+        )
+        .expect("natural RTL layout");
+    assert_eq!(
+        natural_rtl.lines()[0]
+            .paragraph()
+            .expect("RTL line")
+            .base_direction(),
+        TextDirection::RightToLeft
+    );
+    assert_eq!(natural_rtl.lines()[0].offset_x_bits(), 14 << 16);
+
+    let mut surface = Surface::new(22, 12, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas
+        .draw_text_layout(
+            &right,
+            &fonts,
+            Point::new(Scalar::ZERO, scalar(1)),
+            Paint::new(Color::rgba(130, 140, 150, 255)),
+        )
+        .expect("draw right-aligned text");
+    drop(canvas);
+
+    assert_eq!(pixel(&surface, 1, 4), [0, 0, 0, 0]);
+    assert_eq!(pixel(&surface, 15, 4), [130, 140, 150, 255]);
+}
+
+#[test]
+fn justification_expands_interior_spaces_and_controls_the_final_line() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(90), toy_font_for(&[' ', 'A'])).expect("text font"),
+        )
+        .expect("add font");
+
+    let wrapped = fonts
+        .layout_text(
+            "A A A",
+            10 << 16,
+            TextLayoutOptions::new(25 << 16)
+                .expect("options")
+                .with_alignment(TextAlignment::Justify),
+        )
+        .expect("justified wrap");
+    assert_eq!(wrapped.lines().len(), 2);
+    assert!(wrapped.lines()[0].justified());
+    assert_eq!(wrapped.lines()[0].advance_x_bits(), 25 << 16);
+    assert_eq!(wrapped.lines()[0].offset_x_bits(), 0);
+    assert_eq!(wrapped.lines()[0].source_end(), 4);
+    assert_eq!(
+        wrapped.lines()[0].paragraph().expect("first line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 0, 1 << 16, 1 << 16]
+    );
+    assert!(!wrapped.lines()[1].justified());
+
+    let default_final = fonts
+        .layout_text(
+            "A A",
+            10 << 16,
+            TextLayoutOptions::new(24 << 16)
+                .expect("options")
+                .with_alignment(TextAlignment::Justify),
+        )
+        .expect("default final line");
+    assert!(!default_final.lines()[0].justified());
+    assert_eq!(default_final.lines()[0].advance_x_bits(), 18 << 16);
+
+    let justified_final = fonts
+        .layout_text(
+            "A A",
+            10 << 16,
+            TextLayoutOptions::new(24 << 16)
+                .expect("options")
+                .with_alignment(TextAlignment::Justify)
+                .with_justify_last_line(true),
+        )
+        .expect("justified final line");
+    assert!(justified_final.lines()[0].justified());
+    assert_eq!(justified_final.lines()[0].advance_x_bits(), 24 << 16);
+    assert_eq!(
+        justified_final.lines()[0].paragraph().expect("line").runs()[0].glyph_offsets_x_bits(),
+        &[0, 0, 6 << 16]
+    );
+
+    let mut surface = Surface::new(26, 12, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas
+        .draw_text_layout(
+            &justified_final,
+            &fonts,
+            Point::new(Scalar::ZERO, scalar(1)),
+            Paint::new(Color::rgba(160, 170, 180, 255)),
+        )
+        .expect("draw justified text");
+    drop(canvas);
+    assert_eq!(pixel(&surface, 13, 4), [0, 0, 0, 0]);
+    assert_eq!(pixel(&surface, 19, 4), [160, 170, 180, 255]);
 }
 
 fn scalar(value: i32) -> Scalar {
