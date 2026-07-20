@@ -24,6 +24,6 @@ pub use skia_text::{
     GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, PositionedGlyph,
     ShapedLine, ShapedParagraph, ShapedRun, TextAffinity, TextAlignment, TextBreakProvider,
     TextCaret, TextDecoration, TextDecorationMetrics, TextDirection, TextError, TextErrorCode,
-    TextHitResult, TextLayout, TextLayoutOptions, TextPosition, TextStyleSpan, TextUnit,
+    TextHitResult, TextLayout, TextLayoutOptions, TextOverflow, TextPosition, TextStyleSpan, TextUnit,
     TextWordBreak, TextWordBreakKind,
 };

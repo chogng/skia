@@ -3,7 +3,7 @@ use skia_core::{
     FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphId, GlyphOutline,
     GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAffinity, TextAlignment,
     TextBreakProvider, TextDecoration, TextDirection, TextError, TextErrorCode, TextLayoutOptions,
-    TextPosition, TextStyleSpan, TextWordBreak, TextWordBreakKind, Transform,
+    TextOverflow, TextPosition, TextStyleSpan, TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -847,6 +847,189 @@ fn hard_breaks_trailing_empty_lines_and_long_graphemes_are_bounded() {
             .expect_err("line limit must fail")
             .code(),
         TextErrorCode::ResourceLimit
+    );
+}
+
+#[test]
+fn line_limit_overflow_clips_or_adds_style_aware_ellipses() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(61), toy_font_for(&['.', 'A', '\u{2026}']))
+                .expect("ellipsis font"),
+        )
+        .expect("add ellipsis font");
+    let clip_options = TextLayoutOptions::with_limits(18 << 16, 2, 128)
+        .expect("clip options")
+        .with_overflow(TextOverflow::Clip);
+    assert_eq!(clip_options.overflow(), TextOverflow::Clip);
+    let clipped = fonts
+        .layout_text("AAAAAAA", 10 << 16, clip_options)
+        .expect("clipped layout");
+    assert!(clipped.truncated());
+    assert_eq!(clipped.lines().len(), 2);
+    assert_eq!(clipped.lines()[1].source_end(), 6);
+    assert!(!clipped.lines()[1].ellipsized());
+
+    let ellipsis_options = TextLayoutOptions::with_limits(18 << 16, 2, 128)
+        .expect("ellipsis options")
+        .with_overflow(TextOverflow::Ellipsis);
+    let ellipsized = fonts
+        .layout_text("AAAAAAA", 10 << 16, ellipsis_options)
+        .expect("ellipsized layout");
+    assert!(ellipsized.truncated());
+    assert_eq!(ellipsized.lines().len(), 2);
+    let last = &ellipsized.lines()[1];
+    assert!(last.ellipsized());
+    assert!(!last.hyphenated());
+    assert!(!last.hard_break());
+    assert_eq!((last.source_start(), last.source_end()), (3, 5));
+    assert_eq!(last.advance_x_bits(), 18 << 16);
+    let paragraph = last.paragraph().expect("ellipsized line");
+    assert_eq!(paragraph.runs().len(), 2);
+    assert_eq!(
+        (
+            paragraph.runs()[1].source_start(),
+            paragraph.runs()[1].source_end()
+        ),
+        (5, 5)
+    );
+    assert_eq!(
+        ellipsized
+            .caret_for_position(TextPosition::new(5, TextAffinity::Upstream))
+            .expect("ellipsis caret query")
+            .expect("ellipsis caret")
+            .x_bits(),
+        18 << 16
+    );
+
+    let exact = fonts
+        .layout_text("AAAAAA", 10 << 16, ellipsis_options)
+        .expect("exact line count");
+    assert!(!exact.truncated());
+    assert!(!exact.lines()[1].ellipsized());
+
+    let mut period_fonts = FontCollection::new(FontCollectionLimits::default());
+    period_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(62), toy_font_for(&['.', 'A']))
+                .expect("period fallback font"),
+        )
+        .expect("add period font");
+    let periods = period_fonts
+        .layout_text("AAAAAAA", 10 << 16, ellipsis_options)
+        .expect("three-period fallback");
+    let period_line = &periods.lines()[1];
+    assert_eq!(
+        (period_line.source_start(), period_line.source_end()),
+        (3, 3)
+    );
+    assert_eq!(
+        period_line.paragraph().expect("period line").runs()[0]
+            .glyph_run()
+            .glyphs()
+            .len(),
+        3
+    );
+
+    let mut styled_fonts = FontCollection::new(FontCollectionLimits::default());
+    styled_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(63), toy_font_for(&['A', '\u{2026}']))
+                .expect("small font"),
+        )
+        .expect("add small font");
+    styled_fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(64), toy_font_for(&['A', '\u{2026}']))
+                .expect("large font"),
+        )
+        .expect("add large font");
+    let styled = styled_fonts
+        .layout_styled_text(
+            "AAAAAAA",
+            &[
+                TextStyleSpan::new(0, 3, FontId::new(63), 10 << 16).expect("small span"),
+                TextStyleSpan::new(3, 7, FontId::new(64), 20 << 16).expect("large span"),
+            ],
+            TextLayoutOptions::with_limits(24 << 16, 2, 128)
+                .expect("styled options")
+                .with_overflow(TextOverflow::Ellipsis),
+        )
+        .expect("styled ellipsis");
+    let styled_last = styled.lines()[1].paragraph().expect("styled last line");
+    assert_eq!(styled.lines()[1].source_end(), 4);
+    assert_eq!(styled_last.runs()[1].glyph_run().font(), FontId::new(64));
+    assert_eq!(styled_last.runs()[1].glyph_run().font_size_bits(), 20 << 16);
+
+    let mut rtl_fonts = FontCollection::new(FontCollectionLimits::default());
+    rtl_fonts
+        .add_face(
+            FontFace::from_bytes(
+                FontId::new(66),
+                toy_font_for(&['\u{05d0}', '\u{05d1}', '\u{05d2}', '\u{2026}']),
+            )
+            .expect("RTL ellipsis font"),
+        )
+        .expect("add RTL font");
+    let rtl = rtl_fonts
+        .layout_text(
+            "\u{05d0}\u{05d1}\u{05d2}\u{05d0}\u{05d1}\u{05d2}\u{05d0}",
+            10 << 16,
+            ellipsis_options,
+        )
+        .expect("RTL ellipsis");
+    let rtl_last = rtl.lines()[1].paragraph().expect("RTL last line");
+    assert!(rtl.lines()[1].ellipsized());
+    assert_eq!(rtl_last.runs()[0].source_start(), 10);
+    assert_eq!(rtl_last.runs()[0].source_end(), 10);
+    assert_eq!(rtl_last.runs()[0].origin_x_bits(), 0);
+    assert_eq!(rtl_last.runs()[0].direction(), TextDirection::RightToLeft);
+    assert_eq!(
+        rtl.caret_for_position(TextPosition::new(10, TextAffinity::Upstream))
+            .expect("RTL ellipsis caret query")
+            .expect("RTL ellipsis caret")
+            .x_bits(),
+        0
+    );
+
+    let empty_last = fonts
+        .layout_text(
+            "\nA",
+            10 << 16,
+            TextLayoutOptions::with_limits(18 << 16, 1, 128)
+                .expect("empty-line options")
+                .with_overflow(TextOverflow::Ellipsis),
+        )
+        .expect("ellipsis on empty final line");
+    assert!(empty_last.truncated());
+    assert!(empty_last.lines()[0].ellipsized());
+    assert_eq!(
+        (
+            empty_last.lines()[0].source_start(),
+            empty_last.lines()[0].source_end()
+        ),
+        (0, 0)
+    );
+    assert_eq!(
+        empty_last.lines()[0]
+            .paragraph()
+            .expect("marker-only paragraph")
+            .runs()[0]
+            .source_start(),
+        0
+    );
+
+    let mut missing_fonts = FontCollection::new(FontCollectionLimits::default());
+    missing_fonts
+        .add_face(FontFace::from_bytes(FontId::new(65), toy_font('A')).expect("plain font"))
+        .expect("add plain font");
+    assert_eq!(
+        missing_fonts
+            .layout_text("AAAAAAA", 10 << 16, ellipsis_options)
+            .expect_err("missing ellipsis and periods")
+            .code(),
+        TextErrorCode::MissingGlyph
     );
 }
 

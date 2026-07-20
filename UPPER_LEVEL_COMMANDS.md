@@ -183,6 +183,21 @@ alignment、justification、styled 行高、空行和 synthetic hyphen。offset 
 cluster boundary 时返回 `Ok(None)`。当前不会伪造 ligature 内部 caret，也还没有 selection
 rectangles API。
 
+`TextLayoutOptions::with_limits(width, max_lines, max_shaping_attempts)` 的 line limit 默认仍是
+all-or-error：超过时返回 `ResourceLimit`，不返回部分结果。明确允许截断时，再调用
+`with_overflow(TextOverflow::Clip)` 或 `TextOverflow::Ellipsis`。`Clip` 保留前
+`max_lines` 行并省略剩余 source；`Ellipsis` 会在最后一行按 extended grapheme 向前回退，
+对每个候选 prefix 重新 shaping，直到 prefix 加 synthetic ellipsis 可放入 line width。
+`TextLayout::truncated()` 表示确实省略过 source，`ShapedLine::ellipsized()` 只标记带
+ellipsis 的最后一行；文本恰好用满 max lines 时两者保持 false。
+
+ellipsis 优先使用 U+2026，缺字时回退三个 ASCII period；两者都不消耗 source bytes，其
+synthetic run 的 `source_start == source_end ==` 可见 prefix 末端。非空行继承逻辑截断点
+左侧实际 run 的字体实例、字号和 bidi 方向；空行使用逻辑行首 style。styled layout、字体
+fallback、caret、alignment 和 decoration 因而继续生效。marker 自身比 line width 更宽时仍
+保留 marker，和单个超宽 grapheme 的进度保证一致；两种 marker 都缺失时返回 `MissingGlyph`。
+ellipsized line 不参与 justification。
+
 `Justify` 扩展行内、非首尾的可断 Unicode space separator：包括 ASCII SPACE、OGHAM SPACE
 MARK、U+2000–U+2006、U+2008–U+200A、MEDIUM MATHEMATICAL SPACE 和 IDEOGRAPHIC SPACE；
 NBSP、U+2007 FIGURE SPACE 与 NARROW NBSP 明确保持不可断、不可扩展。位移通过
@@ -216,8 +231,8 @@ path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
 换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、Unicode
 可断空格 justification、全局 OpenType feature、grapheme-safe styled paragraph/multiline
-layout、cluster hit testing/caret、实线 underline/strike-through 和轮廓解析**，但不负责
-平台字体发现、generic family 映射、
+layout、line-limit clip/ellipsis、cluster hit testing/caret、实线 underline/strike-through
+和轮廓解析**，但不负责平台字体发现、generic family 映射、
 variable 实例选择策略、语言偏好、内置词典/断字算法、脚本级 inter-character
 justification、per-span paint/装饰或装饰线变体。
 `shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
@@ -370,9 +385,10 @@ GPU encoder 也要求先调用 `add_path` / `add_image`。`GpuCommandLimits` 可
 5. 图片不支持非轴对齐变换/过滤，描边样式也只有圆头圆角；
 6. 文本层已有内存字体解析、family/style 匹配、单段落 bidi、跨字体 fallback、metrics、
    通用换行、可插拔词典断点、hyphenation、对齐、Unicode 空格 justification 与实线装饰，
-   并支持 variable/feature 实例、styled paragraph/layout 与 cluster hit testing/caret；
-   但仍没有系统字体发现、内置语言词典、variable 实例选择策略、脚本级 inter-character
-   justification、ligature 内部 caret、selection rectangles、per-span paint/装饰与完整排版；
+   并支持 variable/feature 实例、styled paragraph/layout、line-limit clip/ellipsis 与
+   cluster hit testing/caret；但仍没有系统字体发现、内置语言词典、variable 实例选择策略、
+   脚本级 inter-character justification、ligature 内部 caret、selection rectangles、
+   per-span paint/装饰与完整排版；
 7. 路径的几何布尔运算、stroke-to-path 和 path effects 尚未暴露；它们不能由像素混合模式替代。
 
 源码入口：Geometry 在 `geometry/src/lib.rs`，Path 在 `path/src/lib.rs`，CPU Canvas 在

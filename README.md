@@ -84,6 +84,10 @@ across fallback runs; CPU layout drawing paints them after glyph outlines.
 resolves source positions back to vertical carets. Upstream/downstream affinity
 distinguishes soft-wrap and bidi boundary positions; alignment, justification,
 synthetic hyphens, empty lines, and mixed line metrics are included.
+Line limits default to an all-or-error resource policy. Callers can explicitly
+select clipped output or a grapheme-safe, reshaped final-line ellipsis.
+Ellipses retain styled font size and bidi placement, prefer U+2026, and fall
+back to three periods without consuming source bytes.
 
 System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, non-ASCII

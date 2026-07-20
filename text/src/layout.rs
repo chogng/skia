@@ -51,6 +51,18 @@ pub enum TextAlignment {
     Justify,
 }
 
+/// Behavior when laid-out text would exceed the configured line limit.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum TextOverflow {
+    /// Return [`TextErrorCode::ResourceLimit`] without a partial layout.
+    #[default]
+    Error,
+    /// Keep the first `max_lines` and omit all remaining source text.
+    Clip,
+    /// Replace the visible suffix of the final line with a synthetic ellipsis.
+    Ellipsis,
+}
+
 /// Selects one visual caret when a source boundary has two layout positions.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TextAffinity {
@@ -196,6 +208,7 @@ pub struct TextLayoutOptions {
     alignment: TextAlignment,
     justify_last_line: bool,
     decoration: TextDecoration,
+    overflow: TextOverflow,
 }
 
 impl TextLayoutOptions {
@@ -221,6 +234,7 @@ impl TextLayoutOptions {
             alignment: TextAlignment::Start,
             justify_last_line: false,
             decoration: TextDecoration::None,
+            overflow: TextOverflow::Error,
         })
     }
 
@@ -252,6 +266,12 @@ impl TextLayoutOptions {
     /// line remains stable across fallback runs within that line.
     pub const fn with_decoration(mut self, decoration: TextDecoration) -> Self {
         self.decoration = decoration;
+        self
+    }
+
+    /// Selects behavior when text would exceed `max_lines`.
+    pub const fn with_overflow(mut self, overflow: TextOverflow) -> Self {
+        self.overflow = overflow;
         self
     }
 
@@ -289,6 +309,11 @@ impl TextLayoutOptions {
     pub const fn decoration(self) -> TextDecoration {
         self.decoration
     }
+
+    /// Returns the configured line-limit overflow behavior.
+    pub const fn overflow(self) -> TextOverflow {
+        self.overflow
+    }
 }
 
 /// One positioned line in a laid-out text block.
@@ -302,6 +327,7 @@ pub struct ShapedLine {
     baseline_y_bits: i32,
     hard_break: bool,
     hyphenated: bool,
+    ellipsized: bool,
     justified: bool,
     metrics: FontMetrics,
     underline_metrics: Option<TextDecorationMetrics>,
@@ -349,6 +375,11 @@ impl ShapedLine {
         self.hyphenated
     }
 
+    /// Returns whether a synthetic ellipsis terminates this line.
+    pub const fn ellipsized(&self) -> bool {
+        self.ellipsized
+    }
+
     /// Returns whether the line received expanded inter-word spacing.
     pub const fn justified(&self) -> bool {
         self.justified
@@ -377,6 +408,7 @@ pub struct TextLayout {
     width_bits: i32,
     height_bits: i32,
     container_width_bits: i32,
+    truncated: bool,
 }
 
 impl TextLayout {
@@ -398,6 +430,11 @@ impl TextLayout {
     /// Returns the configured Q16.16 line-container width.
     pub const fn container_width_bits(&self) -> i32 {
         self.container_width_bits
+    }
+
+    /// Returns whether source text was omitted because of the line limit.
+    pub const fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Snaps one layout-local Q16.16 point to the nearest shaping-cluster edge.
@@ -580,9 +617,10 @@ impl FontCollection {
             shaping_attempts: 0,
             total_runs: 0,
             total_glyphs: 0,
+            truncated: false,
         };
         if text.is_empty() {
-            builder.push_line(0, 0, false, false, None)?;
+            builder.push_line(0, 0, false, false, false, None)?;
             return builder.finish();
         }
 
@@ -632,10 +670,30 @@ impl FontCollection {
             }
             trailing_empty = candidate.hard_break && candidate.raw_end == text.len();
             line_start = candidate.raw_end;
-            builder.push_candidate(candidate)?;
+            let reaches_line_limit = builder.lines.len() + 1 == options.max_lines;
+            let has_hidden_line =
+                line_start < text.len() || (trailing_empty && line_start == text.len());
+            if reaches_line_limit && has_hidden_line {
+                match options.overflow {
+                    TextOverflow::Error => builder.push_candidate(candidate)?,
+                    TextOverflow::Clip => {
+                        builder.truncated = true;
+                        builder.push_candidate(candidate)?;
+                        break;
+                    }
+                    TextOverflow::Ellipsis => {
+                        builder.truncated = true;
+                        let candidate = builder.ellipsize_candidate(candidate)?;
+                        builder.push_candidate(candidate)?;
+                        break;
+                    }
+                }
+            } else {
+                builder.push_candidate(candidate)?;
+            }
         }
-        if trailing_empty {
-            builder.push_line(text.len(), text.len(), false, false, None)?;
+        if trailing_empty && !builder.truncated {
+            builder.push_line(text.len(), text.len(), false, false, false, None)?;
         }
         builder.finish()
     }
@@ -652,6 +710,7 @@ struct LayoutBuilder<'a> {
     shaping_attempts: usize,
     total_runs: usize,
     total_glyphs: usize,
+    truncated: bool,
 }
 
 impl LayoutBuilder<'_> {
@@ -716,7 +775,91 @@ impl LayoutBuilder<'_> {
             raw_end,
             hard_break,
             hyphenated,
+            ellipsized: false,
         })
+    }
+
+    fn ellipsize_candidate(
+        &mut self,
+        candidate: LineCandidate,
+    ) -> Result<LineCandidate, TextError> {
+        let mut boundaries = Vec::new();
+        let source_length = candidate
+            .source_end
+            .checked_sub(candidate.source_start)
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        boundaries
+            .try_reserve(
+                source_length
+                    .checked_add(1)
+                    .ok_or(TextError::new(TextErrorCode::NumericOverflow))?,
+            )
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        boundaries.push(candidate.source_start);
+        boundaries.extend(
+            self.text[candidate.source_start..candidate.source_end]
+                .grapheme_indices(true)
+                .map(|(relative, grapheme)| candidate.source_start + relative + grapheme.len()),
+        );
+
+        for source_end in boundaries.into_iter().rev() {
+            let paragraph = if source_end == candidate.source_start {
+                let (face, font_size_bits) = self.line_style(candidate.source_start)?;
+                self.fonts.shape_ellipsis_marker(
+                    font_size_bits,
+                    face.id(),
+                    self.direction_at(candidate.source_start),
+                    u32::try_from(source_end)
+                        .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
+                )?
+            } else {
+                let mut paragraph = self
+                    .shape_candidate(candidate.source_start, source_end, source_end, false, false)?
+                    .paragraph
+                    .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+                self.fonts.append_ellipsis(
+                    &mut paragraph,
+                    u32::try_from(source_end)
+                        .map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?,
+                )?;
+                paragraph
+            };
+            if paragraph.advance_x_bits() <= self.options.max_width_bits
+                || source_end == candidate.source_start
+            {
+                return Ok(LineCandidate {
+                    paragraph: Some(paragraph),
+                    source_start: candidate.source_start,
+                    source_end,
+                    raw_end: candidate.raw_end,
+                    hard_break: false,
+                    hyphenated: false,
+                    ellipsized: true,
+                });
+            }
+        }
+        Err(TextError::new(TextErrorCode::InvalidLayout))
+    }
+
+    fn direction_at(&self, source_offset: usize) -> TextDirection {
+        self.bidi
+            .paragraphs
+            .iter()
+            .find(|paragraph| {
+                source_offset >= paragraph.range.start && source_offset <= paragraph.range.end
+            })
+            .map_or(
+                self.options
+                    .base_direction
+                    .unwrap_or(TextDirection::LeftToRight),
+                |paragraph| {
+                    if paragraph.level.is_rtl() {
+                        TextDirection::RightToLeft
+                    } else {
+                        TextDirection::LeftToRight
+                    }
+                },
+            )
     }
 
     fn force_grapheme_break(
@@ -745,6 +888,7 @@ impl LayoutBuilder<'_> {
             candidate.source_end,
             candidate.hard_break,
             candidate.hyphenated,
+            candidate.ellipsized,
             candidate.paragraph,
         )
     }
@@ -755,6 +899,7 @@ impl LayoutBuilder<'_> {
         source_end: usize,
         hard_break: bool,
         hyphenated: bool,
+        ellipsized: bool,
         paragraph: Option<ShapedParagraph>,
     ) -> Result<(), TextError> {
         if self.lines.len() == self.options.max_lines {
@@ -828,6 +973,7 @@ impl LayoutBuilder<'_> {
             baseline_y_bits,
             hard_break,
             hyphenated,
+            ellipsized,
             justified: false,
             metrics,
             underline_metrics,
@@ -882,6 +1028,7 @@ impl LayoutBuilder<'_> {
             );
             if self.options.alignment == TextAlignment::Justify
                 && (!paragraph_final || self.options.justify_last_line)
+                && !line.ellipsized
                 && let Some(paragraph) = &mut line.paragraph
             {
                 line.justified = paragraph.justify_expandable_spaces(
@@ -913,6 +1060,7 @@ impl LayoutBuilder<'_> {
             width_bits,
             height_bits: self.top_bits,
             container_width_bits: self.options.max_width_bits,
+            truncated: self.truncated,
         })
     }
 }
@@ -1167,6 +1315,7 @@ struct LineCandidate {
     raw_end: usize,
     hard_break: bool,
     hyphenated: bool,
+    ellipsized: bool,
 }
 
 impl LineCandidate {

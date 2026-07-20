@@ -462,6 +462,67 @@ impl FontCollection {
         paragraph: &mut ShapedParagraph,
         source_offset: u32,
     ) -> Result<(), TextError> {
+        self.append_synthetic_marker(paragraph, source_offset, &["\u{2010}", "-"])
+    }
+
+    pub(crate) fn append_ellipsis(
+        &self,
+        paragraph: &mut ShapedParagraph,
+        source_offset: u32,
+    ) -> Result<(), TextError> {
+        self.append_synthetic_marker(paragraph, source_offset, &["\u{2026}", "..."])
+    }
+
+    pub(crate) fn shape_ellipsis_marker(
+        &self,
+        font_size_bits: i32,
+        preferred_font: FontId,
+        direction: TextDirection,
+        source_offset: u32,
+    ) -> Result<ShapedParagraph, TextError> {
+        let preferred_face = self
+            .faces
+            .iter()
+            .position(|face| face.id() == preferred_font)
+            .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
+        let (face_index, marker) =
+            self.select_synthetic_marker(&["\u{2026}", "..."], preferred_face)?;
+        let face = &self.faces[face_index];
+        let run = face.shape_segment(marker, font_size_bits, Some(direction), source_offset)?;
+        if run.glyphs().len() > self.limits.max_glyphs {
+            return Err(TextError::new(TextErrorCode::ResourceLimit));
+        }
+        let advance_x_bits = run_advance_bits(&run)?;
+        let mut glyph_offsets_x_bits = Vec::new();
+        glyph_offsets_x_bits
+            .try_reserve_exact(run.glyphs().len())
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        glyph_offsets_x_bits.resize(run.glyphs().len(), 0);
+        let mut runs = Vec::new();
+        runs.try_reserve_exact(1)
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        runs.push(ShapedRun {
+            run,
+            source_start: source_offset,
+            source_end: source_offset,
+            origin_x_bits: 0,
+            glyph_offsets_x_bits,
+            direction,
+        });
+        Ok(ShapedParagraph {
+            runs,
+            advance_x_bits,
+            base_direction: direction,
+            metrics: face.metrics(font_size_bits)?,
+        })
+    }
+
+    fn append_synthetic_marker(
+        &self,
+        paragraph: &mut ShapedParagraph,
+        source_offset: u32,
+        markers: &[&str],
+    ) -> Result<(), TextError> {
         if paragraph.runs.len() == self.limits.max_runs {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
         }
@@ -471,29 +532,20 @@ impl FontCollection {
             .enumerate()
             .find(|(_, shaped)| shaped.source_end == source_offset)
             .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
-        let hyphen_direction = anchor.direction;
+        let marker_direction = anchor.direction;
         let font_size_bits = anchor.run.font_size_bits();
         let preferred_face = self
             .faces
             .iter()
             .position(|face| face.id() == anchor.run.font())
             .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
-        let mut selected = None;
-        for hyphen in ["\u{2010}", "-"] {
-            if let Some(face_index) =
-                self.fallback_face_with_preferred(hyphen, Some(preferred_face))?
-            {
-                selected = Some((face_index, hyphen));
-                break;
-            }
-        }
-        let (face_index, hyphen) = selected.ok_or(TextError::new(TextErrorCode::MissingGlyph))?;
-        let insertion_index = if hyphen_direction == TextDirection::LeftToRight {
+        let (face_index, marker) = self.select_synthetic_marker(markers, preferred_face)?;
+        let insertion_index = if marker_direction == TextDirection::LeftToRight {
             anchor_index + 1
         } else {
             anchor_index
         };
-        let hyphen_origin_bits = if hyphen_direction == TextDirection::LeftToRight {
+        let marker_origin_bits = if marker_direction == TextDirection::LeftToRight {
             anchor
                 .origin_x_bits
                 .checked_add(run_advance_bits(&anchor.run)?)
@@ -503,9 +555,9 @@ impl FontCollection {
         };
         let face = &self.faces[face_index];
         let run = face.shape_segment(
-            hyphen,
+            marker,
             font_size_bits,
-            Some(hyphen_direction),
+            Some(marker_direction),
             source_offset,
         )?;
         let glyph_count = paragraph
@@ -549,20 +601,35 @@ impl FontCollection {
                 .line_gap_bits()
                 .max(metrics.line_gap_bits()),
         );
-        let shaped_hyphen = ShapedRun {
+        let shaped_marker = ShapedRun {
             run,
             source_start: source_offset,
             source_end: source_offset,
-            origin_x_bits: hyphen_origin_bits,
+            origin_x_bits: marker_origin_bits,
             glyph_offsets_x_bits,
-            direction: hyphen_direction,
+            direction: marker_direction,
         };
         for shaped in &mut paragraph.runs[insertion_index..] {
             shaped.origin_x_bits += advance_bits;
         }
-        paragraph.runs.insert(insertion_index, shaped_hyphen);
+        paragraph.runs.insert(insertion_index, shaped_marker);
         paragraph.advance_x_bits = final_advance_bits;
         Ok(())
+    }
+
+    fn select_synthetic_marker<'a>(
+        &self,
+        markers: &'a [&str],
+        preferred_face: usize,
+    ) -> Result<(usize, &'a str), TextError> {
+        for &marker in markers {
+            if let Some(face_index) =
+                self.fallback_face_with_preferred(marker, Some(preferred_face))?
+            {
+                return Ok((face_index, marker));
+            }
+        }
+        Err(TextError::new(TextErrorCode::MissingGlyph))
     }
 
     pub(crate) const fn limits(&self) -> FontCollectionLimits {
