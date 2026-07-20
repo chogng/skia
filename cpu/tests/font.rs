@@ -1,8 +1,8 @@
 use skia_core::{
     Color, FontCollection, FontCollectionLimits, FontFace, FontId, FontLimits, FontSlant,
     FontStyle, FontWidth, GlyphId, GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar,
-    SkiaErrorCode, TextAlignment, TextBreakProvider, TextDirection, TextError, TextErrorCode,
-    TextLayoutOptions, TextWordBreak, TextWordBreakKind, Transform,
+    SkiaErrorCode, TextAlignment, TextBreakProvider, TextDecoration, TextDirection, TextError,
+    TextErrorCode, TextLayoutOptions, TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -860,6 +860,97 @@ fn justification_expands_interior_spaces_and_controls_the_final_line() {
     assert_eq!(pixel(&surface, 19, 4), [160, 170, 180, 255]);
 }
 
+#[test]
+fn font_decorations_use_primary_metrics_across_fallback_and_alignment() {
+    let primary = FontFace::from_bytes(
+        FontId::new(110),
+        toy_styled_font(&[' ', 'A'], "Decorated", FontStyle::NORMAL),
+    )
+    .expect("decorated primary font");
+    let underline = primary
+        .underline_metrics(20 << 16)
+        .expect("underline query")
+        .expect("post metrics");
+    assert_eq!(underline.offset_bits(), 2 << 16);
+    assert_eq!(underline.thickness_bits(), 2 << 16);
+    let strike_through = primary
+        .strike_through_metrics(20 << 16)
+        .expect("strike-through query")
+        .expect("OS/2 metrics");
+    assert_eq!(strike_through.offset_bits(), -6 << 16);
+    assert_eq!(strike_through.thickness_bits(), 2 << 16);
+
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts.add_face(primary).expect("add primary font");
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(111), toy_font('B')).expect("fallback font"))
+        .expect("add fallback font");
+    let layout = fonts
+        .layout_text(
+            "A B",
+            20 << 16,
+            TextLayoutOptions::new(40 << 16)
+                .expect("options")
+                .with_alignment(TextAlignment::Right)
+                .with_decoration(TextDecoration::UnderlineAndStrikeThrough),
+        )
+        .expect("decorated fallback layout");
+    let line = &layout.lines()[0];
+    assert_eq!(line.offset_x_bits(), 4 << 16);
+    assert_eq!(line.underline_metrics(), Some(underline));
+    assert_eq!(line.strike_through_metrics(), Some(strike_through));
+    assert_eq!(
+        line.paragraph().expect("line").runs()[1].glyph_run().font(),
+        FontId::new(111)
+    );
+
+    let color = [25, 50, 75, 255];
+    let mut surface = Surface::new(42, 24, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas
+        .draw_text_layout(
+            &layout,
+            &fonts,
+            Point::new(Scalar::ZERO, scalar(1)),
+            Paint::new(Color::rgba(color[0], color[1], color[2], color[3])),
+        )
+        .expect("draw decorated layout");
+    drop(canvas);
+
+    assert_eq!(pixel(&surface, 18, 10), color);
+    assert_eq!(pixel(&surface, 18, 18), color);
+    assert_eq!(pixel(&surface, 2, 18), [0, 0, 0, 0]);
+}
+
+#[test]
+fn requested_font_decoration_requires_native_metrics() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(FontFace::from_bytes(FontId::new(120), toy_font('A')).expect("plain font"))
+        .expect("add plain font");
+    let error = fonts
+        .layout_text(
+            "A",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16)
+                .expect("options")
+                .with_decoration(TextDecoration::Underline),
+        )
+        .expect_err("font without post metrics must fail");
+    assert_eq!(error.code(), TextErrorCode::MissingDecorationMetrics);
+
+    let empty = fonts
+        .layout_text(
+            "",
+            10 << 16,
+            TextLayoutOptions::new(20 << 16)
+                .expect("options")
+                .with_decoration(TextDecoration::Underline),
+        )
+        .expect("empty lines need no decoration metrics");
+    assert_eq!(empty.lines()[0].underline_metrics(), None);
+}
+
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).expect("small scalar")
 }
@@ -896,6 +987,7 @@ fn build_toy_font(characters: &[char], metadata: Option<(&str, FontStyle)>) -> V
     if let Some((family, style)) = metadata {
         tables.push((*b"name", name_table(family)));
         tables.push((*b"OS/2", os2_table(style)));
+        tables.push((*b"post", post_table()));
     }
     tables.sort_unstable_by_key(|(tag, _)| *tag);
     let table_count = u16::try_from(tables.len()).expect("small table count");
@@ -956,12 +1048,22 @@ fn os2_table(style: FontStyle) -> Vec<u8> {
     put_u16(&mut table, 0, 4);
     put_u16(&mut table, 4, style.weight());
     put_u16(&mut table, 6, style.width().class());
+    put_i16(&mut table, 26, 100);
+    put_i16(&mut table, 28, 300);
     let selection = match style.slant() {
         FontSlant::Normal => 0,
         FontSlant::Italic => 1,
         FontSlant::Oblique => 1 << 9,
     };
     put_u16(&mut table, 62, selection);
+    table
+}
+
+fn post_table() -> Vec<u8> {
+    let mut table = vec![0; 32];
+    put_u32(&mut table, 0, 0x0003_0000);
+    put_i16(&mut table, 8, -100);
+    put_i16(&mut table, 10, 100);
     table
 }
 

@@ -17,10 +17,12 @@ use std::fmt;
 pub use collection::{
     FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDirection,
 };
-pub use font::{FontFace, FontLimits, FontMetrics, FontSlant, FontStyle, FontWidth};
+pub use font::{
+    FontFace, FontLimits, FontMetrics, FontSlant, FontStyle, FontWidth, TextDecorationMetrics,
+};
 pub use layout::{
-    ShapedLine, TextAlignment, TextBreakProvider, TextLayout, TextLayoutOptions, TextWordBreak,
-    TextWordBreakKind,
+    ShapedLine, TextAlignment, TextBreakProvider, TextDecoration, TextLayout, TextLayoutOptions,
+    TextWordBreak, TextWordBreakKind,
 };
 
 /// Stable machine-readable text-resource failure.
@@ -54,6 +56,8 @@ pub enum TextErrorCode {
     DuplicateFontId,
     /// No font in a collection covers one source grapheme.
     MissingGlyph,
+    /// A requested decoration has no corresponding font metrics.
+    MissingDecorationMetrics,
     /// Paragraph shaping received more than one paragraph.
     MultipleParagraphs,
     /// Line-break analysis did not produce a forward layout boundary.

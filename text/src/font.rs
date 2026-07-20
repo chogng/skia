@@ -127,6 +127,28 @@ pub struct FontMetrics {
     line_gap_bits: i32,
 }
 
+/// One scaled horizontal text-decoration line in Q16.16 canvas units.
+///
+/// The offset is measured from the baseline to the line center. Positive
+/// offsets move down in canvas coordinates; thickness is always positive.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextDecorationMetrics {
+    offset_bits: i32,
+    thickness_bits: i32,
+}
+
+impl TextDecorationMetrics {
+    /// Returns the signed baseline-to-center offset in canvas coordinates.
+    pub const fn offset_bits(self) -> i32 {
+        self.offset_bits
+    }
+
+    /// Returns the positive line thickness.
+    pub const fn thickness_bits(self) -> i32 {
+        self.thickness_bits
+    }
+}
+
 impl FontMetrics {
     pub(crate) const fn from_bits(ascent_bits: i32, descent_bits: i32, line_gap_bits: i32) -> Self {
         Self {
@@ -382,6 +404,55 @@ impl FontFace {
         })
     }
 
+    /// Returns scaled underline metrics, or `None` when the font has no `post` table.
+    pub fn underline_metrics(
+        &self,
+        font_size_bits: i32,
+    ) -> Result<Option<TextDecorationMetrics>, TextError> {
+        self.decoration_metrics(font_size_bits, |face| face.underline_metrics())
+    }
+
+    /// Returns scaled strike-through metrics, or `None` when the font has no `OS/2` table.
+    pub fn strike_through_metrics(
+        &self,
+        font_size_bits: i32,
+    ) -> Result<Option<TextDecorationMetrics>, TextError> {
+        self.decoration_metrics(font_size_bits, |face| face.strikeout_metrics())
+    }
+
+    fn decoration_metrics(
+        &self,
+        font_size_bits: i32,
+        select: impl FnOnce(&ttf_parser::Face<'_>) -> Option<ttf_parser::LineMetrics>,
+    ) -> Result<Option<TextDecorationMetrics>, TextError> {
+        if font_size_bits <= 0 {
+            return Err(TextError::new(TextErrorCode::InvalidFontSize));
+        }
+        let face = ttf_parser::Face::parse(&self.bytes, self.face_index)
+            .map_err(|_| TextError::new(TextErrorCode::InvalidFontData))?;
+        let Some(metrics) = select(&face) else {
+            return Ok(None);
+        };
+        if metrics.thickness <= 0 {
+            return Err(TextError::new(TextErrorCode::InvalidFontData));
+        }
+        Ok(Some(TextDecorationMetrics {
+            offset_bits: scale_font_units_bits(
+                i64::from(metrics.position)
+                    .checked_neg()
+                    .ok_or(TextError::new(TextErrorCode::NumericOverflow))?,
+                font_size_bits,
+                self.units_per_em,
+            )?,
+            thickness_bits: scale_font_units_bits(
+                i64::from(metrics.thickness),
+                font_size_bits,
+                self.units_per_em,
+            )?
+            .max(1),
+        }))
+    }
+
     /// Shapes one non-empty UTF-8 segment using automatic direction and script detection.
     ///
     /// The resulting clusters are UTF-8 byte offsets. Mixed-direction
@@ -563,9 +634,11 @@ pub(crate) fn scale_font_units_bits(
             .ok_or(TextError::new(TextErrorCode::NumericOverflow))?
             / denominator
     } else {
-        -((-numerator
+        -(numerator
+            .checked_neg()
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?
             .checked_add(denominator / 2)
-            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?
             / denominator)
     };
     i32::try_from(rounded).map_err(|_| TextError::new(TextErrorCode::NumericOverflow))

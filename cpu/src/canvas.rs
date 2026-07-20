@@ -444,6 +444,35 @@ impl Canvas<'_> {
                 ),
                 paint,
             )?;
+            if line.advance_x_bits() <= 0 {
+                continue;
+            }
+            for metrics in [line.underline_metrics(), line.strike_through_metrics()]
+                .into_iter()
+                .flatten()
+            {
+                let right_bits = line_origin_bits
+                    .checked_add(line.advance_x_bits())
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                let center_bits = baseline_bits
+                    .checked_add(metrics.offset_bits())
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                let top_bits = center_bits
+                    .checked_sub(metrics.thickness_bits() / 2)
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                let bottom_bits = top_bits
+                    .checked_add(metrics.thickness_bits())
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                self.fill_rect(
+                    Rect::new(
+                        Scalar::from_bits(line_origin_bits),
+                        Scalar::from_bits(top_bits),
+                        Scalar::from_bits(right_bits),
+                        Scalar::from_bits(bottom_bits),
+                    )?,
+                    paint,
+                )?;
+            }
         }
         Ok(())
     }

@@ -3,8 +3,33 @@ use unicode_linebreak::{BreakOpportunity, linebreaks};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    FontCollection, FontMetrics, ShapedParagraph, TextDirection, TextError, TextErrorCode,
+    FontCollection, FontMetrics, ShapedParagraph, TextDecorationMetrics, TextDirection, TextError,
+    TextErrorCode,
 };
+
+/// Decoration lines requested for every non-empty line in one text layout.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum TextDecoration {
+    /// Draw no decoration.
+    #[default]
+    None,
+    /// Draw an underline.
+    Underline,
+    /// Draw a strike-through.
+    StrikeThrough,
+    /// Draw both an underline and a strike-through.
+    UnderlineAndStrikeThrough,
+}
+
+impl TextDecoration {
+    const fn includes_underline(self) -> bool {
+        matches!(self, Self::Underline | Self::UnderlineAndStrikeThrough)
+    }
+
+    const fn includes_strike_through(self) -> bool {
+        matches!(self, Self::StrikeThrough | Self::UnderlineAndStrikeThrough)
+    }
+}
 
 /// Horizontal placement policy inside a layout's configured line width.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -78,6 +103,7 @@ pub struct TextLayoutOptions {
     base_direction: Option<TextDirection>,
     alignment: TextAlignment,
     justify_last_line: bool,
+    decoration: TextDecoration,
 }
 
 impl TextLayoutOptions {
@@ -102,6 +128,7 @@ impl TextLayoutOptions {
             base_direction: None,
             alignment: TextAlignment::Start,
             justify_last_line: false,
+            decoration: TextDecoration::None,
         })
     }
 
@@ -123,6 +150,15 @@ impl TextLayoutOptions {
     /// [`TextAlignment::Justify`].
     pub const fn with_justify_last_line(mut self, justify: bool) -> Self {
         self.justify_last_line = justify;
+        self
+    }
+
+    /// Selects decoration lines for every non-empty laid-out line.
+    ///
+    /// Decoration metrics come from the collection's first face so one
+    /// continuous line remains stable across fallback runs.
+    pub const fn with_decoration(mut self, decoration: TextDecoration) -> Self {
+        self.decoration = decoration;
         self
     }
 
@@ -155,6 +191,11 @@ impl TextLayoutOptions {
     pub const fn justify_last_line(self) -> bool {
         self.justify_last_line
     }
+
+    /// Returns the requested line-decoration policy.
+    pub const fn decoration(self) -> TextDecoration {
+        self.decoration
+    }
 }
 
 /// One positioned line in a laid-out text block.
@@ -170,6 +211,8 @@ pub struct ShapedLine {
     hyphenated: bool,
     justified: bool,
     metrics: FontMetrics,
+    underline_metrics: Option<TextDecorationMetrics>,
+    strike_through_metrics: Option<TextDecorationMetrics>,
 }
 
 impl ShapedLine {
@@ -221,6 +264,16 @@ impl ShapedLine {
     /// Returns this line's baseline metrics.
     pub const fn metrics(&self) -> FontMetrics {
         self.metrics
+    }
+
+    /// Returns resolved underline metrics when underline drawing was requested.
+    pub const fn underline_metrics(&self) -> Option<TextDecorationMetrics> {
+        self.underline_metrics
+    }
+
+    /// Returns resolved strike-through metrics when strike-through drawing was requested.
+    pub const fn strike_through_metrics(&self) -> Option<TextDecorationMetrics> {
+        self.strike_through_metrics
     }
 }
 
@@ -498,6 +551,31 @@ impl LayoutBuilder<'_> {
             .map(ShapedParagraph::metrics)
             .map(Ok)
             .unwrap_or_else(|| self.fonts.default_metrics(self.font_size_bits))?;
+        let decoration_face = self
+            .fonts
+            .faces()
+            .first()
+            .ok_or(TextError::new(TextErrorCode::EmptyFontCollection))?;
+        let underline_metrics =
+            if paragraph.is_some() && self.options.decoration.includes_underline() {
+                Some(
+                    decoration_face
+                        .underline_metrics(self.font_size_bits)?
+                        .ok_or(TextError::new(TextErrorCode::MissingDecorationMetrics))?,
+                )
+            } else {
+                None
+            };
+        let strike_through_metrics =
+            if paragraph.is_some() && self.options.decoration.includes_strike_through() {
+                Some(
+                    decoration_face
+                        .strike_through_metrics(self.font_size_bits)?
+                        .ok_or(TextError::new(TextErrorCode::MissingDecorationMetrics))?,
+                )
+            } else {
+                None
+            };
         let line_height = metrics.line_height_bits()?;
         let baseline_y_bits = self
             .top_bits
@@ -543,6 +621,8 @@ impl LayoutBuilder<'_> {
             hyphenated,
             justified: false,
             metrics,
+            underline_metrics,
+            strike_through_metrics,
         });
         Ok(())
     }

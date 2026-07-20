@@ -130,14 +130,29 @@ LTR 从左开始，RTL 从右开始；`Left` / `Right` 始终使用物理边。`
 `Start`，不会伪造字符间距。DisplayList 展开布局时除了 run origin，还必须应用 line
 offset 和每个 glyph 的额外 offset；CPU `draw_text_layout` 已自动完成这些步骤。
 
+整块 layout 需要下划线或删除线时，使用
+`TextLayoutOptions::with_decoration(TextDecoration::Underline)`、
+`StrikeThrough` 或 `UnderlineAndStrikeThrough`。位置和粗细严格读取 collection 首个字体的
+OpenType `post` underline metrics 与 `OS/2` strikeout metrics，并缩放为 Q16.16 canvas
+坐标；`ShapedLine::underline_metrics()` 和 `strike_through_metrics()` 暴露最终值。这样同一条
+装饰线会跨越 fallback run 和空格连续绘制，并跟随 line alignment/justification 后的
+`offset_x_bits` 与 `advance_x_bits`。
+
+请求的指标表缺失时，layout 返回 `MissingDecorationMetrics`，不会猜测平台相关默认值；字体
+给出非正 thickness 时返回 `InvalidFontData`。空行不产生装饰，也不要求字体提供指标。
+`Canvas::draw_text_layout` 在 glyph 之后用同一个 `Paint` 绘制实线装饰。当前装饰粒度是整个
+layout，尚无 per-span 颜色/粗细、波浪线/虚线，也没有专用 DisplayList layout 命令；上层若
+展开录制，需用字体指标和 line 的最终横向范围自行录制对应路径或矩形。
+
 `FontFace` 内部使用纯 Rust `rustybuzz` 完成 shaping，并通过其 `ttf-parser` 解析矢量轮廓；
 字体字节由 face 自身不可变持有。轮廓的字体坐标会转换为 canvas 向下为正的坐标，再复用普通
 path fill 管线。空格等没有矢量轮廓的字形可以参与 shaping 和 advance，但绘制时不产生路径。
 
 当前 text 层已负责**单段 shaping、单段落 bidi、按序 fallback、字体 metrics、通用 Unicode
 换行、可插拔词典分词/断字、OpenType family/style 元数据和匹配、逻辑/物理对齐、ASCII 空格
-justification 和轮廓解析**，但不负责平台字体发现、generic family 映射、variable axis
-实例化、语言偏好、内置词典/断字算法、非 ASCII justification 或文本装饰。
+justification、实线 underline/strike-through 和轮廓解析**，但不负责平台字体发现、
+generic family 映射、variable axis 实例化、语言偏好、内置词典/断字算法、非 ASCII
+justification、per-span 装饰或装饰线变体。
 `shape_paragraph` 只接受一个未换行段落；多段内容应使用 `layout_text`。缺少覆盖字体会返回
 `MissingGlyph`。当前 Unicode line-break 实现把 SA 复杂上下文字系按普通字母处理；泰文、
 老挝文、高棉文和缅甸文需要上层通过 `TextBreakProvider` 接入合适的 `Soft` 词典边界。
