@@ -19,10 +19,11 @@ pub use skia_core::{
     FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation, FontVariationAxis,
     FontWidth, GlyphBitmap, GlyphBitmapFormat, GlyphId, GlyphOutline, GlyphOutlineProvider,
     GlyphRun, OutlinePoint, OutlineSegment, Paint, PositionedGlyph, ShapedLine, ShapedParagraph,
-    ShapedRun, TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecoration,
-    TextDecorationMetrics, TextDecorationSegment, TextDirection, TextError, TextErrorCode,
-    TextHitResult, TextJustification, TextLayout, TextLayoutOptions, TextOverflow, TextPosition,
-    TextSelectionRect, TextStyleId, TextStyleSpan, TextUnit, TextWordBreak, TextWordBreakKind,
+    ShapedRun, StrokeCap, StrokeJoin, StrokeOptions, TextAffinity, TextAlignment,
+    TextBreakProvider, TextCaret, TextDecoration, TextDecorationMetrics, TextDecorationSegment,
+    TextDirection, TextError, TextErrorCode, TextHitResult, TextJustification, TextLayout,
+    TextLayoutOptions, TextOverflow, TextPosition, TextSelectionRect, TextStyleId, TextStyleSpan,
+    TextUnit, TextWordBreak, TextWordBreakKind,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};
@@ -31,3 +32,4 @@ pub use skia_image::{ColorSpace, Image, ImageError, ImageErrorCode};
 pub use skia_path::{
     Angle, ArcDirection, ArcStart, ConicWeight, FillRule, Path, PathBounds, PathBuilder, PathVerb,
 };
+pub use skia_tessellation::stroke_to_path;

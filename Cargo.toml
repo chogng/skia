@@ -37,3 +37,4 @@ skia-error = { path = "error" }
 skia-geometry = { path = "geometry" }
 skia-image = { path = "image" }
 skia-path = { path = "path" }
+skia-tessellation = { path = "tessellation" }

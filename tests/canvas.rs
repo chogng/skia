@@ -1,6 +1,7 @@
 use skia::{
     BlendMode, ClipRect, Color, ConicWeight, FillRule, Image, ImageErrorCode, Paint, PathBuilder,
-    Point, Rect, Scalar, SkiaErrorCode, Surface, SurfaceLimits, Transform,
+    Point, Rect, Scalar, SkiaErrorCode, StrokeCap, StrokeOptions, Surface, SurfaceLimits,
+    Transform, stroke_to_path,
 };
 
 fn scalar(value: i32) -> Scalar {
@@ -290,4 +291,25 @@ fn rgba_images_scale_nearest_neighbor_and_keep_source_color_under_opacity() {
         Image::from_rgba8(2, 2, vec![0; 3]).unwrap_err().code(),
         ImageErrorCode::InvalidPixels
     );
+}
+
+#[test]
+fn stroke_to_path_expands_a_transformed_stroke_for_normal_fill() {
+    let mut builder = PathBuilder::new(2).unwrap();
+    builder.move_to(point(2, 3)).unwrap();
+    builder.line_to(point(8, 3)).unwrap();
+    let options = StrokeOptions::new(scalar(2))
+        .unwrap()
+        .with_cap(StrokeCap::Square);
+    let expanded =
+        stroke_to_path(&builder.finish().unwrap(), &options, Transform::IDENTITY).unwrap();
+    let mut surface = Surface::new(10, 6, SurfaceLimits::default()).unwrap();
+    surface
+        .canvas()
+        .fill_path(&expanded, FillRule::NonZero, Paint::new(Color::WHITE))
+        .unwrap();
+
+    assert_eq!(pixel(&surface, 1, 3), Color::WHITE.channels());
+    assert_eq!(pixel(&surface, 8, 3), Color::WHITE.channels());
+    assert_eq!(pixel(&surface, 0, 3), [0, 0, 0, 0]);
 }
