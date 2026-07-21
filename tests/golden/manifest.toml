@@ -1,0 +1,31 @@
+version = 1
+renderer = "skia-gpu software replay"
+color_space = "sRGB"
+
+[[golden]]
+name = "clip_alpha"
+width = 8
+height = 8
+raw_rgba_sha256 = "515256b6b1ecb8741c4d232aa10d3f449b5e0bb939b79b0d99ab77746d0b276e"
+png_sha256 = "6e7811b0132ca092acff14f3364ae6c41a7003741e4321c1c6305742d000e201"
+
+[[golden]]
+name = "even_odd_path"
+width = 8
+height = 8
+raw_rgba_sha256 = "aa8e346fd397589f7ef88b55238a01150064b7bce93542fe9c5ab83a11bfc42d"
+png_sha256 = "8cfcca2ea3a1c9f98cc72c9fc453e59e5c1953ae098e1953e74b8d9096f1822e"
+
+[[golden]]
+name = "gradient_layer"
+width = 8
+height = 8
+raw_rgba_sha256 = "4c77f35304270137b52a06c48c8abcd49d879151db6bdab377cb65f93a4eb927"
+png_sha256 = "3532ec76dd835a127d4007906b58e7d4eda9f681562f058bdc30e4c4b1f33ea6"
+
+[[golden]]
+name = "linear_image"
+width = 8
+height = 8
+raw_rgba_sha256 = "8ad027aab9a4e8725ecbb7ac929678655a028d8b15dffd4483c1375404e3fc87"
+png_sha256 = "27e5d58d2cddcb314f746ed365787ea580919b1aeb70eedb986427e1a818fd1e"

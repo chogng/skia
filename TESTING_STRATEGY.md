@@ -89,21 +89,21 @@ separate, protected required-hardware job must run on a known device and set
 emulated/absent-device runner.  The ordinary job protects compilation and
 device-less behaviour, while the protected job protects pixel execution.
 
-### Phase 1 — owned scenes and pixel oracle
+### Phase 1 — owned scenes and pixel oracle (initial implementation complete)
 
-Create `tests/render_cases/` containing declarative, repository-authored Rust
-scenes (rectangles, transforms, clips, fill rules, strokes, gradients, image
-sampling, layers, glyph masks).  Create shared helpers under
-`tests/support/` to render a scene through CPU and `skia-gpu` software replay.
-Those two deterministic implementations are the initial pixel oracle and
-should compare exact RGBA8 output plus dimensions.
+`gpu/tests/support/render_cases.rs` now contains four repository-authored scenes that
+exercise clips/alpha, even-odd paths/transforms, layers/gradients, and linear
+image sampling.  `gpu/tests/render_oracle.rs` renders them through CPU and
+`skia-gpu` software replay, requiring exact RGBA8 equality and dimensions.
+`tests/golden/` holds their reviewed raw-pixel/PNG fixtures and manifest.
 
 Introduce `tests/golden/manifest.toml` only for explicitly accepted expected
 images.  Each entry should include renderer version, scene ID, width/height,
 pixel format/color space, SHA-256 of raw RGBA and PNG, and an update reason.
-Provide a `scripts/regenerate_goldens.sh` command that refuses to overwrite
-without `SKIA_UPDATE_GOLDENS=1`, renders in a fixed locale/timezone, and emits
-a JSON diff summary.  Never use PNG-file checksums alone.
+`scripts/regenerate_goldens.sh` refuses to overwrite without
+`SKIA_UPDATE_GOLDENS=1`; it records SHA-256 for raw RGBA and PNG output.
+Never use PNG-file checksums alone.  The next increment should add fixed
+locale/timezone and a JSON diff summary before the scene set grows materially.
 
 ### Phase 2 — backend matrix and tolerances
 

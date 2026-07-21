@@ -12,3 +12,12 @@ skia-image = { path = "../image" }
 
 [features]
 software = ["dep:skia-cpu"]
+
+[dev-dependencies]
+sha2 = "0.10"
+skia-codec = { path = "../codec" }
+
+[[test]]
+name = "render_oracle"
+path = "tests/render_oracle.rs"
+required-features = ["software"]
