@@ -158,8 +158,13 @@ callers record those through generic `fill_rect` commands. This keeps text data
 adaptation separate from command ordering and hardware backends. The Metal
 backend draws transformed/scissored solid rectangles, path-fill masks, Alpha8 masks, and color
 glyphs through real shader pipelines; rectangle and glyph draws can sample
-parent-linked R8 complex-clip masks rendered on the GPU, and these paths
-currently support source-over blending. `StrokePath` shares deterministic
+parent-linked R8 complex-clip masks rendered on the GPU. Destination snapshots
+and programmable compositing cover every backend-neutral blend mode.
+Local-space linear/radial gradients and pre-composite color filters use the
+same paint uniforms across solid, path, stroke, and mask-glyph draws. Real
+RGBA8 layer textures retain isolated command ranges; restore can run a color
+filter or two-pass separable box blur before applying saved bounds, opacity,
+blend mode, and complex clip. `StrokePath` shares deterministic
 normalization, dashing, and cap/join policy with CPU; Metal rasterizes its
 fixed-resolution triangle list to R8 before the final blend and clip.
 `TextAtlasCache` retains

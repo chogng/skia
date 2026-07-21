@@ -11,3 +11,6 @@ skia-core = { path = "../../core", default-features = false }
 skia-gpu = { path = ".." }
 skia-image = { path = "../../image" }
 skia-tessellation = { path = "../../tessellation" }
+
+[dev-dependencies]
+skia-gpu = { path = "..", features = ["software"] }

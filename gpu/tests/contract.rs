@@ -335,8 +335,50 @@ fn gpu_layers_record_boundaries_and_replay_restore_compositing() {
         .unwrap();
     encoder.restore().unwrap();
     let commands = encoder.finish();
-    assert!(matches!(commands.commands()[1], GpuCommand::SaveLayer(_)));
+    assert!(matches!(
+        commands.commands()[1],
+        GpuCommand::SaveLayer { .. }
+    ));
     assert!(matches!(commands.commands()[3], GpuCommand::RestoreLayer));
+
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &commands).unwrap();
+    assert_eq!(pixel(&surface, 0, 0), Color::BLUE.channels());
+    assert_eq!(pixel(&surface, 1, 0), [128, 0, 127, 255]);
+    assert_eq!(pixel(&surface, 2, 0), [128, 0, 127, 255]);
+    assert_eq!(pixel(&surface, 3, 0), Color::BLUE.channels());
+}
+
+#[test]
+fn gpu_layers_snapshot_boundary_transform_and_clip_state() {
+    let mut encoder = GpuCommandEncoder::new(6).unwrap();
+    encoder.clear(Color::BLUE).unwrap();
+    encoder.set_transform(Transform::translate(scalar(1), Scalar::ZERO));
+    encoder.clip_rect(rect(0, 0, 2, 1)).unwrap();
+    encoder
+        .save_layer(
+            SaveLayerOptions::new()
+                .with_bounds(rect(0, 0, 4, 1))
+                .with_opacity(128),
+        )
+        .unwrap();
+    encoder.set_transform(Transform::IDENTITY);
+    encoder
+        .fill_rect(rect(0, 0, 4, 1), Paint::new(Color::RED))
+        .unwrap();
+    encoder.restore().unwrap();
+    let commands = encoder.finish();
+    assert!(matches!(
+        commands.commands()[1],
+        GpuCommand::SaveLayer {
+            transform,
+            scissor: Some(_),
+            ..
+        } if transform == Transform::translate(scalar(1), Scalar::ZERO)
+    ));
 
     let mut backend = SoftwareGpuBackend::default();
     let mut surface = backend

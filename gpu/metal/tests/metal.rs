@@ -1,10 +1,11 @@
 use skia_core::{
-    BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, SamplingOptions, Scalar,
-    StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, Transform,
+    BlendMode, ClipOp, Color, ColorFilter, ColorMatrix, FillRule, Gradient, GradientStop,
+    ImageFilter, Paint, PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar,
+    StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, TileMode, Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandBuffer, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphAtlasKey,
-    GpuGlyphQuad, GpuSurfaceDescriptor,
+    GpuGlyphQuad, GpuSurfaceDescriptor, software::SoftwareGpuBackend,
 };
 use skia_image::Image;
 use skia_metal::{MetalBackend, MetalErrorCode};
@@ -27,33 +28,161 @@ fn metal_backend_allocates_a_native_surface_and_submits_a_clear() {
 }
 
 #[test]
-fn metal_backend_fails_closed_for_unsupported_blend_modes() {
+fn metal_backend_executes_every_blend_mode_against_destination_pixels() {
     let Some(mut backend) = backend_or_skip() else {
         return;
     };
     let mut surface = backend
-        .create_surface(GpuSurfaceDescriptor::new(4, 4).unwrap())
+        .create_surface(GpuSurfaceDescriptor::new(29, 1).unwrap())
         .unwrap();
-    let mut commands = GpuCommandEncoder::new(1).unwrap();
-    commands
-        .fill_rect(
-            Rect::new(
-                Scalar::from_i32(0).unwrap(),
-                Scalar::from_i32(0).unwrap(),
-                Scalar::from_i32(1).unwrap(),
-                Scalar::from_i32(1).unwrap(),
+    let destination = Color::rgba(30, 80, 220, 190);
+    let source = Color::rgba(200, 100, 40, 160);
+    let modes = [
+        BlendMode::Clear,
+        BlendMode::Source,
+        BlendMode::Destination,
+        BlendMode::SourceOver,
+        BlendMode::DestinationOver,
+        BlendMode::SourceIn,
+        BlendMode::DestinationIn,
+        BlendMode::SourceOut,
+        BlendMode::DestinationOut,
+        BlendMode::SourceAtop,
+        BlendMode::DestinationAtop,
+        BlendMode::Xor,
+        BlendMode::Plus,
+        BlendMode::Modulate,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+    ];
+    let mut commands = GpuCommandEncoder::new(30).unwrap();
+    commands.clear(destination).unwrap();
+    for (index, mode) in modes.into_iter().enumerate() {
+        commands
+            .fill_rect(
+                rect(index as i32, 0, index as i32 + 1, 1),
+                Paint::new(source).with_blend_mode(mode),
             )
-            .unwrap(),
-            Paint::new(Color::BLACK).with_blend_mode(BlendMode::Multiply),
+            .unwrap();
+    }
+    backend.submit(&mut surface, &commands.finish()).unwrap();
+    let pixels = surface.read_rgba8().unwrap();
+    for (index, mode) in modes.into_iter().enumerate() {
+        assert_pixel_near(
+            pixel(&pixels, modes.len(), index, 0),
+            source.composite(destination, mode).channels(),
+            4,
+            &format!("{mode:?}"),
+        );
+    }
+}
+
+#[test]
+fn metal_backend_matches_software_for_gradients_filters_and_layers() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let descriptor = GpuSurfaceDescriptor::new(6, 3).unwrap();
+    let stops = [
+        GradientStop::new(Scalar::ZERO, Color::RED).unwrap(),
+        GradientStop::new(Scalar::from_i32(1).unwrap(), Color::BLUE).unwrap(),
+    ];
+    let gradient = Gradient::linear(
+        Point::new(Scalar::ZERO, Scalar::ZERO),
+        Point::new(Scalar::from_i32(6).unwrap(), Scalar::ZERO),
+        &stops,
+        TileMode::Clamp,
+    )
+    .unwrap();
+    let swap_red_blue = ColorMatrix::new([
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+    ]);
+    let mut encoder = GpuCommandEncoder::new(8).unwrap();
+    encoder.clear(Color::BLACK).unwrap();
+    encoder
+        .fill_rect(
+            rect(0, 0, 6, 3),
+            Paint::from_gradient(gradient).with_color_filter(ColorFilter::Matrix(swap_red_blue)),
         )
         .unwrap();
-    assert_eq!(
-        backend
-            .submit(&mut surface, &commands.finish())
-            .unwrap_err()
-            .code(),
-        MetalErrorCode::UnsupportedCommand
-    );
+    encoder
+        .save_layer(
+            SaveLayerOptions::new()
+                .with_bounds(rect(1, 0, 5, 3))
+                .with_opacity(160)
+                .with_filter(ImageFilter::box_blur(1).unwrap()),
+        )
+        .unwrap();
+    encoder
+        .fill_rect(rect(2, 1, 4, 2), Paint::new(Color::WHITE))
+        .unwrap();
+    encoder.restore().unwrap();
+    let image = encoder
+        .add_image(Image::from_rgba8(1, 1, vec![255, 0, 0, 255]).unwrap())
+        .unwrap();
+    encoder
+        .draw_image_with_paint(
+            image,
+            rect(0, 0, 1, 1),
+            128,
+            Paint::new(Color::WHITE).with_color_filter(ColorFilter::Matrix(swap_red_blue)),
+            SamplingOptions::NEAREST,
+        )
+        .unwrap();
+    let commands = encoder.finish();
+
+    let mut expected_backend = SoftwareGpuBackend::default();
+    let mut expected_surface = expected_backend.create_surface(descriptor).unwrap();
+    expected_backend
+        .submit(&mut expected_surface, &commands)
+        .unwrap();
+    let mut metal_surface = backend.create_surface(descriptor).unwrap();
+    backend.submit(&mut metal_surface, &commands).unwrap();
+    let actual = metal_surface.read_rgba8().unwrap();
+    for (index, (actual, expected)) in actual
+        .chunks_exact(4)
+        .zip(expected_surface.pixels().chunks_exact(4))
+        .enumerate()
+    {
+        assert_pixel_near(
+            actual.try_into().unwrap(),
+            expected.try_into().unwrap(),
+            4,
+            &format!("pixel {index}"),
+        );
+    }
 }
 
 #[test]
@@ -534,6 +663,15 @@ fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
 fn pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let offset = (y * width + x) * 4;
     pixels[offset..offset + 4].try_into().unwrap()
+}
+
+fn assert_pixel_near(actual: [u8; 4], expected: [u8; 4], tolerance: u8, context: &str) {
+    for channel in 0..4 {
+        assert!(
+            actual[channel].abs_diff(expected[channel]) <= tolerance,
+            "{context} channel {channel}: actual {actual:?}, expected {expected:?}"
+        );
+    }
 }
 
 fn backend_or_skip() -> Option<MetalBackend> {

@@ -348,7 +348,16 @@ pub enum GpuCommand {
     /// Clears the full render target, without inheriting prior state.
     Clear(Color),
     /// Begins one isolated full-surface layer.
-    SaveLayer(SaveLayerOptions),
+    SaveLayer {
+        /// Restore-time layer policy.
+        options: SaveLayerOptions,
+        /// Logical-to-target transform selected when the layer was recorded.
+        transform: Transform,
+        /// Target-space scissor rectangle active at the layer boundary.
+        scissor: Option<Rect>,
+        /// Tail of the immutable complex-clip chain active at the layer boundary.
+        clip: Option<GpuClipId>,
+    },
     /// Restores and composites the most recent isolated layer.
     RestoreLayer,
     /// Fills one axis-aligned logical rectangle.
@@ -552,10 +561,18 @@ impl GpuCommandEncoder {
     /// Saves state and begins one isolated layer command range.
     pub fn save_layer(&mut self, options: SaveLayerOptions) -> Result<(), GpuCommandError> {
         self.preflight_save()?;
-        self.push_unclipped(GpuCommand::SaveLayer(options))?;
+        let layer = !matches!(self.state.scissor, ClipState::Empty);
+        if layer {
+            self.push_unclipped(GpuCommand::SaveLayer {
+                options,
+                transform: self.state.transform,
+                scissor: self.scissor(),
+                clip: self.state.clip,
+            })?;
+        }
         self.saves.push(GpuSave {
             state: self.state,
-            layer: true,
+            layer,
         });
         Ok(())
     }

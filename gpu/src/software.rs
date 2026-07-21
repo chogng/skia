@@ -66,8 +66,25 @@ impl GpuBackend for SoftwareGpuBackend {
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(color) => canvas.clear(*color),
-                GpuCommand::SaveLayer(options) => canvas.save_layer(*options).map_err(map_error)?,
-                GpuCommand::RestoreLayer => canvas.restore().map_err(map_error)?,
+                GpuCommand::SaveLayer {
+                    options,
+                    transform,
+                    scissor,
+                    clip,
+                } => {
+                    canvas.save().map_err(map_error)?;
+                    if let Err(error) =
+                        apply_state(&mut canvas, commands, *transform, *scissor, *clip)
+                            .and_then(|()| canvas.save_layer(*options))
+                    {
+                        let _ = canvas.restore();
+                        return Err(map_error(error));
+                    }
+                }
+                GpuCommand::RestoreLayer => {
+                    canvas.restore().map_err(map_error)?;
+                    canvas.restore().map_err(map_error)?;
+                }
                 GpuCommand::FillRect {
                     rect,
                     paint,
@@ -196,38 +213,47 @@ fn with_state(
     draw: impl FnOnce(&mut Canvas<'_>) -> Result<(), SkiaError>,
 ) -> Result<(), SoftwareGpuError> {
     canvas.save().map_err(map_error)?;
-    let result = (|| {
-        if let Some(scissor) = scissor {
-            canvas.set_transform(Transform::IDENTITY);
-            canvas.clip_rect(ClipRect::new(scissor))?;
-        }
-        let mut clip_chain = Vec::new();
-        let mut current = clip;
-        while let Some(id) = current {
-            let node = commands.clip_node(id).ok_or_else(invalid_resource)?;
-            clip_chain
-                .try_reserve(1)
-                .map_err(|_| SkiaError::new(skia_core::SkiaErrorCode::AllocationFailed))?;
-            clip_chain.push(node);
-            current = node.parent();
-        }
-        for node in clip_chain.into_iter().rev() {
-            canvas.set_transform(node.transform());
-            match node.geometry() {
-                GpuClipGeometry::Rect(rect) => {
-                    canvas.clip_rect_with_op(ClipRect::new(rect), node.op())?;
-                }
-                GpuClipGeometry::Path { path, rule } => {
-                    let path = commands.path(path).ok_or_else(invalid_resource)?;
-                    canvas.clip_path(path, rule, node.op())?;
-                }
-            }
-        }
-        canvas.set_transform(transform);
-        draw(canvas)
-    })();
+    let result =
+        apply_state(canvas, commands, transform, scissor, clip).and_then(|()| draw(canvas));
     let restore = canvas.restore();
     result.and(restore).map_err(map_error)
+}
+
+fn apply_state(
+    canvas: &mut Canvas<'_>,
+    commands: &GpuCommandBuffer,
+    transform: Transform,
+    scissor: Option<Rect>,
+    clip: Option<GpuClipId>,
+) -> Result<(), SkiaError> {
+    if let Some(scissor) = scissor {
+        canvas.set_transform(Transform::IDENTITY);
+        canvas.clip_rect(ClipRect::new(scissor))?;
+    }
+    let mut clip_chain = Vec::new();
+    let mut current = clip;
+    while let Some(id) = current {
+        let node = commands.clip_node(id).ok_or_else(invalid_resource)?;
+        clip_chain
+            .try_reserve(1)
+            .map_err(|_| SkiaError::new(skia_core::SkiaErrorCode::AllocationFailed))?;
+        clip_chain.push(node);
+        current = node.parent();
+    }
+    for node in clip_chain.into_iter().rev() {
+        canvas.set_transform(node.transform());
+        match node.geometry() {
+            GpuClipGeometry::Rect(rect) => {
+                canvas.clip_rect_with_op(ClipRect::new(rect), node.op())?;
+            }
+            GpuClipGeometry::Path { path, rule } => {
+                let path = commands.path(path).ok_or_else(invalid_resource)?;
+                canvas.clip_path(path, rule, node.op())?;
+            }
+        }
+    }
+    canvas.set_transform(transform);
+    Ok(())
 }
 
 fn invalid_resource() -> SkiaError {
