@@ -105,6 +105,28 @@ fn display_list_records_generic_transform_concatenation() {
 }
 
 #[test]
+fn display_list_records_direct_rectangle_fill() {
+    let mut builder = DisplayListBuilder::new(1).expect("valid limits");
+    let rect = skia_core::Rect::new(
+        Scalar::ZERO,
+        Scalar::ZERO,
+        Scalar::from_i32(3).expect("right"),
+        Scalar::from_i32(2).expect("bottom"),
+    )
+    .expect("rect");
+    let paint = Paint::new(Color::rgba(12, 34, 56, 255));
+
+    builder
+        .fill_rect(rect, paint)
+        .expect("record rectangle fill");
+
+    assert_eq!(
+        builder.finish().commands(),
+        &[DrawCommand::FillRect { rect, paint }]
+    );
+}
+
+#[test]
 fn display_list_records_rect_and_path_clip_operations() {
     let mut builder = DisplayListBuilder::new(3).expect("valid limits");
     let path = builder.add_path(empty_path()).expect("store path");

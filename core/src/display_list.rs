@@ -48,6 +48,13 @@ pub enum DrawCommand {
     SetTransform(Transform),
     /// Concatenates an affine transform onto the current drawing state.
     ConcatTransform(Transform),
+    /// Fills one logical rectangle.
+    FillRect {
+        /// Logical rectangle to fill.
+        rect: Rect,
+        /// Source paint.
+        paint: Paint,
+    },
     /// Fills a registered path.
     FillPath {
         /// Local path resource.
@@ -202,6 +209,10 @@ impl DisplayListBuilder {
     /// Records an affine transform concatenation for following draws.
     pub fn concat_transform(&mut self, transform: Transform) -> Result<(), SkiaError> {
         self.push(DrawCommand::ConcatTransform(transform))
+    }
+    /// Records a fill of one logical rectangle.
+    pub fn fill_rect(&mut self, rect: Rect, paint: Paint) -> Result<(), SkiaError> {
+        self.push(DrawCommand::FillRect { rect, paint })
     }
     /// Records a fill of a registered path.
     pub fn fill_path(
