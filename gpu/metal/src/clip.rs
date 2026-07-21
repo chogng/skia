@@ -15,6 +15,14 @@ use crate::{
     clip_geometry::{ClipEdge, clip_edges, path_edges},
 };
 
+struct MaskInput<'a> {
+    parent: &'a Texture,
+    edges: &'a [ClipEdge],
+    rule: FillRule,
+    op: ClipOp,
+    has_parent: bool,
+}
+
 pub(crate) struct ClipRenderer {
     device: Device,
     pipeline: RenderPipelineState,
@@ -105,11 +113,13 @@ impl ClipRenderer {
             self.encode_mask(
                 command_buffer,
                 &texture,
-                parent,
-                &edges,
-                rule,
-                node.op(),
-                node.parent().is_some(),
+                MaskInput {
+                    parent,
+                    edges: &edges,
+                    rule,
+                    op: node.op(),
+                    has_parent: node.parent().is_some(),
+                },
             )?;
             textures.insert(id, texture);
         }
@@ -132,11 +142,13 @@ impl ClipRenderer {
         self.encode_mask(
             command_buffer,
             &texture,
-            parent.unwrap_or(&self.unclipped),
-            &edges,
-            rule,
-            ClipOp::Intersect,
-            parent.is_some(),
+            MaskInput {
+                parent: parent.unwrap_or(&self.unclipped),
+                edges: &edges,
+                rule,
+                op: ClipOp::Intersect,
+                has_parent: parent.is_some(),
+            },
         )?;
         Ok(texture)
     }
@@ -212,19 +224,16 @@ impl ClipRenderer {
         &self,
         command_buffer: &metal::CommandBufferRef,
         output: &Texture,
-        parent: &Texture,
-        edges: &[ClipEdge],
-        rule: FillRule,
-        op: ClipOp,
-        has_parent: bool,
+        input: MaskInput<'_>,
     ) -> Result<(), MetalError> {
-        let byte_length = edges
+        let byte_length = input
+            .edges
             .len()
             .checked_mul(size_of::<ClipEdge>())
             .and_then(|length| u64::try_from(length).ok())
             .ok_or_else(submission_failed)?;
         let edge_buffer = self.device.new_buffer_with_data(
-            edges.as_ptr().cast(),
+            input.edges.as_ptr().cast(),
             byte_length,
             MTLResourceOptions::CPUCacheModeDefaultCache,
         );
@@ -233,13 +242,13 @@ impl ClipRenderer {
         encoder.set_render_pipeline_state(&self.pipeline);
         encoder.set_fragment_buffer(0, Some(&edge_buffer), 0);
         let uniforms = [
-            u32::try_from(edges.len()).map_err(|_| submission_failed())?,
-            u32::from(rule == FillRule::EvenOdd),
-            u32::from(op == ClipOp::Difference),
-            u32::from(has_parent),
+            u32::try_from(input.edges.len()).map_err(|_| submission_failed())?,
+            u32::from(input.rule == FillRule::EvenOdd),
+            u32::from(input.op == ClipOp::Difference),
+            u32::from(input.has_parent),
         ];
         encoder.set_fragment_bytes(1, size_of::<[u32; 4]>() as u64, uniforms.as_ptr().cast());
-        encoder.set_fragment_texture(0, Some(parent));
+        encoder.set_fragment_texture(0, Some(input.parent));
         encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, 3);
         encoder.end_encoding();
         Ok(())

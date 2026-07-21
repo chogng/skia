@@ -524,11 +524,9 @@ fn color_dodge(source: u32, destination: u32) -> u32 {
     }
 }
 fn color_burn(source: u32, destination: u32) -> u32 {
-    if source == 0 {
-        0
-    } else {
-        255 - ((255 - destination) * 255 / source).min(255)
-    }
+    ((255 - destination) * 255)
+        .checked_div(source)
+        .map_or(0, |value| 255 - value.min(255))
 }
 fn soft_light(source: u32, destination: u32) -> u32 {
     if source <= 127 {
@@ -647,10 +645,10 @@ fn to_u8(value: u32) -> u8 {
     u8::try_from(value.min(255)).unwrap_or(u8::MAX)
 }
 fn integer_sqrt(value: u32) -> u32 {
-    let mut low = 0;
-    let mut high = 256;
+    let mut low = 0_u32;
+    let mut high = 256_u32;
     while low < high {
-        let middle = (low + high + 1) / 2;
+        let middle = (low + high).div_ceil(2);
         if middle * middle <= value {
             low = middle;
         } else {
@@ -749,8 +747,7 @@ mod tests {
             BlendMode::Luminosity,
         ];
         for mode in modes {
-            let color = source.composite(destination, mode);
-            assert!(color.alpha() <= u8::MAX, "{mode:?}");
+            let _color = source.composite(destination, mode);
         }
         assert_eq!(
             Color::rgb(100, 200, 50).composite(Color::rgb(200, 100, 250), BlendMode::Multiply),

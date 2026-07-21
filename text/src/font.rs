@@ -266,22 +266,27 @@ pub struct GlyphBitmap {
     pixels: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
+struct GlyphBitmapPlacement {
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+}
+
 impl GlyphBitmap {
     fn new(
         font: FontId,
         glyph: GlyphId,
         font_size_bits: i32,
-        left: i32,
-        top: i32,
-        width: u32,
-        height: u32,
+        placement: GlyphBitmapPlacement,
         format: GlyphBitmapFormat,
         pixels: Vec<u8>,
     ) -> Result<Self, TextError> {
-        let expected = usize::try_from(width)
+        let expected = usize::try_from(placement.width)
             .ok()
             .and_then(|width| {
-                usize::try_from(height)
+                usize::try_from(placement.height)
                     .ok()
                     .and_then(|height| width.checked_mul(height))
             })
@@ -294,10 +299,10 @@ impl GlyphBitmap {
             font,
             glyph,
             font_size_bits,
-            left,
-            top,
-            width,
-            height,
+            left: placement.left,
+            top: placement.top,
+            width: placement.width,
+            height: placement.height,
             format,
             pixels,
         })
@@ -795,10 +800,12 @@ impl FontFace {
             self.id,
             GlyphId::new(u32::from(glyph)),
             font_size_bits,
-            image.placement.left,
-            image.placement.top,
-            image.placement.width,
-            image.placement.height,
+            GlyphBitmapPlacement {
+                left: image.placement.left,
+                top: image.placement.top,
+                width: image.placement.width,
+                height: image.placement.height,
+            },
             format,
             image.data,
         )

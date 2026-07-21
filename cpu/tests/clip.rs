@@ -60,15 +60,12 @@ fn display_list_rectangle_fill_replays_canvas_transform_and_clip_state() {
         .execute_display_list(&list, &FontCollection::new(FontCollectionLimits::default()))
         .expect("replay");
 
-    assert_eq!(
-        &surface.pixels()[4 * (1 * 6 + 1)..][..4],
-        &[20, 40, 60, 255]
-    );
+    assert_eq!(&surface.pixels()[4 * (6 + 1)..][..4], &[20, 40, 60, 255]);
     assert_eq!(
         &surface.pixels()[4 * (2 * 6 + 3)..][..4],
         &[20, 40, 60, 255]
     );
-    assert_eq!(&surface.pixels()[4 * (1 * 6)..][..4], &[0, 0, 0, 0]);
+    assert_eq!(&surface.pixels()[4 * 6..][..4], &[0, 0, 0, 0]);
     assert_eq!(&surface.pixels()[4 * (4 * 6 + 3)..][..4], &[0, 0, 0, 0]);
 }
 

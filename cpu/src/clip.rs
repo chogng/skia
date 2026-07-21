@@ -33,7 +33,7 @@ pub(crate) fn apply_clip(
     for y in bounds.top..bounds.bottom {
         for x in bounds.left..bounds.right {
             let index = mask_index(width, x, y)?;
-            let was_visible = current.map_or(true, |mask| mask[index] != 0);
+            let was_visible = current.is_none_or(|mask| mask[index] != 0);
             if !was_visible {
                 continue;
             }

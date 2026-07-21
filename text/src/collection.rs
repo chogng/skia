@@ -812,11 +812,13 @@ impl FontCollection {
         self.shape_bidi_range(
             text,
             ParagraphStyle::Uniform(font_size_bits),
-            bidi,
-            paragraph,
-            line,
-            0,
-            language,
+            BidiRangeContext {
+                bidi,
+                paragraph,
+                line,
+                source_offset: 0,
+                language,
+            },
         )
     }
 
@@ -835,11 +837,13 @@ impl FontCollection {
         self.shape_bidi_range(
             text,
             ParagraphStyle::Spans(spans),
-            bidi,
-            paragraph,
-            line,
-            0,
-            language,
+            BidiRangeContext {
+                bidi,
+                paragraph,
+                line,
+                source_offset: 0,
+                language,
+            },
         )
     }
 
@@ -1068,11 +1072,13 @@ impl FontCollection {
         self.shape_bidi_range(
             text,
             ParagraphStyle::Uniform(font_size_bits),
-            &bidi,
-            paragraph,
-            paragraph.range.clone(),
-            0,
-            language,
+            BidiRangeContext {
+                bidi: &bidi,
+                paragraph,
+                line: paragraph.range.clone(),
+                source_offset: 0,
+                language,
+            },
         )
     }
 
@@ -1104,11 +1110,13 @@ impl FontCollection {
         self.shape_bidi_range(
             text,
             ParagraphStyle::Spans(spans),
-            &bidi,
-            paragraph,
-            paragraph.range.clone(),
-            0,
-            language,
+            BidiRangeContext {
+                bidi: &bidi,
+                paragraph,
+                line: paragraph.range.clone(),
+                source_offset: 0,
+                language,
+            },
         )
     }
 
@@ -1116,12 +1124,15 @@ impl FontCollection {
         &self,
         text: &str,
         style: ParagraphStyle<'_>,
-        bidi: &BidiInfo<'_>,
-        paragraph: &ParagraphInfo,
-        line: std::ops::Range<usize>,
-        source_offset: u32,
-        language: Option<&str>,
+        context: BidiRangeContext<'_, '_>,
     ) -> Result<ShapedParagraph, TextError> {
+        let BidiRangeContext {
+            bidi,
+            paragraph,
+            line,
+            source_offset,
+            language,
+        } = context;
         let resolved_base = level_direction(paragraph.level);
         let (levels, visual_runs) = bidi.visual_runs(paragraph, line);
 
@@ -1379,6 +1390,14 @@ struct LogicalSegment {
 enum ParagraphStyle<'a> {
     Uniform(i32),
     Spans(&'a [TextStyleSpan]),
+}
+
+struct BidiRangeContext<'a, 'text> {
+    bidi: &'a BidiInfo<'text>,
+    paragraph: &'a ParagraphInfo,
+    line: std::ops::Range<usize>,
+    source_offset: u32,
+    language: Option<&'a str>,
 }
 
 fn supports_grapheme(face: &FontFace, grapheme: &str) -> Result<bool, TextError> {
