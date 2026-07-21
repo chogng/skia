@@ -1,0 +1,35 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    name: portable Rust and Unicode conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Workspace tests
+        run: cargo test --workspace --all-features
+      - name: Download pinned Unicode conformance data
+        run: scripts/fetch_unicode_conformance.sh
+      - name: Unicode conformance
+        env:
+          SKIA_UNICODE_CONFORMANCE_DIR: target/unicode-conformance
+        run: cargo test -p skia-text --test unicode_conformance -- --ignored
+
+  metal-optional:
+    name: macOS Metal (device optional)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Metal tests
+        run: cargo test -p skia-metal -p skia-gpu-text

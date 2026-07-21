@@ -37,10 +37,7 @@ fn main() {
         println!("cargo:warning={error}; Metal shader library generation skipped");
         return;
     }
-    println!(
-        "cargo:rustc-env=SKIA_METAL_LIBRARY={}",
-        library.display()
-    );
+    println!("cargo:rustc-env=SKIA_METAL_LIBRARY={}", library.display());
 }
 
 fn run<'a>(tool: &str, arguments: impl IntoIterator<Item = &'a str>) -> Result<(), String> {

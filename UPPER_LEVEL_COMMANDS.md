@@ -622,6 +622,12 @@ cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+完整的测试分层、上游 Skia 资产的复用/许可边界、golden 更新协议和 CI 分工见
+[`TESTING_STRATEGY.md`](TESTING_STRATEGY.md)。GitHub Actions 的 portable job 会运行以上
+format、Clippy、workspace tests 和 SHA-256 锁定的 Unicode conformance 下载；macOS job 运行
+Metal 的 device-optional 测试。需要真实设备像素门禁时，必须配置受保护的 macOS runner，并显式
+设置 `SKIA_REQUIRE_METAL_DEVICE=1`；不得把无 device 的跳过当成硬件通过。
+
 只验证上层公开图片 codec 契约时，运行根 crate 的 facade 集成测试；该测试不直接引用
 `skia-codec`、`image` 或具体格式实现 crate：
 
