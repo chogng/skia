@@ -1,10 +1,10 @@
 use skia_core::{
-    Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId, FontLimits,
-    FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphBitmapFormat, GlyphId,
-    GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAffinity,
-    TextAlignment, TextBreakProvider, TextDecoration, TextDecorationStyle, TextDirection,
-    TextError, TextErrorCode, TextJustification, TextLayoutOptions, TextOverflow, TextPosition,
-    TextStyleId, TextStyleSpan, TextWordBreak, TextWordBreakKind, Transform,
+    Color, DisplayListBuilder, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId,
+    FontLimits, FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphBitmapFormat,
+    GlyphId, GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode,
+    TextAffinity, TextAlignment, TextBreakProvider, TextDecoration, TextDecorationStyle,
+    TextDirection, TextError, TextErrorCode, TextJustification, TextLayoutOptions, TextOverflow,
+    TextPosition, TextStyleId, TextStyleSpan, TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -2564,6 +2564,64 @@ fn text_decoration_patterns_share_resolved_cpu_geometry() {
 }
 
 #[test]
+fn display_list_expands_layout_runs_and_decorations_transactionally() {
+    let face = FontFace::from_bytes(
+        FontId::new(118),
+        toy_styled_font(&['A'], "Display Layout", FontStyle::NORMAL),
+    )
+    .expect("decorated font");
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts.add_face(face).expect("add decorated font");
+    let layout = fonts
+        .layout_text(
+            "AA",
+            20 << 16,
+            TextLayoutOptions::new(30 << 16)
+                .expect("options")
+                .with_decoration(TextDecoration::Underline)
+                .with_decoration_style(TextDecorationStyle::Dashed),
+        )
+        .expect("decorated layout");
+    let origin = Point::new(Scalar::ZERO, scalar(1));
+    let paint = Paint::new(Color::BLUE);
+
+    let mut direct = Surface::new(30, 24, SurfaceLimits::default()).expect("direct surface");
+    direct
+        .canvas()
+        .draw_text_layout(&layout, &fonts, origin, paint)
+        .expect("direct layout");
+
+    let mut builder = DisplayListBuilder::new(64).expect("display-list limits");
+    builder
+        .draw_text_layout(&layout, origin, paint)
+        .expect("record layout");
+    let list = builder.finish();
+    let mut replay = Surface::new(30, 24, SurfaceLimits::default()).expect("replay surface");
+    replay
+        .execute_display_list(&list, &fonts)
+        .expect("replay layout");
+    assert_eq!(direct.pixels(), replay.pixels());
+
+    let mut bounded = DisplayListBuilder::new(1).expect("tight limits");
+    assert_eq!(
+        bounded
+            .draw_text_layout(&layout, origin, paint)
+            .expect_err("decoration commands exceed limit")
+            .code(),
+        SkiaErrorCode::ResourceLimit
+    );
+    let run = layout.lines()[0].paragraph().unwrap().runs()[0]
+        .glyph_run()
+        .clone();
+    bounded
+        .add_glyph_run(run)
+        .expect("failed expansion rolls back glyph resources");
+    bounded
+        .clear(Color::TRANSPARENT)
+        .expect("commands rolled back");
+}
+
+#[test]
 fn requested_font_decoration_requires_native_metrics() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
@@ -2698,6 +2756,40 @@ fn styled_layout_resolves_per_span_paints_and_decorations() {
         patterned.lines()[0].decoration_segments()[1].decoration_style(),
         TextDecorationStyle::Dotted
     );
+
+    let undecorated = fonts
+        .layout_styled_text(
+            "AA",
+            &[
+                TextStyleSpan::new(0, 1, FontId::new(121), 20 << 16)
+                    .expect("red glyph span")
+                    .with_style_id(red_style),
+                TextStyleSpan::new(1, 2, FontId::new(121), 20 << 16)
+                    .expect("blue glyph span")
+                    .with_style_id(blue_style),
+            ],
+            TextLayoutOptions::new(30 << 16).expect("undecorated options"),
+        )
+        .expect("undecorated styled layout");
+    let resolver = |style| match style {
+        value if value == red_style => Some(red),
+        value if value == blue_style => Some(blue),
+        _ => None,
+    };
+    Surface::new(30, 24, SurfaceLimits::default())
+        .expect("undecorated surface")
+        .canvas()
+        .draw_text_layout_with_styles(
+            &undecorated,
+            &fonts,
+            Point::new(Scalar::ZERO, scalar(1)),
+            &resolver,
+        )
+        .expect("glyph-only styled layout does not resolve default decoration paint");
+    DisplayListBuilder::new(16)
+        .expect("display-list limits")
+        .draw_text_layout_with_styles(&undecorated, Point::new(Scalar::ZERO, scalar(1)), &resolver)
+        .expect("glyph-only display list does not resolve default decoration paint");
 }
 
 fn scalar(value: i32) -> Scalar {

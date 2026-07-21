@@ -1,10 +1,15 @@
+#[cfg(feature = "text")]
+use crate::Point;
 use crate::{
     ClipOp, Color, FillRule, Paint, Path, Rect, SamplingOptions, Scalar, SkiaError, SkiaErrorCode,
     StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
 use skia_image::Image;
 #[cfg(feature = "text")]
-use skia_text::GlyphRun;
+use skia_text::{
+    GlyphRun, ShapedParagraph, TextDecorationMetrics, TextDecorationStyle, TextErrorCode,
+    TextLayout, TextStyleId, text_decoration_rects,
+};
 
 /// Command-buffer-local identifier for an immutable path resource.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -91,6 +96,18 @@ pub enum DrawCommand {
     DrawGlyphRun {
         /// Local shaped glyph-run resource.
         run: GlyphRunId,
+        /// Source paint and blend mode.
+        paint: Paint,
+    },
+    /// Draws one registered glyph run at a logical origin with per-glyph layout offsets.
+    #[cfg(feature = "text")]
+    DrawPositionedGlyphRun {
+        /// Local shaped glyph-run resource.
+        run: GlyphRunId,
+        /// Logical baseline origin applied before glyph positioning.
+        origin: Point,
+        /// Q16.16 horizontal layout offset paired with every glyph.
+        offsets_x_bits: Vec<i32>,
         /// Source paint and blend mode.
         paint: Paint,
     },
@@ -283,6 +300,233 @@ impl DisplayListBuilder {
     pub fn draw_glyph_run(&mut self, run: GlyphRunId, paint: Paint) -> Result<(), SkiaError> {
         self.push(DrawCommand::DrawGlyphRun { run, paint })
     }
+    /// Records one positioned glyph run with one Q16.16 offset per glyph.
+    #[cfg(feature = "text")]
+    pub fn draw_positioned_glyph_run(
+        &mut self,
+        run: GlyphRunId,
+        origin: Point,
+        offsets_x_bits: Vec<i32>,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        let glyphs = self
+            .glyph_runs
+            .get(
+                usize::try_from(run.0)
+                    .map_err(|_| SkiaError::new(SkiaErrorCode::InvalidResource))?,
+            )
+            .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+        if offsets_x_bits.len() != glyphs.glyphs().len() {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidResource));
+        }
+        self.push(DrawCommand::DrawPositionedGlyphRun {
+            run,
+            origin,
+            offsets_x_bits,
+            paint,
+        })
+    }
+
+    /// Expands one shaped paragraph into positioned glyph-run commands.
+    #[cfg(feature = "text")]
+    pub fn draw_shaped_paragraph(
+        &mut self,
+        paragraph: &ShapedParagraph,
+        origin: Point,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        self.draw_shaped_paragraph_with_styles(paragraph, origin, &|_| Some(paint))
+    }
+
+    /// Expands one shaped paragraph with caller-resolved per-run paints.
+    #[cfg(feature = "text")]
+    pub fn draw_shaped_paragraph_with_styles(
+        &mut self,
+        paragraph: &ShapedParagraph,
+        origin: Point,
+        paint_for_style: &impl Fn(TextStyleId) -> Option<Paint>,
+    ) -> Result<(), SkiaError> {
+        self.record_text_transaction(|builder| {
+            builder.record_shaped_paragraph(paragraph, origin, paint_for_style)
+        })
+    }
+
+    /// Expands a text layout into positioned glyph runs and decoration rectangles.
+    #[cfg(feature = "text")]
+    pub fn draw_text_layout(
+        &mut self,
+        layout: &TextLayout,
+        origin: Point,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        self.draw_text_layout_with_styles(layout, origin, &|_| Some(paint))
+    }
+
+    /// Expands a text layout using caller-resolved glyph and decoration paints.
+    #[cfg(feature = "text")]
+    pub fn draw_text_layout_with_styles(
+        &mut self,
+        layout: &TextLayout,
+        origin: Point,
+        paint_for_style: &impl Fn(TextStyleId) -> Option<Paint>,
+    ) -> Result<(), SkiaError> {
+        self.record_text_transaction(|builder| {
+            for line in layout.lines() {
+                let Some(paragraph) = line.paragraph() else {
+                    continue;
+                };
+                let line_x = origin
+                    .x()
+                    .bits()
+                    .checked_add(line.offset_x_bits())
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                let baseline_y = origin
+                    .y()
+                    .bits()
+                    .checked_add(line.baseline_y_bits())
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                builder.record_shaped_paragraph(
+                    paragraph,
+                    Point::new(Scalar::from_bits(line_x), Scalar::from_bits(baseline_y)),
+                    paint_for_style,
+                )?;
+                if line.advance_x_bits() <= 0 {
+                    continue;
+                }
+                if line.decoration_segments().is_empty() {
+                    let metrics = [line.underline_metrics(), line.strike_through_metrics()];
+                    if metrics.iter().all(Option::is_none) {
+                        continue;
+                    }
+                    let paint = paint_for_style(TextStyleId::DEFAULT)
+                        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+                    let right = line_x
+                        .checked_add(line.advance_x_bits())
+                        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                    for metrics in metrics.into_iter().flatten() {
+                        builder.record_decoration_rects(
+                            line_x,
+                            right,
+                            baseline_y,
+                            metrics,
+                            line.decoration_style(),
+                            paint,
+                        )?;
+                    }
+                } else {
+                    for segment in line.decoration_segments() {
+                        let paint = paint_for_style(segment.style_id())
+                            .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+                        let left = line_x
+                            .checked_add(segment.left_bits())
+                            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                        let right = line_x
+                            .checked_add(segment.right_bits())
+                            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                        for metrics in [
+                            segment.underline_metrics(),
+                            segment.strike_through_metrics(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            builder.record_decoration_rects(
+                                left,
+                                right,
+                                baseline_y,
+                                metrics,
+                                segment.decoration_style(),
+                                paint,
+                            )?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(feature = "text")]
+    fn record_text_transaction<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, SkiaError>,
+    ) -> Result<T, SkiaError> {
+        let command_count = self.commands.len();
+        let glyph_run_count = self.glyph_runs.len();
+        let result = operation(self);
+        if result.is_err() {
+            self.commands.truncate(command_count);
+            self.glyph_runs.truncate(glyph_run_count);
+        }
+        result
+    }
+
+    #[cfg(feature = "text")]
+    fn record_shaped_paragraph(
+        &mut self,
+        paragraph: &ShapedParagraph,
+        origin: Point,
+        paint_for_style: &impl Fn(TextStyleId) -> Option<Paint>,
+    ) -> Result<(), SkiaError> {
+        for shaped in paragraph.runs() {
+            let paint = paint_for_style(shaped.style_id())
+                .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+            let run = shaped.glyph_run();
+            if shaped.glyph_offsets_x_bits().len() != run.glyphs().len() {
+                return Err(SkiaError::new(SkiaErrorCode::InvalidResource));
+            }
+            let run_x = origin
+                .x()
+                .bits()
+                .checked_add(shaped.origin_x_bits())
+                .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+            let mut offsets_x_bits = Vec::new();
+            offsets_x_bits
+                .try_reserve_exact(shaped.glyph_offsets_x_bits().len())
+                .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
+            offsets_x_bits.extend_from_slice(shaped.glyph_offsets_x_bits());
+            let run = self.add_glyph_run(run.clone())?;
+            self.draw_positioned_glyph_run(
+                run,
+                Point::new(Scalar::from_bits(run_x), origin.y()),
+                offsets_x_bits,
+                paint,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "text")]
+    fn record_decoration_rects(
+        &mut self,
+        left_bits: i32,
+        right_bits: i32,
+        baseline_bits: i32,
+        metrics: TextDecorationMetrics,
+        style: TextDecorationStyle,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        for rect in text_decoration_rects(left_bits, right_bits, baseline_bits, metrics, style)
+            .map_err(|error| match error.code() {
+                TextErrorCode::NumericOverflow => SkiaError::new(SkiaErrorCode::NumericOverflow),
+                TextErrorCode::ResourceLimit => SkiaError::new(SkiaErrorCode::ResourceLimit),
+                TextErrorCode::AllocationFailed => SkiaError::new(SkiaErrorCode::AllocationFailed),
+                _ => SkiaError::new(SkiaErrorCode::InvalidResource),
+            })?
+        {
+            self.fill_rect(
+                Rect::new(
+                    Scalar::from_bits(rect.left_bits()),
+                    Scalar::from_bits(rect.top_bits()),
+                    Scalar::from_bits(rect.right_bits()),
+                    Scalar::from_bits(rect.bottom_bits()),
+                )?,
+                paint,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Records one command.
     pub fn push(&mut self, command: DrawCommand) -> Result<(), SkiaError> {
         if self.commands.len() == self.max_items {

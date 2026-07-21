@@ -119,6 +119,9 @@ OpenType face; final visual segments track alignment and justification and stay
 continuous across compatible fallback runs. A backend-neutral fixed-point
 geometry builder expands every pattern into bounded rectangle strips, which
 CPU layout drawing resolves with each segment's style paint after glyph outlines.
+Display-list paragraph and layout helpers transactionally expand the same
+positioned runs and decoration strips into portable commands, rolling back the
+whole expansion if paint resolution, coordinates, or resource budgets fail.
 `TextLayout` also maps layout-local points to editable UTF-8 boundaries and
 resolves source positions back to vertical carets. Font-provided OpenType GDEF
 ligature caret coordinates add internal stops without dividing shaping output.

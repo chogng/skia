@@ -200,6 +200,23 @@ impl Surface {
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
                     canvas.draw_glyph_run(run, glyphs, *paint)?;
                 }
+                DrawCommand::DrawPositionedGlyphRun {
+                    run,
+                    origin,
+                    offsets_x_bits,
+                    paint,
+                } => {
+                    let run = list
+                        .glyph_run(*run)
+                        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+                    canvas.draw_positioned_glyph_run(
+                        run,
+                        offsets_x_bits,
+                        *origin,
+                        glyphs,
+                        *paint,
+                    )?;
+                }
             }
         }
         Ok(())
@@ -457,6 +474,41 @@ impl Canvas<'_> {
         Ok(())
     }
 
+    /// Draws a glyph run at a baseline origin with one Q16.16 offset per glyph.
+    pub fn draw_positioned_glyph_run(
+        &mut self,
+        run: &GlyphRun,
+        offsets_x_bits: &[i32],
+        origin: Point,
+        provider: &impl GlyphOutlineProvider,
+        paint: Paint,
+    ) -> Result<(), SkiaError> {
+        if offsets_x_bits.len() != run.glyphs().len() {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidResource));
+        }
+        self.save()?;
+        let draw = (|| {
+            self.concat(Transform::translate(origin.x(), origin.y()))?;
+            let mut applied_offset_bits = 0_i32;
+            for (glyph, offset_bits) in run.glyphs().iter().zip(offsets_x_bits) {
+                let delta_bits = offset_bits
+                    .checked_sub(applied_offset_bits)
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+                if delta_bits != 0 {
+                    self.concat(Transform::translate(
+                        Scalar::from_bits(delta_bits),
+                        Scalar::ZERO,
+                    ))?;
+                    applied_offset_bits = *offset_bits;
+                }
+                self.draw_positioned_glyph(run, *glyph, provider, paint)?;
+            }
+            Ok(())
+        })();
+        let restore = self.restore();
+        draw.and(restore)
+    }
+
     /// Draws all visual runs of one shaped paragraph at a common baseline origin.
     ///
     /// Each run is translated by its Q16.16 paragraph origin before using the
@@ -493,37 +545,18 @@ impl Canvas<'_> {
         for shaped in paragraph.runs() {
             let paint = paint_for_style(shaped.style_id())
                 .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-            self.save()?;
-            let draw = (|| {
-                let run_origin_bits = origin
-                    .x()
-                    .bits()
-                    .checked_add(shaped.origin_x_bits())
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                let run_origin = Scalar::from_bits(run_origin_bits);
-                self.concat(Transform::translate(run_origin, origin.y()))?;
-                let run = shaped.glyph_run();
-                if shaped.glyph_offsets_x_bits().len() != run.glyphs().len() {
-                    return Err(SkiaError::new(SkiaErrorCode::InvalidResource));
-                }
-                let mut applied_offset_bits = 0_i32;
-                for (glyph, offset_bits) in run.glyphs().iter().zip(shaped.glyph_offsets_x_bits()) {
-                    let delta_bits = offset_bits
-                        .checked_sub(applied_offset_bits)
-                        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                    if delta_bits != 0 {
-                        self.concat(Transform::translate(
-                            Scalar::from_bits(delta_bits),
-                            Scalar::ZERO,
-                        ))?;
-                        applied_offset_bits = *offset_bits;
-                    }
-                    self.draw_positioned_glyph(run, *glyph, provider, paint)?;
-                }
-                Ok(())
-            })();
-            let restore = self.restore();
-            draw.and(restore)?;
+            let run_origin_bits = origin
+                .x()
+                .bits()
+                .checked_add(shaped.origin_x_bits())
+                .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+            self.draw_positioned_glyph_run(
+                shaped.glyph_run(),
+                shaped.glyph_offsets_x_bits(),
+                Point::new(Scalar::from_bits(run_origin_bits), origin.y()),
+                provider,
+                paint,
+            )?;
         }
         Ok(())
     }
@@ -584,12 +617,13 @@ impl Canvas<'_> {
                 continue;
             }
             if line.decoration_segments().is_empty() {
+                let metrics = [line.underline_metrics(), line.strike_through_metrics()];
+                if metrics.iter().all(Option::is_none) {
+                    continue;
+                }
                 let paint = paint_for_style(TextStyleId::DEFAULT)
                     .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                for metrics in [line.underline_metrics(), line.strike_through_metrics()]
-                    .into_iter()
-                    .flatten()
-                {
+                for metrics in metrics.into_iter().flatten() {
                     self.draw_decoration_line(
                         line_origin_bits,
                         line_origin_bits

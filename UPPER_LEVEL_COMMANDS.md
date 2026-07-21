@@ -141,9 +141,9 @@ layout-wide decoration 和 layout-wide decoration style。颜色仍属于 `Paint
 CPU 即时绘制使用
 `Canvas::draw_shaped_paragraph(&paragraph, &collection, baseline_origin, paint)`。它逐个应用 run
 origin，且成功或失败都会恢复 canvas 状态。单 run 仍可调用
-`Canvas::draw_glyph_run(&run, &face, paint)`。DisplayList 当前没有专用 paragraph 命令；上层
-录制时需登记每个 `GlyphRun`，并按 `ShapedRun::origin_x_bits` 录制相应 save/transform/draw/
-restore 命令。
+`Canvas::draw_glyph_run(&run, &face, paint)`。DisplayList 不增加 paragraph 专用执行命令，但
+`DisplayListBuilder::draw_shaped_paragraph[_with_styles]` 会事务性展开为定位 run；任何 paint、坐标、
+资源或命令预算失败都会回滚本次展开。
 
 多行文本先用 `FontFace::metrics(font_size_bits)` 获取单字体 Q16.16 ascent、descent 和 line
 gap；通常直接创建 `TextLayoutOptions::new(max_width_bits)`，再调用
@@ -272,8 +272,8 @@ left/right、字体原生 metrics 和最终线型；CPU 会使用对应 span pai
 给出非正 thickness 时返回 `InvalidFontData`。空行不产生装饰，也不要求字体提供指标。
 `text_decoration_rects` 在文本层按 Q16.16 指标统一生成有资源上限的 Solid/Dashed/Dotted/Wavy
 矩形条带；CPU 和 GPU text adapter 共用节距、相位与波形规则。`Canvas::draw_text_layout` 在 glyph
-之后用解析出的 span `Paint` 绘制这些条带。当前仍没有专用 DisplayList layout 命令；上层若展开录制，
-可直接使用相同的固定点装饰几何。
+之后用解析出的 span `Paint` 绘制这些条带。`DisplayListBuilder::draw_text_layout[_with_styles]`
+会使用相同几何，把 glyph 录成定位 run、把装饰录成 `FillRect`，同时保留事务性失败语义。
 
 `FontFace` 内部使用纯 Rust `rustybuzz` 完成 shaping，并通过其 `ttf-parser` 解析矢量轮廓；
 字体字节由 face 自身不可变持有。轮廓的字体坐标会转换为 canvas 向下为正的坐标，再复用普通
@@ -366,7 +366,7 @@ adapter 补齐测试文件采用的 regex-number tailoring，以及依赖 pair t
 | 填充路径 | `fill_path` | `fill_path` | `fill_path` |
 | 描边路径 | `stroke_path`、`stroke_path_with_options` | `stroke_path`、`stroke_path_with_options` | `stroke_path`（显式 `StrokeOptions`） |
 | 绘制位图 | `draw_image`、`draw_image_with_sampling` | `draw_image`、`draw_image_with_sampling` | `draw_image`、`draw_image_with_sampling` |
-| 绘制文字 | `draw_glyph_run`、`draw_shaped_paragraph`、`draw_text_layout` | `draw_glyph_run`（paragraph/layout 需展开） | `TextAtlas::layout_quads` + `draw_glyph_batch` |
+| 绘制文字 | `draw_glyph_run`、`draw_shaped_paragraph`、`draw_text_layout` | `draw_glyph_run`、`draw_positioned_glyph_run`、`draw_shaped_paragraph`、`draw_text_layout` | `layout_outline_batches` + `fill_path` 或 `TextAtlas::layout_quads` + `draw_glyph_batch` |
 | 当前实际硬件后端 | CPU 可用 | CPU 可用 | Metal 支持 `clear`、SourceOver `FillRect` / `FillPath` / `StrokePath`、atlas glyph batch 与复杂裁剪；Vulkan 骨架支持真实离屏 `clear`/readback |
 
 因此，`Canvas` 是现阶段下层命令最完整、也是语义参考实现；`DisplayList` 适合由上层
@@ -447,6 +447,11 @@ adapter 补齐测试文件采用的 regex-number tailoring，以及依赖 pair t
 | `StrokePath` / `stroke_path`、`stroke_path_with_options` | `PathId`、`StrokeOptions`、`Paint` | 兼容入口生成 round/round options；显式入口保留完整 cap/join/miter/dash 几何。 |
 | `DrawImage` / `draw_image`、`draw_image_with_sampling` | `ImageId`、目标 `Rect`、`u8` opacity、`Paint`、`SamplingOptions` | 兼容入口记录 Nearest；显式入口保留 Nearest/Linear，回放使用 `paint.blend_mode()`。 |
 | `DrawGlyphRun` / `draw_glyph_run` | `GlyphRunId`、`Paint` | 绘制已登记的整形字形序列。 |
+| `DrawPositionedGlyphRun` / `draw_positioned_glyph_run` | `GlyphRunId`、baseline origin、每 glyph Q16.16 X offset、`Paint` | 保留 line/run origin 与 justification 位移；paragraph/layout 便利入口以它为执行原语。 |
+
+`draw_shaped_paragraph[_with_styles]` 与 `draw_text_layout[_with_styles]` 是 builder 便利入口：前者
+登记并定位每个 visual run，后者再把 Solid/Dashed/Dotted/Wavy 装饰展开为普通 `FillRect`。
+高层展开是事务性的，失败不会遗留部分命令或孤立 glyph resource。
 
 资源须先经 `add_path`、`add_image` 或 `add_glyph_run` 登记，取得仅在该列表中有效的 ID；
 `finish()` 后发布列表。构建器的 `max_items` 同时限制**命令数及每一种资源数**。
@@ -598,6 +603,7 @@ cargo test --test codec_api
 cargo test -p skia-text -p skia-core -p skia-cpu --tests
 cargo test -p skia-text decoration::tests::patterns_expand_with_deterministic_phase -- --exact
 cargo test -p skia-cpu --test font text_decoration_patterns_share_resolved_cpu_geometry -- --exact
+cargo test -p skia-cpu --test font display_list_expands_layout_runs_and_decorations_transactionally -- --exact
 cargo test -p skia-gpu-text --test adapter text_adapter_expands_all_decoration_patterns -- --exact
 ```
 
