@@ -136,8 +136,10 @@ back to three periods without consuming source bytes.
 
 System-font discovery, generic-family mapping, variable-font instance selection,
 language-specific font selection, dictionary data and algorithms, and broader
-paragraph formatting remain upper text-layout responsibilities. GPU glyph
-atlases are available through the separate `skia-gpu-text` adapter:
+paragraph formatting remain upper text-layout responsibilities. GPU vector and
+atlas text adaptation are available through the separate `skia-gpu-text` adapter.
+`layout_outline_batches` converts positioned outlines into ordinary target-space
+paths for generic `fill_path` commands. For bitmap text,
 `TextAtlasBuilder` rasterizes and packs a `TextLayout`, and `TextAtlas` converts
 layout positions into owned generic quads without borrowing an encoder. The
 caller then explicitly registers `into_gpu_atlas()` and records the quads with

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use skia_core::{TextError, TextErrorCode};
+use skia_core::{SkiaError, SkiaErrorCode, TextError, TextErrorCode};
 use skia_gpu::{GpuCommandError, GpuCommandErrorCode};
 
 /// Stable machine-readable text-to-GPU adapter failure.
@@ -54,6 +54,18 @@ impl From<GpuCommandError> for TextGpuError {
             | GpuCommandErrorCode::RestoreUnderflow
             | GpuCommandErrorCode::UnsupportedTransform
             | GpuCommandErrorCode::InvalidResource => TextGpuErrorCode::InvalidResource,
+        };
+        Self::new(code)
+    }
+}
+
+impl From<SkiaError> for TextGpuError {
+    fn from(error: SkiaError) -> Self {
+        let code = match error.code() {
+            SkiaErrorCode::NumericOverflow => TextGpuErrorCode::NumericOverflow,
+            SkiaErrorCode::ResourceLimit => TextGpuErrorCode::ResourceLimit,
+            SkiaErrorCode::AllocationFailed => TextGpuErrorCode::AllocationFailed,
+            _ => TextGpuErrorCode::InvalidResource,
         };
         Self::new(code)
     }

@@ -12,6 +12,8 @@ mod clip;
 mod display_list;
 mod paint;
 mod sampling;
+#[cfg(feature = "text")]
+mod text_path;
 
 pub use clip::ClipOp;
 #[cfg(feature = "text")]
@@ -37,3 +39,5 @@ pub use skia_text::{
     TextPosition, TextSelectionRect, TextStyleId, TextStyleSpan, TextUnit, TextWordBreak,
     TextWordBreakKind, text_decoration_rects,
 };
+#[cfg(feature = "text")]
+pub use text_path::glyph_outline_path;

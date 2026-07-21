@@ -24,7 +24,7 @@ pub use skia_core::{
     TextDecorationMetrics, TextDecorationRect, TextDecorationSegment, TextDecorationStyle,
     TextDirection, TextError, TextErrorCode, TextHitResult, TextJustification, TextLayout,
     TextLayoutOptions, TextOverflow, TextPosition, TextSelectionRect, TextStyleId, TextStyleSpan,
-    TextUnit, TextWordBreak, TextWordBreakKind, text_decoration_rects,
+    TextUnit, TextWordBreak, TextWordBreakKind, glyph_outline_path, text_decoration_rects,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};

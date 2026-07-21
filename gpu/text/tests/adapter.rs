@@ -3,12 +3,13 @@ mod support;
 use std::sync::Arc;
 
 use skia_core::{
-    Color, FontCollection, FontCollectionLimits, FontFace, FontId, Paint, Point, Scalar,
+    Color, FillRule, FontCollection, FontCollectionLimits, FontFace, FontId, Paint, Point, Scalar,
     TextDecoration, TextDecorationStyle, TextLayoutOptions, TextStyleId, TextStyleSpan,
 };
 use skia_gpu::{GpuBackend, GpuCommand, GpuCommandEncoder, GpuSurfaceDescriptor};
 use skia_gpu_text::{
-    TextAtlasBuilder, TextAtlasCache, TextAtlasCacheLimits, TextGlyphKey, layout_decoration_batches,
+    TextAtlasBuilder, TextAtlasCache, TextAtlasCacheLimits, TextGlyphKey,
+    layout_decoration_batches, layout_outline_batches,
 };
 
 use support::{toy_font, toy_font_with_decorations};
@@ -83,6 +84,58 @@ fn text_adapter_shapes_packs_and_replays_layout_glyphs() {
         commands.commands()[1],
         GpuCommand::DrawGlyphs { ref glyphs, .. } if glyphs.len() == 2
     ));
+
+    let mut backend = skia_gpu::software::SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(32, 16).expect("surface descriptor"))
+        .expect("surface");
+    backend.submit(&mut surface, &commands).expect("replay");
+    assert!(
+        surface
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[2] > 0 && pixel[3] > 0)
+    );
+}
+
+#[test]
+fn text_adapter_emits_vector_outlines_as_generic_paths() {
+    let face = FontFace::from_bytes(FontId::new(95), toy_font('A')).expect("load toy font");
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts.add_face(face).expect("register face");
+    let layout = fonts
+        .layout_text(
+            "AA",
+            12 << 16,
+            TextLayoutOptions::new(32 << 16).expect("layout options"),
+        )
+        .expect("layout text");
+    let batches = layout_outline_batches(&layout, &fonts, Point::new(Scalar::ZERO, Scalar::ZERO))
+        .expect("outline batches");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].style_id(), TextStyleId::DEFAULT);
+    assert_eq!(batches[0].paths().len(), 2);
+
+    let mut encoder = GpuCommandEncoder::new(4).expect("encoder");
+    encoder.clear(Color::TRANSPARENT).expect("clear");
+    for batch in batches {
+        assert_eq!(batch.style_id(), TextStyleId::DEFAULT);
+        for path in batch.into_paths() {
+            let path = encoder.add_path(path).expect("register glyph path");
+            encoder
+                .fill_path(path, FillRule::NonZero, Paint::new(Color::BLUE))
+                .expect("record glyph path");
+        }
+    }
+    let commands = encoder.finish();
+    assert_eq!(
+        commands
+            .commands()
+            .iter()
+            .filter(|command| matches!(command, GpuCommand::FillPath { .. }))
+            .count(),
+        2
+    );
 
     let mut backend = skia_gpu::software::SoftwareGpuBackend::default();
     let mut surface = backend
