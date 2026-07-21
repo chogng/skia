@@ -120,6 +120,7 @@ impl GpuBackend for SoftwareGpuBackend {
                     image,
                     destination,
                     opacity,
+                    sampling,
                     blend_mode,
                     transform,
                     scissor,
@@ -132,7 +133,15 @@ impl GpuBackend for SoftwareGpuBackend {
                         *transform,
                         *scissor,
                         *clip,
-                        |canvas| canvas.draw_image(image, *destination, *opacity, *blend_mode),
+                        |canvas| {
+                            canvas.draw_image_with_sampling(
+                                image,
+                                *destination,
+                                *opacity,
+                                *blend_mode,
+                                *sampling,
+                            )
+                        },
                     )?
                 }
                 GpuCommand::DrawGlyphs {

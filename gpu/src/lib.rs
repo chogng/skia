@@ -16,7 +16,8 @@ pub mod software;
 use std::fmt;
 
 use skia_core::{
-    BlendMode, ClipOp, Color, FillRule, Paint, Path, Point, Rect, StrokeOptions, Transform,
+    BlendMode, ClipOp, Color, FillRule, Paint, Path, Point, Rect, SamplingOptions, StrokeOptions,
+    Transform,
 };
 use skia_image::Image;
 
@@ -397,6 +398,8 @@ pub enum GpuCommand {
         destination: Rect,
         /// Additional straight-alpha opacity multiplier.
         opacity: u8,
+        /// Reconstruction filter and edge behavior.
+        sampling: SamplingOptions,
         /// Compositing operation for the source image.
         blend_mode: BlendMode,
         /// Logical-to-target transform selected when the command was recorded.
@@ -683,6 +686,24 @@ impl GpuCommandEncoder {
         opacity: u8,
         blend_mode: BlendMode,
     ) -> Result<(), GpuCommandError> {
+        self.draw_image_with_sampling(
+            image,
+            destination,
+            opacity,
+            blend_mode,
+            SamplingOptions::NEAREST,
+        )
+    }
+
+    /// Records one draw of a registered RGBA8 image with explicit sampling.
+    pub fn draw_image_with_sampling(
+        &mut self,
+        image: GpuImageId,
+        destination: Rect,
+        opacity: u8,
+        blend_mode: BlendMode,
+        sampling: SamplingOptions,
+    ) -> Result<(), GpuCommandError> {
         if self.image(image).is_none() {
             return Err(GpuCommandError::new(GpuCommandErrorCode::InvalidResource));
         }
@@ -690,6 +711,7 @@ impl GpuCommandEncoder {
             image,
             destination,
             opacity,
+            sampling,
             blend_mode,
             transform: self.state.transform,
             scissor: self.scissor(),

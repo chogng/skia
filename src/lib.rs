@@ -18,12 +18,12 @@ pub use skia_core::{
     BlendMode, ClipOp, Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId,
     FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation, FontVariationAxis,
     FontWidth, GlyphBitmap, GlyphBitmapFormat, GlyphId, GlyphOutline, GlyphOutlineProvider,
-    GlyphRun, OutlinePoint, OutlineSegment, Paint, PositionedGlyph, ShapedLine, ShapedParagraph,
-    ShapedRun, StrokeCap, StrokeJoin, StrokeOptions, TextAffinity, TextAlignment,
-    TextBreakProvider, TextCaret, TextDecoration, TextDecorationMetrics, TextDecorationSegment,
-    TextDirection, TextError, TextErrorCode, TextHitResult, TextJustification, TextLayout,
-    TextLayoutOptions, TextOverflow, TextPosition, TextSelectionRect, TextStyleId, TextStyleSpan,
-    TextUnit, TextWordBreak, TextWordBreakKind,
+    GlyphRun, OutlinePoint, OutlineSegment, Paint, PositionedGlyph, SamplingFilter,
+    SamplingOptions, ShapedLine, ShapedParagraph, ShapedRun, StrokeCap, StrokeJoin, StrokeOptions,
+    TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecoration,
+    TextDecorationMetrics, TextDecorationSegment, TextDirection, TextError, TextErrorCode,
+    TextHitResult, TextJustification, TextLayout, TextLayoutOptions, TextOverflow, TextPosition,
+    TextSelectionRect, TextStyleId, TextStyleSpan, TextUnit, TextWordBreak, TextWordBreakKind,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};

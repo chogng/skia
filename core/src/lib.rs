@@ -11,12 +11,14 @@
 mod clip;
 mod display_list;
 mod paint;
+mod sampling;
 
 pub use clip::ClipOp;
 #[cfg(feature = "text")]
 pub use display_list::GlyphRunId;
 pub use display_list::{DisplayList, DisplayListBuilder, DrawCommand, ImageId, PathId};
 pub use paint::{BlendMode, Color, Paint};
+pub use sampling::{SamplingFilter, SamplingOptions};
 pub use skia_error::{SkiaError, SkiaErrorCode};
 pub use skia_geometry::{Point, Rect, Scalar, Transform};
 pub use skia_path::{

@@ -1,9 +1,10 @@
 use skia_core::{
-    ClipOp, Color, DisplayListBuilder, DrawCommand, FillRule, Paint, Scalar, SkiaErrorCode,
-    StrokeCap, StrokeJoin, StrokeOptions, Transform,
+    ClipOp, Color, DisplayListBuilder, DrawCommand, FillRule, Paint, SamplingOptions, Scalar,
+    SkiaErrorCode, StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
 #[cfg(feature = "text")]
 use skia_core::{FontId, GlyphId, GlyphRun, PositionedGlyph, TextUnit};
+use skia_image::Image;
 
 #[cfg(feature = "text")]
 fn glyph_run() -> GlyphRun {
@@ -123,6 +124,36 @@ fn display_list_records_direct_rectangle_fill() {
     assert_eq!(
         builder.finish().commands(),
         &[DrawCommand::FillRect { rect, paint }]
+    );
+}
+
+#[test]
+fn display_list_records_explicit_image_sampling() {
+    let mut builder = DisplayListBuilder::new(1).expect("valid limits");
+    let image = builder
+        .add_image(Image::from_rgba8(1, 1, vec![1, 2, 3, 255]).expect("image"))
+        .expect("store image");
+    let destination = skia_core::Rect::new(
+        Scalar::ZERO,
+        Scalar::ZERO,
+        Scalar::from_i32(2).expect("right"),
+        Scalar::from_i32(2).expect("bottom"),
+    )
+    .expect("rect");
+    let paint = Paint::new(Color::WHITE);
+    builder
+        .draw_image_with_sampling(image, destination, 200, paint, SamplingOptions::LINEAR)
+        .expect("record image");
+
+    assert_eq!(
+        builder.finish().commands(),
+        &[DrawCommand::DrawImage {
+            image,
+            destination,
+            opacity: 200,
+            sampling: SamplingOptions::LINEAR,
+            paint,
+        }]
     );
 }
 

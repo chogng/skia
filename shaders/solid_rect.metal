@@ -88,9 +88,15 @@ vertex ImageVarying skia_image_vertex(const device ImageVertex* vertices [[buffe
     output.image_position = input.image_position;
     return output;
 }
-fragment float4 skia_image_fragment(ImageVarying input [[stage_in]], texture2d<float, access::read> image [[texture(0)]], texture2d<float, access::read> clip_mask [[texture(1)]], constant float& opacity [[buffer(0)]], constant uint& has_clip [[buffer(1)]]) {
+fragment float4 skia_image_fragment(ImageVarying input [[stage_in]], texture2d<float> image [[texture(0)]], texture2d<float, access::read> clip_mask [[texture(1)]], constant float& opacity [[buffer(0)]], constant uint& has_clip [[buffer(1)]], constant uint& sampling_filter [[buffer(2)]]) {
     if (has_clip != 0 && clip_mask.read(uint2(input.position.xy)).r < 0.5) discard_fragment();
-    float4 sample = image.read(uint2(input.image_position));
+    constexpr sampler nearest_sampler(coord::normalized, address::clamp_to_edge, filter::nearest);
+    constexpr sampler linear_sampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 image_size = float2(image.get_width(), image.get_height());
+    float2 coordinate = input.image_position / image_size;
+    float4 sample = sampling_filter == 0
+        ? image.sample(nearest_sampler, coordinate)
+        : image.sample(linear_sampler, coordinate);
     return float4(sample.rgb, sample.a * opacity);
 }
 

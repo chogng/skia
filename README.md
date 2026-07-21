@@ -178,6 +178,10 @@ butt/round/square caps, miter/round/bevel joins, miter limits, and canonical
 dash patterns. CPU Canvas and DisplayList replay implement those semantics;
 the generic GPU command preserves the same options and its software reference
 backend replays them without introducing backend-specific stroke types.
+Backend-neutral `SamplingOptions` similarly preserves nearest or bilinear
+clamp-to-edge image reconstruction through DisplayList and GPU commands. CPU
+uses deterministic integer bilinear interpolation for axis-aligned images;
+Metal applies the same texel-center convention to arbitrary affine image draws.
 Backend-neutral `ClipOp` defines intersection and difference. CPU Canvas,
 DisplayList replay, and the generic GPU encoder apply it to rectangles or paths.
 Axis-aligned rectangle intersections retain a scissor fast path; CPU complex

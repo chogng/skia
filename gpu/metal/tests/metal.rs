@@ -1,6 +1,6 @@
 use skia_core::{
-    BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, StrokeCap,
-    StrokeOptions, Transform,
+    BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, SamplingOptions, Scalar,
+    StrokeCap, StrokeOptions, Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandBuffer, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphAtlasKey,
@@ -254,6 +254,37 @@ fn metal_backend_draws_nearest_source_over_images_with_opacity_and_clip() {
     assert_eq!(
         surface.read_rgba8().unwrap(),
         [128, 0, 0, 255, 0, 0, 64, 255, 0, 0, 0, 255]
+    );
+}
+
+#[test]
+fn metal_backend_draws_linearly_sampled_images() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 1).unwrap())
+        .unwrap();
+    let mut commands = GpuCommandEncoder::new(2).unwrap();
+    let image = commands
+        .add_image(Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap())
+        .unwrap();
+    commands.clear(Color::BLACK).unwrap();
+    commands
+        .draw_image_with_sampling(
+            image,
+            rect(0, 0, 4, 1),
+            255,
+            BlendMode::SourceOver,
+            SamplingOptions::LINEAR,
+        )
+        .unwrap();
+    backend.submit(&mut surface, &commands.finish()).unwrap();
+    assert_eq!(
+        surface.read_rgba8().unwrap(),
+        [
+            255, 0, 0, 255, 191, 0, 64, 255, 64, 0, 191, 255, 0, 0, 255, 255,
+        ]
     );
 }
 

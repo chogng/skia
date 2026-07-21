@@ -1,8 +1,8 @@
 use std::fmt;
 
 use skia_core::{
-    BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, StrokeCap,
-    StrokeJoin, StrokeOptions, Transform,
+    BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, SamplingOptions, Scalar,
+    StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuClipGeometry, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode,
@@ -77,7 +77,13 @@ fn gpu_commands_own_resources_and_preserve_submission_order() {
         .fill_path(path, FillRule::NonZero, Paint::new(Color::BLACK))
         .unwrap();
     encoder
-        .draw_image(image, rect(2, 3, 4, 5), 128, BlendMode::SourceOver)
+        .draw_image_with_sampling(
+            image,
+            rect(2, 3, 4, 5),
+            128,
+            BlendMode::SourceOver,
+            SamplingOptions::LINEAR,
+        )
         .unwrap();
     let commands = encoder.finish();
 
@@ -95,6 +101,10 @@ fn gpu_commands_own_resources_and_preserve_submission_order() {
     ));
     assert!(matches!(backend.submitted[1], GpuCommand::FillPath { .. }));
     assert!(matches!(backend.submitted[2], GpuCommand::DrawImage { .. }));
+    let GpuCommand::DrawImage { sampling, .. } = &backend.submitted[2] else {
+        panic!("expected image command");
+    };
+    assert_eq!(*sampling, SamplingOptions::LINEAR);
     let GpuCommand::FillPath { transform, .. } = &backend.submitted[1] else {
         panic!("expected path command");
     };
@@ -310,6 +320,32 @@ fn software_replay_is_a_pixel_oracle_for_gpu_command_state() {
     assert_eq!(pixel(&surface, 2, 0), [0, 0, 255, 255]);
     assert_eq!(pixel(&surface, 3, 0), [0, 0, 0, 255]);
     assert_eq!(pixel(&surface, 0, 1), [255, 0, 0, 255]);
+}
+
+#[test]
+fn software_replay_honors_linear_image_sampling() {
+    let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let mut encoder = GpuCommandEncoder::new(1).unwrap();
+    let image = encoder.add_image(image).unwrap();
+    encoder
+        .draw_image_with_sampling(
+            image,
+            rect(0, 0, 4, 1),
+            255,
+            BlendMode::SourceOver,
+            SamplingOptions::LINEAR,
+        )
+        .unwrap();
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &encoder.finish()).unwrap();
+
+    assert_eq!(pixel(&surface, 0, 0), [255, 0, 0, 255]);
+    assert_eq!(pixel(&surface, 1, 0), [191, 0, 64, 255]);
+    assert_eq!(pixel(&surface, 2, 0), [64, 0, 191, 255]);
+    assert_eq!(pixel(&surface, 3, 0), [0, 0, 255, 255]);
 }
 
 #[test]

@@ -3,8 +3,9 @@ use std::sync::Arc;
 use skia_core::{
     BlendMode, ClipOp, Color, DisplayList, DrawCommand, FillRule, GlyphOutline,
     GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder, Point,
-    PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, StrokeCap,
-    StrokeJoin, StrokeOptions, TextLayout, TextStyleId, TextUnit, Transform,
+    PositionedGlyph, Rect, SamplingFilter, SamplingOptions, Scalar, ShapedParagraph, SkiaError,
+    SkiaErrorCode, StrokeCap, StrokeJoin, StrokeOptions, TextLayout, TextStyleId, TextUnit,
+    Transform,
 };
 use skia_image::Image;
 use skia_tessellation::{
@@ -170,12 +171,19 @@ impl Surface {
                     image,
                     destination,
                     opacity,
+                    sampling,
                     paint,
                 } => {
                     let image = list
                         .image(*image)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    canvas.draw_image(image, *destination, *opacity, paint.blend_mode())?;
+                    canvas.draw_image_with_sampling(
+                        image,
+                        *destination,
+                        *opacity,
+                        paint.blend_mode(),
+                        *sampling,
+                    )?;
                 }
                 DrawCommand::DrawGlyphRun { run, paint } => {
                     let run = list
@@ -374,6 +382,28 @@ impl Canvas<'_> {
         opacity: u8,
         blend_mode: BlendMode,
     ) -> Result<(), SkiaError> {
+        self.draw_image_with_sampling(
+            image,
+            destination,
+            opacity,
+            blend_mode,
+            SamplingOptions::NEAREST,
+        )
+    }
+
+    /// Draws an RGBA8 bitmap with explicit nearest or bilinear sampling.
+    ///
+    /// Both filters evaluate destination pixel centers and clamp source
+    /// coordinates to the image edge. Linear interpolation operates on all
+    /// four straight-alpha RGBA8 channels before applying `opacity` to alpha.
+    pub fn draw_image_with_sampling(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        opacity: u8,
+        blend_mode: BlendMode,
+        sampling: SamplingOptions,
+    ) -> Result<(), SkiaError> {
         if !self.state.transform.is_axis_aligned() {
             return Err(SkiaError::new(SkiaErrorCode::UnsupportedTransform));
         }
@@ -385,24 +415,15 @@ impl Canvas<'_> {
             return Ok(());
         }
         for y in clipped.top..clipped.bottom {
-            let source_y = u32::try_from(
-                (y - rectangle.top)
-                    .checked_mul(i64::from(image.height()))
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?
-                    / height,
-            )
-            .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?;
             for x in clipped.left..clipped.right {
-                let source_x = u32::try_from(
-                    (x - rectangle.left)
-                        .checked_mul(i64::from(image.width()))
-                        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?
-                        / width,
-                )
-                .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                let [red, green, blue, alpha] = image
-                    .pixel_at(source_x, source_y)
-                    .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+                let [red, green, blue, alpha] = match sampling.filter() {
+                    SamplingFilter::Nearest => {
+                        sample_nearest(image, x - rectangle.left, y - rectangle.top, width, height)?
+                    }
+                    SamplingFilter::Linear => {
+                        sample_linear(image, x - rectangle.left, y - rectangle.top, width, height)?
+                    }
+                };
                 let color = Color::rgba(red, green, blue, alpha).with_opacity(opacity);
                 self.blend_color(x, y, color, blend_mode)?;
             }
@@ -746,6 +767,117 @@ impl Canvas<'_> {
         self.surface.pixels[index..index + 4].copy_from_slice(&result.channels());
         Ok(())
     }
+}
+
+fn sample_nearest(
+    image: &Image,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+) -> Result<[u8; 4], SkiaError> {
+    let source_x = nearest_index(x, width, image.width())?;
+    let source_y = nearest_index(y, height, image.height())?;
+    image
+        .pixel_at(source_x, source_y)
+        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))
+}
+
+fn nearest_index(offset: i64, extent: i64, source_extent: u32) -> Result<u32, SkiaError> {
+    let numerator = i128::from(offset)
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_mul(i128::from(source_extent)))
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    let denominator = i128::from(extent)
+        .checked_mul(2)
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    let index = numerator / denominator;
+    u32::try_from(index.min(i128::from(source_extent - 1)))
+        .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))
+}
+
+#[derive(Clone, Copy)]
+struct LinearAxis {
+    first: u32,
+    second: u32,
+    second_weight: i128,
+    denominator: i128,
+}
+
+fn linear_axis(offset: i64, extent: i64, source_extent: u32) -> Result<LinearAxis, SkiaError> {
+    let doubled_offset = i128::from(offset)
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    let extent = i128::from(extent);
+    let numerator = doubled_offset
+        .checked_mul(i128::from(source_extent))
+        .and_then(|value| value.checked_sub(extent))
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    let denominator = extent
+        .checked_mul(2)
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    let base = numerator.div_euclid(denominator);
+    let second_weight = numerator.rem_euclid(denominator);
+    let last = i128::from(source_extent - 1);
+    Ok(LinearAxis {
+        first: u32::try_from(base.clamp(0, last))
+            .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?,
+        second: u32::try_from((base + 1).clamp(0, last))
+            .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?,
+        second_weight,
+        denominator,
+    })
+}
+
+fn sample_linear(
+    image: &Image,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+) -> Result<[u8; 4], SkiaError> {
+    let horizontal = linear_axis(x, width, image.width())?;
+    let vertical = linear_axis(y, height, image.height())?;
+    let top_left = image
+        .pixel_at(horizontal.first, vertical.first)
+        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+    let top_right = image
+        .pixel_at(horizontal.second, vertical.first)
+        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+    let bottom_left = image
+        .pixel_at(horizontal.first, vertical.second)
+        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+    let bottom_right = image
+        .pixel_at(horizontal.second, vertical.second)
+        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+    let first_x_weight = horizontal.denominator - horizontal.second_weight;
+    let first_y_weight = vertical.denominator - vertical.second_weight;
+    let denominator = horizontal
+        .denominator
+        .checked_mul(vertical.denominator)
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    let mut output = [0_u8; 4];
+    for channel in 0..4 {
+        let top = i128::from(top_left[channel]) * first_x_weight
+            + i128::from(top_right[channel]) * horizontal.second_weight;
+        let bottom = i128::from(bottom_left[channel]) * first_x_weight
+            + i128::from(bottom_right[channel]) * horizontal.second_weight;
+        let value = top
+            .checked_mul(first_y_weight)
+            .and_then(|value| {
+                bottom
+                    .checked_mul(vertical.second_weight)
+                    .and_then(|bottom| value.checked_add(bottom))
+            })
+            .and_then(|value| value.checked_add(denominator / 2))
+            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?
+            / denominator;
+        output[channel] =
+            u8::try_from(value).map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    }
+    Ok(output)
 }
 
 #[derive(Clone, Copy, Debug)]

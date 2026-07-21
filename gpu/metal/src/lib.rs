@@ -19,7 +19,9 @@ use metal::{
     MTLSize, MTLStorageMode, MTLStoreAction, MTLTextureUsage, RenderPassDescriptor,
     RenderPipelineDescriptor, RenderPipelineState, Texture, TextureDescriptor,
 };
-use skia_core::{BlendMode, Color, Point, Rect, Scalar, Transform};
+use skia_core::{
+    BlendMode, Color, Point, Rect, SamplingFilter, SamplingOptions, Scalar, Transform,
+};
 use skia_gpu::{
     GpuBackend, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad,
     GpuSurfaceDescriptor,
@@ -457,6 +459,7 @@ impl GpuBackend for MetalBackend {
                     image,
                     destination,
                     opacity,
+                    sampling,
                     transform,
                     scissor,
                     clip,
@@ -484,6 +487,7 @@ impl GpuBackend for MetalBackend {
                         &texture,
                         *destination,
                         *opacity,
+                        *sampling,
                         *transform,
                         *scissor,
                         clip_texture,
@@ -893,6 +897,7 @@ impl MetalBackend {
         image: &Texture,
         destination: Rect,
         opacity: u8,
+        sampling: SamplingOptions,
         transform: Transform,
         scissor: Option<Rect>,
         clip_texture: &Texture,
@@ -935,6 +940,15 @@ impl MetalBackend {
             1,
             size_of_val(&has_clip) as u64,
             (&has_clip as *const u32).cast(),
+        );
+        let sampling_filter = match sampling.filter() {
+            SamplingFilter::Nearest => 0_u32,
+            SamplingFilter::Linear => 1_u32,
+        };
+        encoder.set_fragment_bytes(
+            2,
+            size_of_val(&sampling_filter) as u64,
+            (&sampling_filter as *const u32).cast(),
         );
         encoder.set_fragment_texture(0, Some(image));
         encoder.set_fragment_texture(1, Some(clip_texture));

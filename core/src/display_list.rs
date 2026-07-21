@@ -1,6 +1,6 @@
 use crate::{
-    ClipOp, Color, FillRule, Paint, Path, Rect, Scalar, SkiaError, SkiaErrorCode, StrokeCap,
-    StrokeJoin, StrokeOptions, Transform,
+    ClipOp, Color, FillRule, Paint, Path, Rect, SamplingOptions, Scalar, SkiaError, SkiaErrorCode,
+    StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
 use skia_image::Image;
 #[cfg(feature = "text")]
@@ -81,6 +81,8 @@ pub enum DrawCommand {
         destination: Rect,
         /// Additional source opacity.
         opacity: u8,
+        /// Reconstruction filter and edge behavior.
+        sampling: SamplingOptions,
         /// Source paint and blend mode.
         paint: Paint,
     },
@@ -257,10 +259,22 @@ impl DisplayListBuilder {
         opacity: u8,
         paint: Paint,
     ) -> Result<(), SkiaError> {
+        self.draw_image_with_sampling(image, destination, opacity, paint, SamplingOptions::NEAREST)
+    }
+    /// Records one registered image draw with explicit sampling.
+    pub fn draw_image_with_sampling(
+        &mut self,
+        image: ImageId,
+        destination: Rect,
+        opacity: u8,
+        paint: Paint,
+        sampling: SamplingOptions,
+    ) -> Result<(), SkiaError> {
         self.push(DrawCommand::DrawImage {
             image,
             destination,
             opacity,
+            sampling,
             paint,
         })
     }

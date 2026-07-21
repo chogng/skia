@@ -1,7 +1,7 @@
 use skia::{
     BlendMode, ClipRect, Color, ConicWeight, FillRule, Image, ImageErrorCode, Paint, PathBuilder,
-    Point, Rect, Scalar, SkiaErrorCode, StrokeCap, StrokeOptions, Surface, SurfaceLimits,
-    Transform, stroke_to_path,
+    Point, Rect, SamplingOptions, Scalar, SkiaErrorCode, StrokeCap, StrokeOptions, Surface,
+    SurfaceLimits, Transform, stroke_to_path,
 };
 
 fn scalar(value: i32) -> Scalar {
@@ -291,6 +291,27 @@ fn rgba_images_scale_nearest_neighbor_and_keep_source_color_under_opacity() {
         Image::from_rgba8(2, 2, vec![0; 3]).unwrap_err().code(),
         ImageErrorCode::InvalidPixels
     );
+}
+
+#[test]
+fn rgba_images_support_texel_center_linear_sampling() {
+    let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let mut surface = Surface::new(4, 1, SurfaceLimits::default()).unwrap();
+    surface
+        .canvas()
+        .draw_image_with_sampling(
+            &image,
+            rect(0, 0, 4, 1),
+            255,
+            BlendMode::SourceOver,
+            SamplingOptions::LINEAR,
+        )
+        .unwrap();
+
+    assert_eq!(pixel(&surface, 0, 0), [255, 0, 0, 255]);
+    assert_eq!(pixel(&surface, 1, 0), [191, 0, 64, 255]);
+    assert_eq!(pixel(&surface, 2, 0), [64, 0, 191, 255]);
+    assert_eq!(pixel(&surface, 3, 0), [0, 0, 255, 255]);
 }
 
 #[test]
