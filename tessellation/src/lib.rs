@@ -14,9 +14,11 @@ use std::fmt;
 use skia_geometry::Point;
 use skia_path::{Path, PathVerb};
 
+mod boolean;
 mod flatten;
 mod stroke;
 
+pub use boolean::{PathBooleanLimits, PathBooleanOp, path_boolean};
 pub use flatten::{
     DEFAULT_CURVE_STEPS, FlattenedContour, FlattenedPath, FlatteningLimits, PathFlattener,
 };

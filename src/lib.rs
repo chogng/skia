@@ -32,4 +32,6 @@ pub use skia_image::{ColorSpace, Image, ImageError, ImageErrorCode};
 pub use skia_path::{
     Angle, ArcDirection, ArcStart, ConicWeight, FillRule, Path, PathBounds, PathBuilder, PathVerb,
 };
-pub use skia_tessellation::stroke_to_path;
+pub use skia_tessellation::{
+    PathBooleanLimits, PathBooleanOp, path_boolean, stroke_to_path,
+};

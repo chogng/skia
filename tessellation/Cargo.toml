@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+clipper2-rust = "1.0.3"
 skia-geometry = { path = "../geometry" }
 skia-path = { path = "../path" }
 skia-error = { path = "../error" }
