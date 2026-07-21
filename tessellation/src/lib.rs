@@ -15,9 +15,14 @@ use skia_geometry::Point;
 use skia_path::{Path, PathVerb};
 
 mod flatten;
+mod stroke;
 
 pub use flatten::{
     DEFAULT_CURVE_STEPS, FlattenedContour, FlattenedPath, FlatteningLimits, PathFlattener,
+};
+pub use stroke::{
+    StrokeMesh, StrokePiece, interpolate_stroke_segment, stroke_contains, stroke_contours_to_path,
+    stroke_mesh, stroke_pieces, stroke_segment_length_bits, stroke_to_path,
 };
 
 /// Stable tessellation failure code.

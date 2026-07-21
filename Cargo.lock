@@ -440,6 +440,7 @@ dependencies = [
  "skia-geometry",
  "skia-image",
  "skia-path",
+ "skia-tessellation",
 ]
 
 [[package]]
@@ -530,6 +531,7 @@ dependencies = [
 name = "skia-tessellation"
 version = "0.1.0"
 dependencies = [
+ "skia-error",
  "skia-geometry",
  "skia-path",
 ]

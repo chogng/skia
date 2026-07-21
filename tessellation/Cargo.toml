@@ -8,3 +8,4 @@ publish = false
 [dependencies]
 skia-geometry = { path = "../geometry" }
 skia-path = { path = "../path" }
+skia-error = { path = "../error" }

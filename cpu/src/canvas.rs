@@ -8,12 +8,13 @@ use skia_core::{
 };
 use skia_image::Image;
 use skia_tessellation::{
-    DEFAULT_CURVE_STEPS, FlatteningLimits, PathFlattener, TessellationErrorCode,
+    DEFAULT_CURVE_STEPS, FlattenedContour, FlatteningLimits, PathFlattener, TessellationErrorCode,
+    stroke_contains, stroke_pieces,
 };
 
 use crate::{
     clip::{apply_clip, mask_index},
-    stroke::{stroke_bounds, stroke_contains, stroke_pieces},
+    stroke::stroke_bounds,
 };
 
 /// Limits for one CPU-owned RGBA8 surface and Canvas state stack.
@@ -148,6 +149,7 @@ impl Surface {
                 }
                 DrawCommand::SetTransform(transform) => canvas.set_transform(*transform),
                 DrawCommand::ConcatTransform(transform) => canvas.concat(*transform)?,
+                DrawCommand::FillRect { rect, paint } => canvas.fill_rect(*rect, *paint)?,
                 DrawCommand::FillPath { path, rule, paint } => {
                     let path = list
                         .path(*path)
@@ -273,17 +275,14 @@ impl Canvas<'_> {
         points.push(transform.map_point(Point::new(rect.right(), rect.top()))?);
         points.push(transform.map_point(Point::new(rect.right(), rect.bottom()))?);
         points.push(transform.map_point(Point::new(rect.left(), rect.bottom()))?);
-        let contour = Contour {
-            points,
-            closed: true,
-        };
+        let contour = Contour::new(points, true);
         self.apply_complex_clip(&[contour], FillRule::NonZero, op)
     }
 
     /// Applies a transformed path to the current clip.
     pub fn clip_path(&mut self, path: &Path, rule: FillRule, op: ClipOp) -> Result<(), SkiaError> {
         let contours = transformed_contours(path, self.state.transform)?;
-        if contours.iter().all(|contour| contour.points.len() < 3) {
+        if contours.iter().all(|contour| contour.points().len() < 3) {
             return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
         }
         self.apply_complex_clip(&contours, rule, op)
@@ -300,10 +299,7 @@ impl Canvas<'_> {
         points.push(transform.map_point(Point::new(rect.right(), rect.top()))?);
         points.push(transform.map_point(Point::new(rect.right(), rect.bottom()))?);
         points.push(transform.map_point(Point::new(rect.left(), rect.bottom()))?);
-        let contour = Contour {
-            points,
-            closed: true,
-        };
+        let contour = Contour::new(points, true);
         self.fill_contours(&[contour], FillRule::NonZero, paint)
     }
 
@@ -315,7 +311,7 @@ impl Canvas<'_> {
         paint: Paint,
     ) -> Result<(), SkiaError> {
         let contours = transformed_contours(path, self.state.transform)?;
-        if contours.iter().all(|contour| contour.points.len() < 3) {
+        if contours.iter().all(|contour| contour.points().len() < 3) {
             return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
         }
         self.fill_contours(&contours, rule, paint)
@@ -349,7 +345,7 @@ impl Canvas<'_> {
         paint: Paint,
     ) -> Result<(), SkiaError> {
         let contours = transformed_contours(path, self.state.transform)?;
-        if contours.iter().all(|contour| contour.points.len() < 2) {
+        if contours.iter().all(|contour| contour.points().len() < 2) {
             return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
         }
         let pieces = stroke_pieces(&contours, options)?;
@@ -784,11 +780,7 @@ impl DeviceRect {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct Contour {
-    pub(crate) points: Vec<Point>,
-    pub(crate) closed: bool,
-}
+pub(crate) type Contour = FlattenedContour;
 
 fn glyph_path(
     run: &GlyphRun,
@@ -876,15 +868,7 @@ pub(crate) fn transformed_contours(
     let flattened = PathFlattener::new(limits)
         .flatten(path, transform)
         .map_err(map_tessellation_error)?;
-    let mut contours = Vec::new();
-    contours
-        .try_reserve_exact(flattened.contours().len())
-        .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
-    for contour in flattened.into_contours() {
-        let (points, closed) = contour.into_parts();
-        contours.push(Contour { points, closed });
-    }
-    Ok(contours)
+    Ok(flattened.into_contours())
 }
 
 fn map_tessellation_error(error: skia_tessellation::TessellationError) -> SkiaError {
@@ -905,7 +889,7 @@ pub(crate) fn contour_bounds(contours: &[Contour]) -> DeviceRect {
     let mut top = i64::MAX;
     let mut right = i64::MIN;
     let mut bottom = i64::MIN;
-    for point in contours.iter().flat_map(|contour| &contour.points) {
+    for point in contours.iter().flat_map(|contour| contour.points()) {
         left = left.min(floor_q16(point.x().bits()));
         top = top.min(floor_q16(point.y().bits()));
         right = right.max(ceil_q16(point.x().bits()));
@@ -927,15 +911,15 @@ pub(crate) fn contains(
     let mut parity = false;
     let mut winding = 0_i32;
     for contour in contours {
-        if contour.points.len() < 3 {
+        if contour.points().len() < 3 {
             continue;
         }
         for (start, end) in contour
-            .points
+            .points()
             .iter()
             .copied()
-            .zip(contour.points.iter().copied().cycle().skip(1))
-            .take(contour.points.len())
+            .zip(contour.points().iter().copied().cycle().skip(1))
+            .take(contour.points().len())
         {
             let start_y = i64::from(start.y().bits());
             let end_y = i64::from(end.y().bits());

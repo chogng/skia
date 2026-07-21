@@ -71,6 +71,11 @@ pub struct FlattenedContour {
 }
 
 impl FlattenedContour {
+    /// Creates one transformed polyline contour for a backend-owned primitive.
+    pub fn new(points: Vec<Point>, closed: bool) -> Self {
+        Self { points, closed }
+    }
+
     /// Borrows points in path traversal order without synthesizing a closing point.
     pub fn points(&self) -> &[Point] {
         &self.points
