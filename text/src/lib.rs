@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod break_provider;
 mod collection;
 mod decoration;
 mod error;
@@ -17,6 +18,7 @@ mod line_break;
 mod outline;
 mod types;
 
+pub use break_provider::BuiltinTextBreakProvider;
 pub use collection::{
     FontCollection, FontCollectionLimits, ShapedParagraph, ShapedRun, TextDecoration,
     TextDirection, TextStyleId, TextStyleSpan,
@@ -24,8 +26,9 @@ pub use collection::{
 pub use decoration::{TextDecorationRect, TextDecorationStyle, text_decoration_rects};
 pub use error::{TextError, TextErrorCode};
 pub use font::{
-    FontFace, FontFeature, FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation,
-    FontVariationAxis, FontWidth, GlyphBitmap, GlyphBitmapFormat, TextDecorationMetrics,
+    FontFace, FontFeature, FontLimits, FontMetrics, FontSlant, FontStyle, FontStyleMatch, FontTag,
+    FontVariation, FontVariationAxis, FontWidth, GlyphBitmap, GlyphBitmapFormat,
+    TextDecorationMetrics,
 };
 pub use layout::{
     ShapedLine, TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecorationSegment,

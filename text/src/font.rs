@@ -73,6 +73,19 @@ pub struct FontStyle {
     slant: FontSlant,
 }
 
+/// Total ordering key for CSS-like face matching.
+///
+/// Smaller values are preferred. The fields remain private so matching policy
+/// can evolve without exposing its implementation as application state.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FontStyleMatch {
+    width_group: u8,
+    width_distance: u16,
+    slant_rank: u8,
+    weight_group: u8,
+    weight_distance: u16,
+}
+
 impl FontStyle {
     /// Regular weight, normal width, and upright slant.
     pub const NORMAL: Self = Self {
@@ -106,6 +119,93 @@ impl FontStyle {
     /// Returns the requested slant.
     pub const fn slant(self) -> FontSlant {
         self.slant
+    }
+
+    /// Returns the reusable CSS-like ordering key for this candidate.
+    pub fn match_rank(self, requested: Self) -> FontStyleMatch {
+        let (width_group, width_distance) = width_match_rank(self.width, requested.width);
+        let slant_rank = slant_match_rank(self.slant, requested.slant);
+        let (weight_group, weight_distance) = weight_match_rank(self.weight, requested.weight);
+        FontStyleMatch {
+            width_group,
+            width_distance,
+            slant_rank,
+            weight_group,
+            weight_distance,
+        }
+    }
+}
+
+fn width_match_rank(candidate: FontWidth, requested: FontWidth) -> (u8, u16) {
+    let candidate = candidate.class();
+    let requested = requested.class();
+    if candidate == requested {
+        (0, 0)
+    } else if requested <= FontWidth::Normal.class() {
+        if candidate < requested {
+            (1, requested - candidate)
+        } else {
+            (2, candidate - requested)
+        }
+    } else if candidate > requested {
+        (1, candidate - requested)
+    } else {
+        (2, requested - candidate)
+    }
+}
+
+const fn slant_match_rank(candidate: FontSlant, requested: FontSlant) -> u8 {
+    match requested {
+        FontSlant::Italic => match candidate {
+            FontSlant::Italic => 0,
+            FontSlant::Oblique => 1,
+            FontSlant::Normal => 2,
+        },
+        FontSlant::Oblique => match candidate {
+            FontSlant::Oblique => 0,
+            FontSlant::Italic => 1,
+            FontSlant::Normal => 2,
+        },
+        FontSlant::Normal => match candidate {
+            FontSlant::Normal => 0,
+            FontSlant::Oblique => 1,
+            FontSlant::Italic => 2,
+        },
+    }
+}
+
+fn weight_match_rank(candidate: u16, requested: u16) -> (u8, u16) {
+    if candidate == requested {
+        return (0, 0);
+    }
+    if (400..450).contains(&requested) {
+        if candidate == 500 {
+            return (1, 0);
+        }
+        if candidate < requested {
+            return (2, requested - candidate);
+        }
+        return (3, candidate - requested);
+    }
+    if (450..=500).contains(&requested) {
+        if candidate == 400 {
+            return (1, 0);
+        }
+        if candidate < requested {
+            return (2, requested - candidate);
+        }
+        return (3, candidate - requested);
+    }
+    if requested <= 500 {
+        if candidate < requested {
+            (1, requested - candidate)
+        } else {
+            (2, candidate - requested)
+        }
+    } else if candidate > requested {
+        (1, candidate - requested)
+    } else {
+        (2, requested - candidate)
     }
 }
 
@@ -525,10 +625,28 @@ impl FontFace {
         Self::from_bytes_with_limits(id, bytes, 0, FontLimits::default())
     }
 
+    /// Loads face zero from shared immutable bytes with default ceilings.
+    ///
+    /// Platform adapters use this to share one TTC/OTC allocation across
+    /// multiple indexed faces without coupling the text crate to discovery.
+    pub fn from_shared_bytes(id: FontId, bytes: Arc<[u8]>) -> Result<Self, TextError> {
+        Self::from_shared_bytes_with_limits(id, bytes, 0, FontLimits::default())
+    }
+
     /// Loads one indexed face with explicit resource ceilings.
     pub fn from_bytes_with_limits(
         id: FontId,
         bytes: Vec<u8>,
+        face_index: u32,
+        limits: FontLimits,
+    ) -> Result<Self, TextError> {
+        Self::from_shared_bytes_with_limits(id, bytes.into(), face_index, limits)
+    }
+
+    /// Loads one indexed face from shared immutable bytes with explicit ceilings.
+    pub fn from_shared_bytes_with_limits(
+        id: FontId,
+        bytes: Arc<[u8]>,
         face_index: u32,
         limits: FontLimits,
     ) -> Result<Self, TextError> {
@@ -577,7 +695,7 @@ impl FontFace {
         }
         Ok(Self {
             id,
-            bytes: bytes.into(),
+            bytes,
             face_index,
             units_per_em,
             glyph_count,

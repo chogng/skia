@@ -23,6 +23,8 @@ pub enum TextErrorCode {
     InvalidLanguage,
     /// A language break provider returned a non-grapheme or out-of-word offset.
     InvalidWordBreak,
+    /// An embedded language dictionary could not be loaded.
+    DictionaryUnavailable,
     /// Styled paragraph spans are invalid, incomplete, or split a grapheme.
     InvalidTextStyleSpan,
     /// Font bytes are malformed or omit required tables.

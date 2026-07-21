@@ -55,6 +55,10 @@ flowchart LR
   Vulkan bring-up dynamically loads the platform loader and owns a real instance,
   device, graphics queue, offscreen RGBA8 image, clear submission, and staging
   readback; unsupported draws fail closed without a CPU fallback.
+- `skia/text/system` is the platform filesystem adapter for system/user font
+  discovery, generic-family resolution, and language-preferred family policy.
+  It returns stable path/index identities and reloadable records; `skia/text`
+  remains independent of operating-system directories and font handles.
 - `skia/image` owns the immutable RGBA8 resource representation. `skia/codec`
   parses untrusted, general-purpose image bytes into that representation and
   encodes those resources as general-purpose image formats. It does not depend
@@ -109,9 +113,10 @@ ligatures, whitespace, controls, or punctuation.
 Callers can also add signed Q16.16 letter spacing between shaping clusters and
 word spacing after breakable Unicode spaces; wrapping, ellipses, hit testing,
 and carets all use the resulting width without splitting grapheme or shaping clusters.
-Callers can plug language dictionaries into `TextBreakProvider`; the layout
-engine validates UTF-8 grapheme boundaries and supports either glyph-free soft breaks
-or synthetic visible hyphens without consuming source bytes. Layout options
+Callers can use the cached `BuiltinTextBreakProvider`, backed by embedded
+Knuth-Liang dictionaries, or plug custom language dictionaries into
+`TextBreakProvider`; the layout engine validates UTF-8 grapheme boundaries and
+supports either glyph-free soft breaks or synthetic visible hyphens without consuming source bytes. Layout options
 can also request underline and strike-through lines globally or per span, with
 independently inherited solid, dashed, dotted, or wavy visual patterns.
 Their scaled position and thickness come from the selected span's preferred
@@ -137,9 +142,10 @@ select clipped output or a grapheme-safe, reshaped final-line ellipsis.
 Ellipses retain styled font size and bidi placement, prefer U+2026, and fall
 back to three periods without consuming source bytes.
 
-System-font discovery, generic-family mapping, variable-font instance selection,
-language-specific font selection, dictionary data and algorithms, and broader
-paragraph formatting remain upper text-layout responsibilities. GPU vector and
+System-font discovery, generic-family mapping, and language-preferred family
+selection are available through the separate `skia-system-fonts` adapter;
+variable-font instance policy and broader paragraph formatting remain upper
+text-layout responsibilities. GPU vector and
 atlas text adaptation are available through the separate `skia-gpu-text` adapter.
 `layout_outline_batches` converts positioned outlines into ordinary target-space
 paths for generic `fill_path` commands. For bitmap text,

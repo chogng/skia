@@ -2,9 +2,8 @@ use unicode_bidi::{BidiInfo, LTR_LEVEL, Level, ParagraphInfo, RTL_LEVEL};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    FontFace, FontId, FontMetrics, FontSlant, FontStyle, FontWidth, GlyphOutline,
-    GlyphOutlineProvider, GlyphRun, TextDecorationStyle, TextError, TextErrorCode,
-    TextJustification,
+    FontFace, FontId, FontMetrics, FontStyle, GlyphOutline, GlyphOutlineProvider, GlyphRun,
+    TextDecorationStyle, TextError, TextErrorCode, TextJustification,
 };
 
 /// Horizontal direction of one shaped text run.
@@ -1454,91 +1453,8 @@ fn style_match_key(
     candidate: FontStyle,
     requested: FontStyle,
     insertion_index: usize,
-) -> (u8, u16, u8, u8, u16, usize) {
-    let (width_group, width_distance) = width_match_rank(candidate.width(), requested.width());
-    let slant_rank = slant_match_rank(candidate.slant(), requested.slant());
-    let (weight_group, weight_distance) = weight_match_rank(candidate.weight(), requested.weight());
-    (
-        width_group,
-        width_distance,
-        slant_rank,
-        weight_group,
-        weight_distance,
-        insertion_index,
-    )
-}
-
-fn width_match_rank(candidate: FontWidth, requested: FontWidth) -> (u8, u16) {
-    let candidate = candidate.class();
-    let requested = requested.class();
-    if candidate == requested {
-        (0, 0)
-    } else if requested <= FontWidth::Normal.class() {
-        if candidate < requested {
-            (1, requested - candidate)
-        } else {
-            (2, candidate - requested)
-        }
-    } else if candidate > requested {
-        (1, candidate - requested)
-    } else {
-        (2, requested - candidate)
-    }
-}
-
-const fn slant_match_rank(candidate: FontSlant, requested: FontSlant) -> u8 {
-    match requested {
-        FontSlant::Italic => match candidate {
-            FontSlant::Italic => 0,
-            FontSlant::Oblique => 1,
-            FontSlant::Normal => 2,
-        },
-        FontSlant::Oblique => match candidate {
-            FontSlant::Oblique => 0,
-            FontSlant::Italic => 1,
-            FontSlant::Normal => 2,
-        },
-        FontSlant::Normal => match candidate {
-            FontSlant::Normal => 0,
-            FontSlant::Oblique => 1,
-            FontSlant::Italic => 2,
-        },
-    }
-}
-
-fn weight_match_rank(candidate: u16, requested: u16) -> (u8, u16) {
-    if candidate == requested {
-        return (0, 0);
-    }
-    if (400..450).contains(&requested) {
-        if candidate == 500 {
-            return (1, 0);
-        }
-        if candidate < requested {
-            return (2, requested - candidate);
-        }
-        return (3, candidate - requested);
-    }
-    if (450..=500).contains(&requested) {
-        if candidate == 400 {
-            return (1, 0);
-        }
-        if candidate < requested {
-            return (2, requested - candidate);
-        }
-        return (3, candidate - requested);
-    }
-    if requested <= 500 {
-        if candidate < requested {
-            (1, requested - candidate)
-        } else {
-            (2, candidate - requested)
-        }
-    } else if candidate > requested {
-        (1, candidate - requested)
-    } else {
-        (2, requested - candidate)
-    }
+) -> (crate::FontStyleMatch, usize) {
+    (candidate.match_rank(requested), insertion_index)
 }
 
 fn run_advance_bits(run: &GlyphRun) -> Result<i32, TextError> {

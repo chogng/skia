@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+hyphenation = { version = "0.8.4", features = ["embed_all"] }
 rustybuzz = "0.20.1"
 swash = "0.2.10"
 unicode-bidi = "0.3.18"

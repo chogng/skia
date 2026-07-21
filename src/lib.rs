@@ -15,16 +15,17 @@ pub use skia_codec::{
     JpegSubsampling, MetadataPolicy, PngCompression, PngFilter, PngOptions, WebPMode, WebPOptions,
 };
 pub use skia_core::{
-    BlendMode, ClipOp, Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId,
-    FontLimits, FontMetrics, FontSlant, FontStyle, FontTag, FontVariation, FontVariationAxis,
-    FontWidth, GlyphBitmap, GlyphBitmapFormat, GlyphId, GlyphOutline, GlyphOutlineProvider,
-    GlyphRun, OutlinePoint, OutlineSegment, Paint, PositionedGlyph, SamplingFilter,
-    SamplingOptions, ShapedLine, ShapedParagraph, ShapedRun, StrokeAlign, StrokeCap, StrokeJoin,
-    StrokeOptions, TextAffinity, TextAlignment, TextBreakProvider, TextCaret, TextDecoration,
-    TextDecorationMetrics, TextDecorationRect, TextDecorationSegment, TextDecorationStyle,
-    TextDirection, TextError, TextErrorCode, TextHitResult, TextJustification, TextLayout,
-    TextLayoutOptions, TextOverflow, TextPosition, TextSelectionRect, TextStyleId, TextStyleSpan,
-    TextUnit, TextWordBreak, TextWordBreakKind, glyph_outline_path, text_decoration_rects,
+    BlendMode, BuiltinTextBreakProvider, ClipOp, Color, FontCollection, FontCollectionLimits,
+    FontFace, FontFeature, FontId, FontLimits, FontMetrics, FontSlant, FontStyle, FontStyleMatch,
+    FontTag, FontVariation, FontVariationAxis, FontWidth, GlyphBitmap, GlyphBitmapFormat, GlyphId,
+    GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, Paint,
+    PositionedGlyph, SamplingFilter, SamplingOptions, ShapedLine, ShapedParagraph, ShapedRun,
+    StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, TextAffinity, TextAlignment,
+    TextBreakProvider, TextCaret, TextDecoration, TextDecorationMetrics, TextDecorationRect,
+    TextDecorationSegment, TextDecorationStyle, TextDirection, TextError, TextErrorCode,
+    TextHitResult, TextJustification, TextLayout, TextLayoutOptions, TextOverflow, TextPosition,
+    TextSelectionRect, TextStyleId, TextStyleSpan, TextUnit, TextWordBreak, TextWordBreakKind,
+    glyph_outline_path, text_decoration_rects,
 };
 pub use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 pub use skia_error::{SkiaError, SkiaErrorCode};
@@ -32,6 +33,10 @@ pub use skia_geometry::{Point, Rect, Scalar, Transform};
 pub use skia_image::{ColorSpace, Image, ImageError, ImageErrorCode};
 pub use skia_path::{
     Angle, ArcDirection, ArcStart, ConicWeight, FillRule, Path, PathBounds, PathBuilder, PathVerb,
+};
+pub use skia_system_fonts::{
+    GenericFontFamily, SystemFontCatalog, SystemFontDiscoveryLimits, SystemFontError,
+    SystemFontErrorCode, SystemFontRecord, discover_system_fonts,
 };
 pub use skia_tessellation::{
     ComposePathEffect, CornerPathEffect, DashPathEffect, DiscretePathEffect, PathBooleanLimits,
