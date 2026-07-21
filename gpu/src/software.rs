@@ -66,6 +66,8 @@ impl GpuBackend for SoftwareGpuBackend {
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(color) => canvas.clear(*color),
+                GpuCommand::SaveLayer(options) => canvas.save_layer(*options).map_err(map_error)?,
+                GpuCommand::RestoreLayer => canvas.restore().map_err(map_error)?,
                 GpuCommand::FillRect {
                     rect,
                     paint,
@@ -121,7 +123,7 @@ impl GpuBackend for SoftwareGpuBackend {
                     destination,
                     opacity,
                     sampling,
-                    blend_mode,
+                    paint,
                     transform,
                     scissor,
                     clip,
@@ -134,11 +136,11 @@ impl GpuBackend for SoftwareGpuBackend {
                         *scissor,
                         *clip,
                         |canvas| {
-                            canvas.draw_image_with_sampling(
+                            canvas.draw_image_with_paint(
                                 image,
                                 *destination,
                                 *opacity,
-                                *blend_mode,
+                                *paint,
                                 *sampling,
                             )
                         },

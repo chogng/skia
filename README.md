@@ -198,6 +198,12 @@ clamp-to-edge image reconstruction through DisplayList and GPU commands. CPU
 uses checked affine inverse mapping and deterministic integer bilinear
 interpolation; Metal applies the same texel-center convention to arbitrary
 affine image draws.
+Backend-neutral paint also carries bounded local-space linear/radial gradients,
+Q16.16 color matrices and color filters. `SaveLayerOptions` records isolated
+restore bounds, opacity, blend mode, and an optional color or box-blur image
+filter. CPU Canvas and software GPU replay execute these semantics directly;
+DisplayList and generic GPU commands retain the same layer boundaries and
+image-paint state for hardware backends.
 Backend-neutral `ClipOp` defines intersection and difference. CPU Canvas,
 DisplayList replay, and the generic GPU encoder apply it to rectangles or paths.
 Axis-aligned rectangle intersections retain a scissor fast path; CPU complex

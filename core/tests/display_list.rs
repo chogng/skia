@@ -1,6 +1,7 @@
 use skia_core::{
-    ClipOp, Color, DisplayListBuilder, DrawCommand, FillRule, Paint, SamplingOptions, Scalar,
-    SkiaErrorCode, StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, Transform,
+    ClipOp, Color, DisplayListBuilder, DrawCommand, FillRule, Paint, SamplingOptions,
+    SaveLayerOptions, Scalar, SkiaErrorCode, StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions,
+    Transform,
 };
 #[cfg(feature = "text")]
 use skia_core::{FontId, GlyphId, GlyphRun, PositionedGlyph, TextUnit};
@@ -125,6 +126,31 @@ fn display_list_records_direct_rectangle_fill() {
     assert_eq!(
         builder.finish().commands(),
         &[DrawCommand::FillRect { rect, paint }]
+    );
+}
+
+#[test]
+fn display_list_records_isolated_layer_boundaries() {
+    let mut builder = DisplayListBuilder::new(4).expect("builder");
+    let options = SaveLayerOptions::new().with_opacity(128);
+    let rect = skia_core::Rect::new(
+        Scalar::ZERO,
+        Scalar::ZERO,
+        Scalar::from_i32(2).expect("right"),
+        Scalar::from_i32(2).expect("bottom"),
+    )
+    .expect("rect");
+    let paint = Paint::new(Color::RED);
+    builder.save_layer(options).expect("save layer");
+    builder.fill_rect(rect, paint).expect("fill");
+    builder.restore().expect("restore");
+    assert_eq!(
+        builder.finish().commands(),
+        &[
+            DrawCommand::SaveLayer(options),
+            DrawCommand::FillRect { rect, paint },
+            DrawCommand::Restore,
+        ]
     );
 }
 

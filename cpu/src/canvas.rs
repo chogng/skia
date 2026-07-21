@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use skia_core::{
     BlendMode, ClipOp, Color, DisplayList, DrawCommand, FillRule, GlyphOutlineProvider, GlyphRun,
-    Paint, Path, Point, PositionedGlyph, Rect, SamplingFilter, SamplingOptions, Scalar,
-    ShapedParagraph, SkiaError, SkiaErrorCode, StrokeCap, StrokeJoin, StrokeOptions, TextLayout,
-    TextStyleId, Transform, glyph_outline_path, text_decoration_rects,
+    ImageFilter, Paint, Path, Point, PositionedGlyph, Rect, SamplingFilter, SamplingOptions,
+    SaveLayerOptions, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, StrokeCap, StrokeJoin,
+    StrokeOptions, TextLayout, TextStyleId, Transform, glyph_outline_path, text_decoration_rects,
 };
 use skia_image::Image;
 use skia_tessellation::{
@@ -129,6 +129,7 @@ impl Surface {
                 mask: None,
             },
             saves: Vec::new(),
+            layer_buffers: Vec::new(),
         }
     }
 
@@ -147,6 +148,7 @@ impl Surface {
             match command {
                 DrawCommand::Clear(color) => canvas.clear(*color),
                 DrawCommand::Save => canvas.save()?,
+                DrawCommand::SaveLayer(options) => canvas.save_layer(*options)?,
                 DrawCommand::Restore => canvas.restore()?,
                 DrawCommand::ClipRect { rect, op } => {
                     canvas.clip_rect_with_op(ClipRect::new(*rect), *op)?
@@ -186,11 +188,11 @@ impl Surface {
                     let image = list
                         .image(*image)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    canvas.draw_image_with_sampling(
+                    canvas.draw_image_with_paint(
                         image,
                         *destination,
                         *opacity,
-                        paint.blend_mode(),
+                        *paint,
                         *sampling,
                     )?;
                 }
@@ -241,39 +243,116 @@ struct State {
     mask: Option<Arc<[u8]>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ActiveLayer {
+    options: SaveLayerOptions,
+    bounds: DeviceRect,
+}
+
+#[derive(Clone, Debug)]
+struct SaveRecord {
+    state: State,
+    layer: Option<ActiveLayer>,
+}
+
 /// Mutable CPU drawing context.
 pub struct Canvas<'a> {
     surface: &'a mut Surface,
     state: State,
-    saves: Vec<State>,
+    saves: Vec<SaveRecord>,
+    layer_buffers: Vec<Vec<u8>>,
 }
 
 impl Canvas<'_> {
     /// Clears all pixels, ignoring the current transform and clip.
     pub fn clear(&mut self, color: Color) {
-        for pixel in self.surface.pixels.chunks_exact_mut(4) {
+        for pixel in self.target_pixels_mut().chunks_exact_mut(4) {
             pixel.copy_from_slice(&color.channels());
         }
     }
 
     /// Saves the current transform and clip state.
     pub fn save(&mut self) -> Result<(), SkiaError> {
+        self.push_save(None)
+    }
+
+    /// Saves state and redirects following draws into a transparent isolated layer.
+    pub fn save_layer(&mut self, options: SaveLayerOptions) -> Result<(), SkiaError> {
+        let bounds = if let Some(bounds) = options.bounds() {
+            self.transformed_device_rect(bounds)?
+                .intersection(self.state.scissor)
+        } else {
+            self.state.scissor
+        };
+        let surface_bytes = u64::try_from(self.surface.pixels.len())
+            .map_err(|_| SkiaError::new(SkiaErrorCode::ResourceLimit))?;
+        let filter_buffers = usize::from(matches!(
+            options.filter(),
+            Some(ImageFilter::BoxBlur { .. })
+        ))
+        .checked_mul(2)
+        .ok_or(SkiaError::new(SkiaErrorCode::ResourceLimit))?;
+        let retained_surfaces = self
+            .layer_buffers
+            .len()
+            .checked_add(filter_buffers)
+            .and_then(|value| value.checked_add(2))
+            .ok_or(SkiaError::new(SkiaErrorCode::ResourceLimit))?;
+        let retained_bytes = surface_bytes
+            .checked_mul(
+                u64::try_from(retained_surfaces)
+                    .map_err(|_| SkiaError::new(SkiaErrorCode::ResourceLimit))?,
+            )
+            .ok_or(SkiaError::new(SkiaErrorCode::ResourceLimit))?;
+        if retained_bytes > self.surface.limits.max_bytes {
+            return Err(SkiaError::new(SkiaErrorCode::ResourceLimit));
+        }
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(self.surface.pixels.len())
+            .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
+        pixels.resize(self.surface.pixels.len(), 0);
+        self.layer_buffers
+            .try_reserve(1)
+            .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
+        self.push_save(Some(ActiveLayer { options, bounds }))?;
+        self.layer_buffers.push(pixels);
+        Ok(())
+    }
+
+    /// Restores the most recently saved state.
+    pub fn restore(&mut self) -> Result<(), SkiaError> {
+        let record = self
+            .saves
+            .pop()
+            .ok_or(SkiaError::new(SkiaErrorCode::RestoreUnderflow))?;
+        let layer = if record.layer.is_some() {
+            Some(
+                self.layer_buffers
+                    .pop()
+                    .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?,
+            )
+        } else {
+            None
+        };
+        self.state = record.state;
+        if let (Some(active), Some(pixels)) = (record.layer, layer) {
+            self.restore_layer(active, pixels)?;
+        }
+        Ok(())
+    }
+
+    fn push_save(&mut self, layer: Option<ActiveLayer>) -> Result<(), SkiaError> {
         if self.saves.len() == self.surface.limits.max_save_depth {
             return Err(SkiaError::new(SkiaErrorCode::ResourceLimit));
         }
         self.saves
             .try_reserve(1)
             .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
-        self.saves.push(self.state.clone());
-        Ok(())
-    }
-
-    /// Restores the most recently saved state.
-    pub fn restore(&mut self) -> Result<(), SkiaError> {
-        self.state = self
-            .saves
-            .pop()
-            .ok_or(SkiaError::new(SkiaErrorCode::RestoreUnderflow))?;
+        self.saves.push(SaveRecord {
+            state: self.state.clone(),
+            layer,
+        });
         Ok(())
     }
 
@@ -429,6 +508,27 @@ impl Canvas<'_> {
         blend_mode: BlendMode,
         sampling: SamplingOptions,
     ) -> Result<(), SkiaError> {
+        self.draw_image_with_paint(
+            image,
+            destination,
+            opacity,
+            Paint::new(Color::WHITE).with_blend_mode(blend_mode),
+            sampling,
+        )
+    }
+
+    /// Draws an RGBA8 bitmap with paint alpha, color filtering, and compositing.
+    ///
+    /// Paint RGB and gradients do not tint the image. Paint alpha multiplies
+    /// sampled alpha, then the optional color filter runs before compositing.
+    pub fn draw_image_with_paint(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        opacity: u8,
+        paint: Paint,
+        sampling: SamplingOptions,
+    ) -> Result<(), SkiaError> {
         let inverse = self.state.transform.inverse()?;
         let rectangle = self.transformed_device_rect(destination)?;
         let clipped = rectangle.intersection(self.state.scissor);
@@ -449,8 +549,10 @@ impl Canvas<'_> {
                     SamplingFilter::Nearest => sample_nearest(image, local, destination)?,
                     SamplingFilter::Linear => sample_linear(image, local, destination)?,
                 };
-                let color = Color::rgba(red, green, blue, alpha).with_opacity(opacity);
-                self.blend_color(x, y, color, blend_mode)?;
+                let color = Color::rgba(red, green, blue, alpha)
+                    .with_opacity(opacity)
+                    .with_opacity(paint.color().alpha());
+                self.blend_color(x, y, paint.filter_color(color), paint.blend_mode())?;
             }
         }
         Ok(())
@@ -794,7 +896,53 @@ impl Canvas<'_> {
     }
 
     fn blend_pixel(&mut self, x: i64, y: i64, paint: Paint) -> Result<(), SkiaError> {
-        self.blend_color(x, y, paint.color(), paint.blend_mode())
+        let local = if paint.gradient().is_some() {
+            self.state
+                .transform
+                .inverse()?
+                .map_point(pixel_center(x, y)?)?
+        } else {
+            Point::new(Scalar::ZERO, Scalar::ZERO)
+        };
+        self.blend_color(x, y, paint.source_color(local)?, paint.blend_mode())
+    }
+
+    fn restore_layer(&mut self, layer: ActiveLayer, pixels: Vec<u8>) -> Result<(), SkiaError> {
+        let pixels = apply_layer_filter(
+            pixels,
+            self.surface.width,
+            self.surface.height,
+            layer.options.filter(),
+        )?;
+        let bounds = layer.bounds.intersection(self.state.scissor);
+        for y in bounds.top..bounds.bottom {
+            for x in bounds.left..bounds.right {
+                let index = pixel_offset(self.surface.width, x, y)?;
+                let source = Color::rgba(
+                    pixels[index],
+                    pixels[index + 1],
+                    pixels[index + 2],
+                    pixels[index + 3],
+                )
+                .with_opacity(layer.options.opacity());
+                self.blend_color(x, y, source, layer.options.blend_mode())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn target_pixels(&self) -> &[u8] {
+        self.layer_buffers
+            .last()
+            .map_or(self.surface.pixels.as_slice(), Vec::as_slice)
+    }
+
+    fn target_pixels_mut(&mut self) -> &mut [u8] {
+        if let Some(pixels) = self.layer_buffers.last_mut() {
+            pixels
+        } else {
+            &mut self.surface.pixels
+        }
     }
 
     fn blend_color(
@@ -817,23 +965,143 @@ impl Canvas<'_> {
                 return Ok(());
             }
         }
-        let index = y
-            .checked_mul(i64::from(self.surface.width))
-            .and_then(|value| value.checked_add(x))
-            .and_then(|value| value.checked_mul(4))
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-        let index =
-            usize::try_from(index).map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+        let index = pixel_offset(self.surface.width, x, y)?;
+        let pixels = self.target_pixels();
         let destination = Color::rgba(
-            self.surface.pixels[index],
-            self.surface.pixels[index + 1],
-            self.surface.pixels[index + 2],
-            self.surface.pixels[index + 3],
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
         );
         let result = source.composite(destination, blend_mode);
-        self.surface.pixels[index..index + 4].copy_from_slice(&result.channels());
+        self.target_pixels_mut()[index..index + 4].copy_from_slice(&result.channels());
         Ok(())
     }
+}
+
+fn pixel_offset(width: u32, x: i64, y: i64) -> Result<usize, SkiaError> {
+    y.checked_mul(i64::from(width))
+        .and_then(|value| value.checked_add(x))
+        .and_then(|value| value.checked_mul(4))
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))
+}
+
+fn apply_layer_filter(
+    mut pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    filter: Option<ImageFilter>,
+) -> Result<Vec<u8>, SkiaError> {
+    match filter {
+        None => Ok(pixels),
+        Some(ImageFilter::Color(filter)) => {
+            for pixel in pixels.chunks_exact_mut(4) {
+                let color = filter.apply(Color::rgba(pixel[0], pixel[1], pixel[2], pixel[3]));
+                pixel.copy_from_slice(&color.channels());
+            }
+            Ok(pixels)
+        }
+        Some(ImageFilter::BoxBlur { radius }) => {
+            box_blur(pixels, width, height, usize::from(radius))
+        }
+    }
+}
+
+fn box_blur(
+    mut pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    radius: usize,
+) -> Result<Vec<u8>, SkiaError> {
+    let width = usize::try_from(width).map_err(|_| SkiaError::new(SkiaErrorCode::ResourceLimit))?;
+    let height =
+        usize::try_from(height).map_err(|_| SkiaError::new(SkiaErrorCode::ResourceLimit))?;
+    let kernel = radius
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(SkiaError::new(SkiaErrorCode::ResourceLimit))?;
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        for channel in &mut pixel[..3] {
+            *channel = multiply_255(*channel, alpha);
+        }
+    }
+    let mut horizontal = zeroed_pixels(pixels.len())?;
+    let mut prefix = Vec::new();
+    prefix
+        .try_reserve_exact(width.max(height).saturating_add(1))
+        .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
+    prefix.resize(width.max(height).saturating_add(1), 0_u64);
+    for y in 0..height {
+        for channel in 0..4 {
+            prefix[0] = 0;
+            for x in 0..width {
+                let index = (y * width + x) * 4 + channel;
+                prefix[x + 1] = prefix[x]
+                    .checked_add(u64::from(pixels[index]))
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+            }
+            for x in 0..width {
+                let start = x.saturating_sub(radius);
+                let end = x.saturating_add(radius).saturating_add(1).min(width);
+                let sum = prefix[end] - prefix[start];
+                horizontal[(y * width + x) * 4 + channel] = rounded_kernel_average(sum, kernel)?;
+            }
+        }
+    }
+    let mut output = zeroed_pixels(pixels.len())?;
+    for x in 0..width {
+        for channel in 0..4 {
+            prefix[0] = 0;
+            for y in 0..height {
+                let index = (y * width + x) * 4 + channel;
+                prefix[y + 1] = prefix[y]
+                    .checked_add(u64::from(horizontal[index]))
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+            }
+            for y in 0..height {
+                let start = y.saturating_sub(radius);
+                let end = y.saturating_add(radius).saturating_add(1).min(height);
+                let sum = prefix[end] - prefix[start];
+                output[(y * width + x) * 4 + channel] = rounded_kernel_average(sum, kernel)?;
+            }
+        }
+    }
+    for pixel in output.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        if alpha == 0 {
+            pixel[..3].fill(0);
+        } else {
+            for channel in &mut pixel[..3] {
+                *channel = unpremultiply_255(*channel, alpha);
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn zeroed_pixels(length: usize) -> Result<Vec<u8>, SkiaError> {
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(length)
+        .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
+    pixels.resize(length, 0);
+    Ok(pixels)
+}
+
+fn rounded_kernel_average(sum: u64, kernel: usize) -> Result<u8, SkiaError> {
+    let kernel = u64::try_from(kernel).map_err(|_| SkiaError::new(SkiaErrorCode::ResourceLimit))?;
+    u8::try_from((sum + kernel / 2) / kernel)
+        .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))
+}
+
+fn multiply_255(first: u8, second: u8) -> u8 {
+    ((u32::from(first) * u32::from(second) + 127) / 255) as u8
+}
+
+fn unpremultiply_255(channel: u8, alpha: u8) -> u8 {
+    ((u32::from(channel) * 255 + u32::from(alpha) / 2) / u32::from(alpha)).min(255) as u8
 }
 
 fn sample_nearest(image: &Image, sample: Point, destination: Rect) -> Result<[u8; 4], SkiaError> {

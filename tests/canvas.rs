@@ -1,7 +1,8 @@
 use skia::{
-    BlendMode, ClipRect, Color, ConicWeight, FillRule, Image, ImageErrorCode, Paint, PathBuilder,
-    Point, Rect, SamplingOptions, Scalar, SkiaErrorCode, StrokeCap, StrokeOptions, Surface,
-    SurfaceLimits, Transform, stroke_to_path,
+    BlendMode, ClipRect, Color, ColorFilter, ColorMatrix, ConicWeight, FillRule, Gradient,
+    GradientStop, Image, ImageErrorCode, ImageFilter, Paint, PathBuilder, Point, Rect,
+    SamplingOptions, SaveLayerOptions, Scalar, SkiaErrorCode, StrokeCap, StrokeOptions, Surface,
+    SurfaceLimits, TileMode, Transform, stroke_to_path,
 };
 
 fn scalar(value: i32) -> Scalar {
@@ -42,6 +43,108 @@ fn clipped_source_over_rect_is_exact_and_save_restore_is_isolated() {
     assert_eq!(pixel(&surface, 1, 1), [255, 127, 127, 255]);
     assert_eq!(pixel(&surface, 2, 2), [255, 127, 127, 255]);
     assert_eq!(pixel(&surface, 3, 2), [255, 255, 255, 255]);
+}
+
+#[test]
+fn transformed_gradient_and_color_filter_use_local_paint_coordinates() {
+    let stops = [
+        GradientStop::new(Scalar::ZERO, Color::RED).expect("red"),
+        GradientStop::new(scalar(1), Color::BLUE).expect("blue"),
+    ];
+    let gradient =
+        Gradient::linear(point(0, 0), point(4, 0), &stops, TileMode::Clamp).expect("gradient");
+    let swap_red_blue = ColorMatrix::new([
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+    ]);
+    let paint =
+        Paint::from_gradient(gradient).with_color_filter(ColorFilter::Matrix(swap_red_blue));
+    let mut surface = Surface::new(6, 1, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas.set_transform(Transform::translate(scalar(1), Scalar::ZERO));
+    canvas.fill_rect(rect(0, 0, 4, 1), paint).expect("fill");
+    drop(canvas);
+
+    assert_eq!(pixel(&surface, 0, 0), [0, 0, 0, 0]);
+    assert_eq!(pixel(&surface, 1, 0), [32, 0, 223, 255]);
+    assert_eq!(pixel(&surface, 2, 0), [96, 0, 159, 255]);
+    assert_eq!(pixel(&surface, 3, 0), [159, 0, 96, 255]);
+    assert_eq!(pixel(&surface, 4, 0), [223, 0, 32, 255]);
+    assert_eq!(pixel(&surface, 5, 0), [0, 0, 0, 0]);
+}
+
+#[test]
+fn save_layer_isolates_opacity_bounds_and_blur() {
+    let mut surface = Surface::new(3, 1, SurfaceLimits::default()).expect("surface");
+    let mut canvas = surface.canvas();
+    canvas.clear(Color::BLUE);
+    canvas
+        .save_layer(
+            SaveLayerOptions::new()
+                .with_bounds(rect(1, 0, 3, 1))
+                .with_opacity(128),
+        )
+        .expect("save layer");
+    canvas
+        .fill_rect(rect(0, 0, 3, 1), Paint::new(Color::RED))
+        .expect("layer fill");
+    canvas.restore().expect("restore layer");
+    drop(canvas);
+    assert_eq!(pixel(&surface, 0, 0), Color::BLUE.channels());
+    assert_eq!(pixel(&surface, 1, 0), [128, 0, 127, 255]);
+    assert_eq!(pixel(&surface, 2, 0), [128, 0, 127, 255]);
+
+    let mut blurred = Surface::new(3, 3, SurfaceLimits::default()).expect("blur surface");
+    let mut canvas = blurred.canvas();
+    canvas
+        .save_layer(
+            SaveLayerOptions::new().with_filter(ImageFilter::box_blur(1).expect("blur filter")),
+        )
+        .expect("blur layer");
+    canvas
+        .fill_rect(rect(1, 1, 2, 2), Paint::new(Color::WHITE))
+        .expect("center pixel");
+    canvas.restore().expect("blur restore");
+    drop(canvas);
+    for y in 0..3 {
+        for x in 0..3 {
+            assert_eq!(pixel(&blurred, x, y), [255, 255, 255, 28]);
+        }
+    }
+}
+
+#[test]
+fn save_layer_obeys_depth_and_memory_budgets() {
+    let mut surface =
+        Surface::new(2, 2, SurfaceLimits::new(4, 31, 2).expect("limits")).expect("surface");
+    assert_eq!(
+        surface
+            .canvas()
+            .save_layer(SaveLayerOptions::new())
+            .expect_err("layer memory")
+            .code(),
+        SkiaErrorCode::ResourceLimit
+    );
+    assert!(ImageFilter::box_blur(0).is_err());
+    assert!(ImageFilter::box_blur(65).is_err());
 }
 
 #[test]

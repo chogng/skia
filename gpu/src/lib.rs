@@ -16,8 +16,8 @@ pub mod software;
 use std::fmt;
 
 use skia_core::{
-    BlendMode, ClipOp, Color, FillRule, Paint, Path, Point, Rect, SamplingOptions, StrokeOptions,
-    Transform,
+    BlendMode, ClipOp, Color, FillRule, Paint, Path, Point, Rect, SamplingOptions,
+    SaveLayerOptions, StrokeOptions, Transform,
 };
 use skia_image::Image;
 
@@ -347,6 +347,10 @@ impl GpuClipNode {
 pub enum GpuCommand {
     /// Clears the full render target, without inheriting prior state.
     Clear(Color),
+    /// Begins one isolated full-surface layer.
+    SaveLayer(SaveLayerOptions),
+    /// Restores and composites the most recent isolated layer.
+    RestoreLayer,
     /// Fills one axis-aligned logical rectangle.
     FillRect {
         /// Logical rectangle to fill.
@@ -400,8 +404,8 @@ pub enum GpuCommand {
         opacity: u8,
         /// Reconstruction filter and edge behavior.
         sampling: SamplingOptions,
-        /// Compositing operation for the source image.
-        blend_mode: BlendMode,
+        /// Alpha, color filter, and compositing state for the source image.
+        paint: Paint,
         /// Logical-to-target transform selected when the command was recorded.
         transform: Transform,
         /// Target-space scissor rectangle, if active.
@@ -473,7 +477,13 @@ pub struct GpuCommandEncoder {
     glyph_atlases: Vec<GpuGlyphAtlas>,
     limits: GpuCommandLimits,
     state: GpuState,
-    saves: Vec<GpuState>,
+    saves: Vec<GpuSave>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GpuSave {
+    state: GpuState,
+    layer: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -536,23 +546,51 @@ impl GpuCommandEncoder {
 
     /// Saves the current transform and target-space scissor state.
     pub fn save(&mut self) -> Result<(), GpuCommandError> {
-        if self.saves.len() == self.limits.max_save_depth {
-            return Err(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit));
-        }
-        self.saves
-            .try_reserve(1)
-            .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::AllocationFailed))?;
-        self.saves.push(self.state);
+        self.push_save(false)
+    }
+
+    /// Saves state and begins one isolated layer command range.
+    pub fn save_layer(&mut self, options: SaveLayerOptions) -> Result<(), GpuCommandError> {
+        self.preflight_save()?;
+        self.push_unclipped(GpuCommand::SaveLayer(options))?;
+        self.saves.push(GpuSave {
+            state: self.state,
+            layer: true,
+        });
         Ok(())
     }
 
     /// Restores the most recently saved transform and target-space scissor state.
     pub fn restore(&mut self) -> Result<(), GpuCommandError> {
-        self.state = self
+        let save = self
             .saves
-            .pop()
+            .last()
+            .copied()
             .ok_or(GpuCommandError::new(GpuCommandErrorCode::RestoreUnderflow))?;
+        if save.layer {
+            self.push_unclipped(GpuCommand::RestoreLayer)?;
+        }
+        self.saves.pop();
+        self.state = save.state;
         Ok(())
+    }
+
+    fn push_save(&mut self, layer: bool) -> Result<(), GpuCommandError> {
+        self.preflight_save()?;
+        self.saves.push(GpuSave {
+            state: self.state,
+            layer,
+        });
+        Ok(())
+    }
+
+    fn preflight_save(&mut self) -> Result<(), GpuCommandError> {
+        if self.saves.len() == self.limits.max_save_depth {
+            return Err(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit));
+        }
+        self.saves
+            .try_reserve(1)
+            .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::AllocationFailed))
     }
 
     /// Intersects the current clip with one transformed rectangle.
@@ -704,6 +742,24 @@ impl GpuCommandEncoder {
         blend_mode: BlendMode,
         sampling: SamplingOptions,
     ) -> Result<(), GpuCommandError> {
+        self.draw_image_with_paint(
+            image,
+            destination,
+            opacity,
+            Paint::new(Color::WHITE).with_blend_mode(blend_mode),
+            sampling,
+        )
+    }
+
+    /// Records one image draw with paint alpha, color filtering, and compositing.
+    pub fn draw_image_with_paint(
+        &mut self,
+        image: GpuImageId,
+        destination: Rect,
+        opacity: u8,
+        paint: Paint,
+        sampling: SamplingOptions,
+    ) -> Result<(), GpuCommandError> {
         if self.image(image).is_none() {
             return Err(GpuCommandError::new(GpuCommandErrorCode::InvalidResource));
         }
@@ -712,7 +768,7 @@ impl GpuCommandEncoder {
             destination,
             opacity,
             sampling,
-            blend_mode,
+            paint,
             transform: self.state.transform,
             scissor: self.scissor(),
             clip: self.state.clip,

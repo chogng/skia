@@ -1,8 +1,8 @@
 #[cfg(feature = "text")]
 use crate::Point;
 use crate::{
-    ClipOp, Color, FillRule, Paint, Path, Rect, SamplingOptions, Scalar, SkiaError, SkiaErrorCode,
-    StrokeCap, StrokeJoin, StrokeOptions, Transform,
+    ClipOp, Color, FillRule, Paint, Path, Rect, SamplingOptions, SaveLayerOptions, Scalar,
+    SkiaError, SkiaErrorCode, StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
 use skia_image::Image;
 #[cfg(feature = "text")]
@@ -31,6 +31,8 @@ pub enum DrawCommand {
     Clear(Color),
     /// Saves the current transform and clip state.
     Save,
+    /// Saves state and redirects following draws into an isolated layer.
+    SaveLayer(SaveLayerOptions),
     /// Restores the most recently saved state.
     Restore,
     /// Applies a logical rectangle to the current clip.
@@ -204,6 +206,10 @@ impl DisplayListBuilder {
     /// Records a canvas-state save.
     pub fn save(&mut self) -> Result<(), SkiaError> {
         self.push(DrawCommand::Save)
+    }
+    /// Records an isolated layer whose options apply when it is restored.
+    pub fn save_layer(&mut self, options: SaveLayerOptions) -> Result<(), SkiaError> {
+        self.push(DrawCommand::SaveLayer(options))
     }
     /// Records a canvas-state restore.
     pub fn restore(&mut self) -> Result<(), SkiaError> {

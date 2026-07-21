@@ -340,6 +340,9 @@ impl GpuBackend for MetalBackend {
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(_) => {}
+                GpuCommand::SaveLayer(_) | GpuCommand::RestoreLayer => {
+                    return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
+                }
                 GpuCommand::FillRect { paint, .. }
                     if paint.blend_mode() == BlendMode::SourceOver => {}
                 GpuCommand::FillPath { path, paint, .. }
@@ -348,9 +351,10 @@ impl GpuBackend for MetalBackend {
                 GpuCommand::StrokePath { path, paint, .. }
                     if paint.blend_mode() == BlendMode::SourceOver
                         && commands.path(*path).is_some() => {}
-                GpuCommand::DrawImage {
-                    image, blend_mode, ..
-                } if *blend_mode == BlendMode::SourceOver && commands.image(*image).is_some() => {}
+                GpuCommand::DrawImage { image, paint, .. }
+                    if paint.blend_mode() == BlendMode::SourceOver
+                        && paint.color_filter().is_none()
+                        && commands.image(*image).is_some() => {}
                 GpuCommand::DrawGlyphs { atlas, paint, .. } => {
                     if paint.blend_mode() != BlendMode::SourceOver
                         || commands.glyph_atlas(*atlas).is_none()
@@ -387,6 +391,9 @@ impl GpuBackend for MetalBackend {
             match command {
                 GpuCommand::Clear(color) => {
                     encode_clear(command_buffer, surface, *color)?;
+                }
+                GpuCommand::SaveLayer(_) | GpuCommand::RestoreLayer => {
+                    return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
                 }
                 GpuCommand::FillRect {
                     rect,
@@ -460,6 +467,7 @@ impl GpuBackend for MetalBackend {
                     destination,
                     opacity,
                     sampling,
+                    paint,
                     transform,
                     scissor,
                     clip,
@@ -486,7 +494,7 @@ impl GpuBackend for MetalBackend {
                         surface,
                         &texture,
                         *destination,
-                        *opacity,
+                        multiply_opacity(*opacity, paint.color().alpha()),
                         *sampling,
                         *transform,
                         *scissor,
@@ -1028,6 +1036,10 @@ fn paint_color(color: Color) -> [f32; 4] {
         f32::from(blue) / scale,
         f32::from(alpha) / scale,
     ]
+}
+
+fn multiply_opacity(first: u8, second: u8) -> u8 {
+    ((u32::from(first) * u32::from(second) + 127) / 255) as u8
 }
 
 fn glyph_vertices(

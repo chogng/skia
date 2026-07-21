@@ -1,3 +1,8 @@
+use skia_error::{SkiaError, SkiaErrorCode};
+use skia_geometry::{Point, Scalar};
+
+const GRADIENT_SCALE: i128 = 1 << 16;
+
 /// One straight-alpha sRGBA8 color.
 ///
 /// The RGB channels are deliberately retained even when alpha is zero. This
@@ -197,6 +202,341 @@ pub enum BlendMode {
     Luminosity,
 }
 
+/// Gradient coordinate behavior outside the first and last stop.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TileMode {
+    /// Extends the edge stop colors.
+    Clamp,
+    /// Repeats every unit interval.
+    Repeat,
+    /// Alternates forward and reversed unit intervals.
+    Mirror,
+}
+
+/// One color and normalized Q16.16 position in a gradient.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GradientStop {
+    offset: Scalar,
+    color: Color,
+}
+
+impl GradientStop {
+    const EMPTY: Self = Self {
+        offset: Scalar::ZERO,
+        color: Color::TRANSPARENT,
+    };
+
+    /// Creates a stop whose offset is in the inclusive range `[0, 1]`.
+    pub const fn new(offset: Scalar, color: Color) -> Result<Self, SkiaError> {
+        if offset.bits() < 0 || offset.bits() > 1 << 16 {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        Ok(Self { offset, color })
+    }
+
+    /// Returns the normalized position.
+    pub const fn offset(self) -> Scalar {
+        self.offset
+    }
+
+    /// Returns the straight-alpha stop color.
+    pub const fn color(self) -> Color {
+        self.color
+    }
+}
+
+/// Geometric shape used to evaluate a gradient in local canvas coordinates.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GradientGeometry {
+    /// Projection along a non-degenerate line from start to end.
+    Linear {
+        /// Unit-interval origin.
+        start: Point,
+        /// Unit-interval endpoint.
+        end: Point,
+    },
+    /// Distance from a center divided by a positive radius.
+    Radial {
+        /// Circle center.
+        center: Point,
+        /// Unit-interval radius.
+        radius: Scalar,
+    },
+}
+
+/// Immutable bounded linear or radial gradient.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Gradient {
+    geometry: GradientGeometry,
+    stops: [GradientStop; Self::MAX_STOPS],
+    stop_count: u8,
+    tile_mode: TileMode,
+}
+
+impl Gradient {
+    /// Maximum stop count retained inline by one paint.
+    pub const MAX_STOPS: usize = 8;
+
+    /// Creates a local-space linear gradient.
+    pub fn linear(
+        start: Point,
+        end: Point,
+        stops: &[GradientStop],
+        tile_mode: TileMode,
+    ) -> Result<Self, SkiaError> {
+        if start == end {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        Self::new(GradientGeometry::Linear { start, end }, stops, tile_mode)
+    }
+
+    /// Creates a local-space radial gradient.
+    pub fn radial(
+        center: Point,
+        radius: Scalar,
+        stops: &[GradientStop],
+        tile_mode: TileMode,
+    ) -> Result<Self, SkiaError> {
+        if radius.bits() <= 0 {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        Self::new(
+            GradientGeometry::Radial { center, radius },
+            stops,
+            tile_mode,
+        )
+    }
+
+    fn new(
+        geometry: GradientGeometry,
+        stops: &[GradientStop],
+        tile_mode: TileMode,
+    ) -> Result<Self, SkiaError> {
+        if stops.len() < 2
+            || stops.len() > Self::MAX_STOPS
+            || stops.windows(2).any(|pair| pair[0].offset > pair[1].offset)
+        {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        let mut retained = [GradientStop::EMPTY; Self::MAX_STOPS];
+        retained[..stops.len()].copy_from_slice(stops);
+        Ok(Self {
+            geometry,
+            stops: retained,
+            stop_count: u8::try_from(stops.len())
+                .map_err(|_| SkiaError::new(SkiaErrorCode::ResourceLimit))?,
+            tile_mode,
+        })
+    }
+
+    /// Returns the local-space geometry.
+    pub const fn geometry(self) -> GradientGeometry {
+        self.geometry
+    }
+
+    /// Borrows ordered retained stops.
+    pub fn stops(&self) -> &[GradientStop] {
+        &self.stops[..usize::from(self.stop_count)]
+    }
+
+    /// Returns the out-of-range coordinate policy.
+    pub const fn tile_mode(self) -> TileMode {
+        self.tile_mode
+    }
+
+    /// Evaluates one local-space point with deterministic fixed-point interpolation.
+    pub fn sample(self, point: Point) -> Result<Color, SkiaError> {
+        let parameter = match self.geometry {
+            GradientGeometry::Linear { start, end } => linear_parameter(start, end, point)?,
+            GradientGeometry::Radial { center, radius } => radial_parameter(center, radius, point)?,
+        };
+        Ok(sample_stops(
+            self.stops(),
+            tile_parameter(parameter, self.tile_mode),
+        ))
+    }
+}
+
+/// Fixed-point 4×5 straight-RGBA color transform.
+///
+/// Coefficients and biases are signed Q16.16 values. Each output row multiplies
+/// input channels in RGBA order and adds its bias in 8-bit channel units.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ColorMatrix {
+    values: [i32; 20],
+}
+
+impl ColorMatrix {
+    /// Identity color transform.
+    pub const IDENTITY: Self = Self::new([
+        1 << 16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+    ]);
+
+    /// Creates a matrix from four consecutive five-value rows.
+    pub const fn new(values: [i32; 20]) -> Self {
+        Self { values }
+    }
+
+    /// Returns the exact row-major Q16.16 values.
+    pub const fn values(self) -> [i32; 20] {
+        self.values
+    }
+
+    /// Applies this matrix and clamps every output channel to `[0, 255]`.
+    pub fn apply(self, color: Color) -> Color {
+        let input = color.channels();
+        let mut output = [0_u8; 4];
+        for (row, output) in output.iter_mut().enumerate() {
+            let values = &self.values[row * 5..row * 5 + 5];
+            let total = values[..4].iter().zip(input).fold(
+                i128::from(values[4]),
+                |total, (coefficient, channel)| {
+                    total + i128::from(*coefficient) * i128::from(channel)
+                },
+            );
+            let rounded = rounded_shift_q16(total).clamp(0, 255);
+            *output = u8::try_from(rounded).unwrap_or(0);
+        }
+        Color::rgba(output[0], output[1], output[2], output[3])
+    }
+}
+
+/// Per-source color transformation applied before compositing.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ColorFilter {
+    /// Applies a fixed-point 4×5 matrix.
+    Matrix(ColorMatrix),
+    /// Composites a constant filter color over the source color.
+    Blend {
+        /// Constant filter source.
+        color: Color,
+        /// Blend operation between the constant and original source.
+        mode: BlendMode,
+    },
+}
+
+impl ColorFilter {
+    /// Applies the filter to one straight-alpha color.
+    pub fn apply(self, source: Color) -> Color {
+        match self {
+            Self::Matrix(matrix) => matrix.apply(source),
+            Self::Blend { color, mode } => color.composite(source, mode),
+        }
+    }
+}
+
+/// Whole-layer image processing performed before restore compositing.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ImageFilter {
+    /// Applies one color filter independently to every layer pixel.
+    Color(ColorFilter),
+    /// Applies a separable transparent-edge box blur.
+    BoxBlur {
+        /// Positive integer kernel radius in device pixels.
+        radius: u8,
+    },
+}
+
+impl ImageFilter {
+    /// Creates a positive box blur with a radius no larger than 64 pixels.
+    pub const fn box_blur(radius: u8) -> Result<Self, SkiaError> {
+        if radius == 0 || radius > 64 {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        Ok(Self::BoxBlur { radius })
+    }
+}
+
+/// Restore-time compositing policy for one isolated layer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SaveLayerOptions {
+    bounds: Option<skia_geometry::Rect>,
+    opacity: u8,
+    blend_mode: BlendMode,
+    filter: Option<ImageFilter>,
+}
+
+impl SaveLayerOptions {
+    /// Creates a full-clip, opaque, source-over layer without a filter.
+    pub const fn new() -> Self {
+        Self {
+            bounds: None,
+            opacity: u8::MAX,
+            blend_mode: BlendMode::SourceOver,
+            filter: None,
+        }
+    }
+
+    /// Restricts restore compositing to transformed logical bounds.
+    pub const fn with_bounds(mut self, bounds: skia_geometry::Rect) -> Self {
+        self.bounds = Some(bounds);
+        self
+    }
+
+    /// Selects restore-time source opacity.
+    pub const fn with_opacity(mut self, opacity: u8) -> Self {
+        self.opacity = opacity;
+        self
+    }
+
+    /// Selects restore-time source/destination compositing.
+    pub const fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
+        self.blend_mode = blend_mode;
+        self
+    }
+
+    /// Selects one restore-time image filter.
+    pub const fn with_filter(mut self, filter: ImageFilter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Returns optional logical layer bounds.
+    pub const fn bounds(self) -> Option<skia_geometry::Rect> {
+        self.bounds
+    }
+
+    /// Returns restore-time source opacity.
+    pub const fn opacity(self) -> u8 {
+        self.opacity
+    }
+
+    /// Returns restore-time compositing mode.
+    pub const fn blend_mode(self) -> BlendMode {
+        self.blend_mode
+    }
+
+    /// Returns the optional restore-time filter.
+    pub const fn filter(self) -> Option<ImageFilter> {
+        self.filter
+    }
+}
+
+impl Default for SaveLayerOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlendMode {
     /// Returns whether this is a Porter-Duff operation.
     pub const fn is_porter_duff(self) -> bool {
@@ -301,6 +641,8 @@ impl BlendMode {
 pub struct Paint {
     color: Color,
     blend_mode: BlendMode,
+    gradient: Option<Gradient>,
+    color_filter: Option<ColorFilter>,
 }
 
 impl Paint {
@@ -309,6 +651,18 @@ impl Paint {
         Self {
             color,
             blend_mode: BlendMode::SourceOver,
+            gradient: None,
+            color_filter: None,
+        }
+    }
+
+    /// Creates a source-over gradient paint with full opacity.
+    pub const fn from_gradient(gradient: Gradient) -> Self {
+        Self {
+            color: Color::WHITE,
+            blend_mode: BlendMode::SourceOver,
+            gradient: Some(gradient),
+            color_filter: None,
         }
     }
 
@@ -336,6 +690,30 @@ impl Paint {
         self
     }
 
+    /// Selects a local-space gradient; the current color alpha modulates it.
+    pub const fn with_gradient(mut self, gradient: Gradient) -> Self {
+        self.gradient = Some(gradient);
+        self
+    }
+
+    /// Restores constant-color source evaluation.
+    pub const fn without_gradient(mut self) -> Self {
+        self.gradient = None;
+        self
+    }
+
+    /// Selects a pre-compositing color filter.
+    pub const fn with_color_filter(mut self, color_filter: ColorFilter) -> Self {
+        self.color_filter = Some(color_filter);
+        self
+    }
+
+    /// Removes the pre-compositing color filter.
+    pub const fn without_color_filter(mut self) -> Self {
+        self.color_filter = None;
+        self
+    }
+
     /// Returns the straight source color.
     pub const fn color(self) -> Color {
         self.color
@@ -344,6 +722,143 @@ impl Paint {
     /// Returns the compositing operation.
     pub const fn blend_mode(self) -> BlendMode {
         self.blend_mode
+    }
+
+    /// Returns the optional local-space gradient.
+    pub const fn gradient(self) -> Option<Gradient> {
+        self.gradient
+    }
+
+    /// Returns the optional pre-compositing color filter.
+    pub const fn color_filter(self) -> Option<ColorFilter> {
+        self.color_filter
+    }
+
+    /// Evaluates this paint's source at one local-space point.
+    pub fn source_color(self, point: Point) -> Result<Color, SkiaError> {
+        let source = if let Some(gradient) = self.gradient {
+            gradient.sample(point)?.with_opacity(self.color.alpha())
+        } else {
+            self.color
+        };
+        Ok(self.filter_color(source))
+    }
+
+    /// Applies only this paint's color filter to an externally supplied source.
+    pub fn filter_color(self, source: Color) -> Color {
+        self.color_filter
+            .map_or(source, |filter| filter.apply(source))
+    }
+}
+
+fn linear_parameter(start: Point, end: Point, point: Point) -> Result<i128, SkiaError> {
+    let dx = i128::from(end.x().bits()) - i128::from(start.x().bits());
+    let dy = i128::from(end.y().bits()) - i128::from(start.y().bits());
+    let px = i128::from(point.x().bits()) - i128::from(start.x().bits());
+    let py = i128::from(point.y().bits()) - i128::from(start.y().bits());
+    let numerator = px
+        .checked_mul(dx)
+        .and_then(|value| {
+            py.checked_mul(dy)
+                .and_then(|other| value.checked_add(other))
+        })
+        .and_then(|value| value.checked_mul(GRADIENT_SCALE))
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    let denominator = dx
+        .checked_mul(dx)
+        .and_then(|value| {
+            dy.checked_mul(dy)
+                .and_then(|other| value.checked_add(other))
+        })
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    if denominator == 0 {
+        return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+    }
+    Ok(rounded_ratio(numerator, denominator))
+}
+
+fn radial_parameter(center: Point, radius: Scalar, point: Point) -> Result<i128, SkiaError> {
+    let dx = i128::from(point.x().bits()) - i128::from(center.x().bits());
+    let dy = i128::from(point.y().bits()) - i128::from(center.y().bits());
+    let squared = dx
+        .checked_mul(dx)
+        .and_then(|value| {
+            dy.checked_mul(dy)
+                .and_then(|other| value.checked_add(other))
+        })
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    let distance = squared.unsigned_abs().isqrt();
+    let numerator = i128::try_from(distance)
+        .ok()
+        .and_then(|distance| distance.checked_mul(GRADIENT_SCALE))
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    Ok(rounded_ratio(numerator, i128::from(radius.bits())))
+}
+
+fn tile_parameter(parameter: i128, tile_mode: TileMode) -> i32 {
+    let tiled = match tile_mode {
+        TileMode::Clamp => parameter.clamp(0, GRADIENT_SCALE),
+        TileMode::Repeat => parameter.rem_euclid(GRADIENT_SCALE),
+        TileMode::Mirror => {
+            let period = GRADIENT_SCALE * 2;
+            let value = parameter.rem_euclid(period);
+            if value > GRADIENT_SCALE {
+                period - value
+            } else {
+                value
+            }
+        }
+    };
+    i32::try_from(tiled).unwrap_or_default()
+}
+
+fn sample_stops(stops: &[GradientStop], parameter: i32) -> Color {
+    let first = stops[0];
+    if parameter <= first.offset.bits() {
+        return first.color;
+    }
+    for pair in stops.windows(2) {
+        let start = pair[0];
+        let end = pair[1];
+        if parameter <= end.offset.bits() {
+            let span = i128::from(end.offset.bits() - start.offset.bits());
+            if span == 0 {
+                return end.color;
+            }
+            let offset = i128::from(parameter - start.offset.bits());
+            return interpolate_color(start.color, end.color, offset, span);
+        }
+    }
+    stops[stops.len() - 1].color
+}
+
+fn interpolate_color(start: Color, end: Color, offset: i128, span: i128) -> Color {
+    let start = start.channels();
+    let end = end.channels();
+    let mut output = [0_u8; 4];
+    for index in 0..4 {
+        let value = i128::from(start[index]) * (span - offset) + i128::from(end[index]) * offset;
+        output[index] = u8::try_from((value + span / 2) / span).unwrap_or_default();
+    }
+    Color::rgba(output[0], output[1], output[2], output[3])
+}
+
+fn rounded_ratio(numerator: i128, denominator: i128) -> i128 {
+    let rounded =
+        (numerator.unsigned_abs() + denominator.unsigned_abs() / 2) / denominator.unsigned_abs();
+    let rounded = i128::try_from(rounded).unwrap_or(i128::MAX);
+    if (numerator < 0) == (denominator < 0) {
+        rounded
+    } else {
+        -rounded
+    }
+}
+
+fn rounded_shift_q16(value: i128) -> i128 {
+    if value >= 0 {
+        (value + (1 << 15)) >> 16
+    } else {
+        -((-value + (1 << 15)) >> 16)
     }
 }
 
@@ -660,7 +1175,11 @@ fn integer_sqrt(value: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlendMode, Color, Paint};
+    use skia_geometry::{Point, Scalar};
+
+    use super::{
+        BlendMode, Color, ColorFilter, ColorMatrix, Gradient, GradientStop, Paint, TileMode,
+    };
 
     #[test]
     fn color_constructors_pack_channels_and_apply_opacity() {
@@ -757,5 +1276,116 @@ mod tests {
             Color::rgb(100, 200, 50).composite(Color::rgb(200, 100, 250), BlendMode::Screen),
             Color::rgb(222, 222, 251)
         );
+    }
+
+    #[test]
+    fn linear_gradient_interpolates_tiles_and_modulates_alpha() {
+        let point = |x| Point::new(Scalar::from_bits(x), Scalar::ZERO);
+        let stops = [
+            GradientStop::new(Scalar::ZERO, Color::RED).expect("red"),
+            GradientStop::new(Scalar::from_bits(1 << 16), Color::BLUE).expect("blue"),
+        ];
+        let gradient =
+            Gradient::linear(point(0), point(4 << 16), &stops, TileMode::Clamp).expect("linear");
+        assert_eq!(gradient.sample(point(0)).expect("start"), Color::RED);
+        assert_eq!(
+            gradient.sample(point(2 << 16)).expect("middle"),
+            Color::rgb(128, 0, 128)
+        );
+        assert_eq!(gradient.sample(point(8 << 16)).expect("clamp"), Color::BLUE);
+        assert_eq!(
+            Paint::from_gradient(gradient)
+                .with_alpha(128)
+                .source_color(point(2 << 16))
+                .expect("paint"),
+            Color::rgba(128, 0, 128, 128)
+        );
+
+        let repeated =
+            Gradient::linear(point(0), point(4 << 16), &stops, TileMode::Repeat).expect("repeat");
+        assert_eq!(
+            repeated.sample(point(5 << 16)).expect("repeat sample"),
+            Color::rgb(191, 0, 64)
+        );
+        let mirrored =
+            Gradient::linear(point(0), point(4 << 16), &stops, TileMode::Mirror).expect("mirror");
+        assert_eq!(
+            mirrored.sample(point(5 << 16)).expect("mirror sample"),
+            Color::rgb(64, 0, 191)
+        );
+    }
+
+    #[test]
+    fn radial_gradient_and_color_filters_are_deterministic() {
+        let center = Point::new(Scalar::ZERO, Scalar::ZERO);
+        let stops = [
+            GradientStop::new(Scalar::ZERO, Color::WHITE).expect("white"),
+            GradientStop::new(Scalar::from_bits(1 << 16), Color::BLACK).expect("black"),
+        ];
+        let gradient =
+            Gradient::radial(center, Scalar::from_bits(10 << 16), &stops, TileMode::Clamp)
+                .expect("radial");
+        assert_eq!(
+            gradient
+                .sample(Point::new(
+                    Scalar::from_bits(6 << 16),
+                    Scalar::from_bits(8 << 16)
+                ))
+                .expect("edge"),
+            Color::BLACK
+        );
+
+        let grayscale = ColorMatrix::new([
+            21_845,
+            21_845,
+            21_845,
+            0,
+            0,
+            21_845,
+            21_845,
+            21_845,
+            0,
+            0,
+            21_845,
+            21_845,
+            21_845,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1 << 16,
+            0,
+        ]);
+        assert_eq!(
+            grayscale.apply(Color::rgba(30, 60, 90, 128)),
+            Color::rgba(60, 60, 60, 128)
+        );
+        let filtered = Paint::new(Color::BLUE).with_color_filter(ColorFilter::Blend {
+            color: Color::rgba(255, 0, 0, 128),
+            mode: BlendMode::SourceOver,
+        });
+        assert_eq!(
+            filtered.source_color(center).expect("filter"),
+            Color::rgba(128, 0, 127, 255)
+        );
+    }
+
+    #[test]
+    fn gradients_validate_geometry_stop_order_and_capacity() {
+        let point = Point::new(Scalar::ZERO, Scalar::ZERO);
+        let stop = GradientStop::new(Scalar::ZERO, Color::BLACK).expect("stop");
+        assert!(Gradient::linear(point, point, &[stop, stop], TileMode::Clamp).is_err());
+        assert!(Gradient::radial(point, Scalar::ZERO, &[stop, stop], TileMode::Clamp).is_err());
+        assert!(
+            Gradient::linear(
+                point,
+                Point::new(Scalar::from_bits(1 << 16), Scalar::ZERO),
+                &[stop],
+                TileMode::Clamp,
+            )
+            .is_err()
+        );
+        assert!(GradientStop::new(Scalar::from_bits((1 << 16) + 1), Color::BLACK).is_err());
     }
 }

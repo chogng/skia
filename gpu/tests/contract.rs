@@ -1,8 +1,9 @@
 use std::fmt;
 
 use skia_core::{
-    BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, SamplingOptions, Scalar,
-    StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, Transform,
+    BlendMode, ClipOp, Color, ColorFilter, ColorMatrix, FillRule, Gradient, GradientStop, Paint,
+    PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar, StrokeAlign, StrokeCap,
+    StrokeJoin, StrokeOptions, TileMode, Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuClipGeometry, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode,
@@ -323,6 +324,52 @@ fn software_replay_is_a_pixel_oracle_for_gpu_command_state() {
 }
 
 #[test]
+fn gpu_layers_record_boundaries_and_replay_restore_compositing() {
+    let mut encoder = GpuCommandEncoder::new(4).unwrap();
+    encoder.clear(Color::BLUE).unwrap();
+    encoder
+        .save_layer(SaveLayerOptions::new().with_opacity(128))
+        .unwrap();
+    encoder
+        .fill_rect(rect(1, 0, 3, 1), Paint::new(Color::RED))
+        .unwrap();
+    encoder.restore().unwrap();
+    let commands = encoder.finish();
+    assert!(matches!(commands.commands()[1], GpuCommand::SaveLayer(_)));
+    assert!(matches!(commands.commands()[3], GpuCommand::RestoreLayer));
+
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &commands).unwrap();
+    assert_eq!(pixel(&surface, 0, 0), Color::BLUE.channels());
+    assert_eq!(pixel(&surface, 1, 0), [128, 0, 127, 255]);
+    assert_eq!(pixel(&surface, 2, 0), [128, 0, 127, 255]);
+    assert_eq!(pixel(&surface, 3, 0), Color::BLUE.channels());
+}
+
+#[test]
+fn software_replay_evaluates_gpu_gradients_in_local_space() {
+    let stops = [
+        GradientStop::new(Scalar::ZERO, Color::RED).unwrap(),
+        GradientStop::new(scalar(1), Color::BLUE).unwrap(),
+    ];
+    let gradient = Gradient::linear(point(0, 0), point(4, 0), &stops, TileMode::Clamp).unwrap();
+    let mut encoder = GpuCommandEncoder::new(1).unwrap();
+    encoder
+        .fill_rect(rect(0, 0, 4, 1), Paint::from_gradient(gradient))
+        .unwrap();
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &encoder.finish()).unwrap();
+    assert_eq!(pixel(&surface, 0, 0), [223, 0, 32, 255]);
+    assert_eq!(pixel(&surface, 3, 0), [32, 0, 223, 255]);
+}
+
+#[test]
 fn software_replay_honors_linear_image_sampling() {
     let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
     let mut encoder = GpuCommandEncoder::new(1).unwrap();
@@ -346,6 +393,51 @@ fn software_replay_honors_linear_image_sampling() {
     assert_eq!(pixel(&surface, 1, 0), [191, 0, 64, 255]);
     assert_eq!(pixel(&surface, 2, 0), [64, 0, 191, 255]);
     assert_eq!(pixel(&surface, 3, 0), [0, 0, 255, 255]);
+}
+
+#[test]
+fn software_replay_applies_image_paint_alpha_and_filter() {
+    let image = Image::from_rgba8(1, 1, vec![255, 0, 0, 255]).unwrap();
+    let mut encoder = GpuCommandEncoder::new(1).unwrap();
+    let image = encoder.add_image(image).unwrap();
+    let swap_red_blue = ColorMatrix::new([
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+    ]);
+    encoder
+        .draw_image_with_paint(
+            image,
+            rect(0, 0, 1, 1),
+            255,
+            Paint::new(Color::rgba(255, 255, 255, 128))
+                .with_color_filter(ColorFilter::Matrix(swap_red_blue)),
+            SamplingOptions::NEAREST,
+        )
+        .unwrap();
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(1, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &encoder.finish()).unwrap();
+    assert_eq!(pixel(&surface, 0, 0), [0, 0, 255, 128]);
 }
 
 #[test]
