@@ -6,17 +6,19 @@ use metal::{
     RenderPassDescriptor, RenderPipelineDescriptor, RenderPipelineState, Texture,
     TextureDescriptor,
 };
-use skia_core::{ClipOp, FillRule};
-use skia_gpu::{GpuClipGeometry, GpuClipId, GpuClipNode, GpuCommandBuffer, GpuSurfaceDescriptor};
+use skia_core::{ClipOp, FillRule, Path, StrokeOptions, Transform};
+use skia_gpu::{GpuClipGeometry, GpuClipId, GpuCommandBuffer, GpuSurfaceDescriptor};
+use skia_tessellation::{DEFAULT_CURVE_STEPS, FlatteningLimits, PathFlattener, stroke_mesh};
 
 use crate::{
     MetalError, MetalErrorCode,
-    clip_geometry::{ClipEdge, clip_edges},
+    clip_geometry::{ClipEdge, clip_edges, path_edges},
 };
 
 pub(crate) struct ClipRenderer {
     device: Device,
     pipeline: RenderPipelineState,
+    stroke_pipeline: RenderPipelineState,
     unclipped: Texture,
 }
 
@@ -39,9 +41,27 @@ impl ClipRenderer {
         let pipeline = device
             .new_render_pipeline_state(&descriptor)
             .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+        let stroke_vertex = library
+            .get_function("skia_stroke_vertex", None)
+            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
+        let stroke_fragment = library
+            .get_function("skia_stroke_fragment", None)
+            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
+        let stroke_descriptor = RenderPipelineDescriptor::new();
+        stroke_descriptor.set_vertex_function(Some(&stroke_vertex));
+        stroke_descriptor.set_fragment_function(Some(&stroke_fragment));
+        let stroke_attachment = stroke_descriptor
+            .color_attachments()
+            .object_at(0)
+            .ok_or(MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+        stroke_attachment.set_pixel_format(MTLPixelFormat::R8Unorm);
+        let stroke_pipeline = device
+            .new_render_pipeline_state(&stroke_descriptor)
+            .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
         Ok(Self {
             device: device.clone(),
             pipeline,
+            stroke_pipeline,
             unclipped: new_unclipped_texture(device),
         })
     }
@@ -78,10 +98,104 @@ impl ClipRenderer {
                 .unwrap_or(&self.unclipped);
             let edges = clip_edges(commands, node)?;
             let texture = self.new_texture(surface);
-            self.encode_mask(command_buffer, &texture, parent, &edges, node)?;
+            let rule = match node.geometry() {
+                GpuClipGeometry::Path { rule, .. } => rule,
+                GpuClipGeometry::Rect(_) => FillRule::NonZero,
+            };
+            self.encode_mask(
+                command_buffer,
+                &texture,
+                parent,
+                &edges,
+                rule,
+                node.op(),
+                node.parent().is_some(),
+            )?;
             textures.insert(id, texture);
         }
         Ok(())
+    }
+
+    /// Renders a transformed fill path into a temporary mask, optionally
+    /// intersected with an already-materialized complex clip mask.
+    pub(crate) fn rasterize_path(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: GpuSurfaceDescriptor,
+        path: &Path,
+        rule: FillRule,
+        transform: Transform,
+        parent: Option<&Texture>,
+    ) -> Result<Texture, MetalError> {
+        let edges = path_edges(path, transform)?;
+        let texture = self.new_texture(surface);
+        self.encode_mask(
+            command_buffer,
+            &texture,
+            parent.unwrap_or(&self.unclipped),
+            &edges,
+            rule,
+            ClipOp::Intersect,
+            parent.is_some(),
+        )?;
+        Ok(texture)
+    }
+
+    /// Materializes deterministic shared stroke coverage as an R8 shader mask.
+    pub(crate) fn rasterize_stroke(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: GpuSurfaceDescriptor,
+        path: &Path,
+        options: &StrokeOptions,
+        transform: Transform,
+    ) -> Result<Texture, MetalError> {
+        let limits = FlatteningLimits::for_path(path, DEFAULT_CURVE_STEPS)
+            .map_err(|_| submission_failed())?;
+        let contours = PathFlattener::new(limits)
+            .flatten(path, transform)
+            .map_err(|_| submission_failed())?
+            .into_contours();
+        let mesh = stroke_mesh(&contours, options).map_err(|_| submission_failed())?;
+        if mesh.vertices().is_empty() {
+            return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
+        }
+        let mut vertices = Vec::new();
+        vertices
+            .try_reserve_exact(mesh.vertices().len())
+            .map_err(|_| submission_failed())?;
+        for point in mesh.vertices() {
+            vertices.push(StrokeVertex {
+                position: [
+                    point.x().bits() as f32 / 65_536.0,
+                    point.y().bits() as f32 / 65_536.0,
+                ],
+            });
+        }
+        let byte_length = vertices
+            .len()
+            .checked_mul(size_of::<StrokeVertex>())
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(submission_failed)?;
+        let buffer = self.device.new_buffer_with_data(
+            vertices.as_ptr().cast(),
+            byte_length,
+            MTLResourceOptions::CPUCacheModeDefaultCache,
+        );
+        let texture = self.new_texture(surface);
+        let descriptor = stroke_render_pass(&texture)?;
+        let encoder = command_buffer.new_render_command_encoder(descriptor);
+        encoder.set_render_pipeline_state(&self.stroke_pipeline);
+        encoder.set_vertex_buffer(0, Some(&buffer), 0);
+        let viewport = [surface.width() as f32, surface.height() as f32];
+        encoder.set_vertex_bytes(1, size_of::<[f32; 2]>() as u64, viewport.as_ptr().cast());
+        encoder.draw_primitives(
+            MTLPrimitiveType::Triangle,
+            0,
+            u64::try_from(vertices.len()).map_err(|_| submission_failed())?,
+        );
+        encoder.end_encoding();
+        Ok(texture)
     }
 
     fn new_texture(&self, surface: GpuSurfaceDescriptor) -> Texture {
@@ -100,7 +214,9 @@ impl ClipRenderer {
         output: &Texture,
         parent: &Texture,
         edges: &[ClipEdge],
-        node: GpuClipNode,
+        rule: FillRule,
+        op: ClipOp,
+        has_parent: bool,
     ) -> Result<(), MetalError> {
         let byte_length = edges
             .len()
@@ -116,15 +232,11 @@ impl ClipRenderer {
         let encoder = command_buffer.new_render_command_encoder(descriptor);
         encoder.set_render_pipeline_state(&self.pipeline);
         encoder.set_fragment_buffer(0, Some(&edge_buffer), 0);
-        let rule = match node.geometry() {
-            GpuClipGeometry::Path { rule, .. } => rule,
-            GpuClipGeometry::Rect(_) => FillRule::NonZero,
-        };
         let uniforms = [
             u32::try_from(edges.len()).map_err(|_| submission_failed())?,
             u32::from(rule == FillRule::EvenOdd),
-            u32::from(node.op() == ClipOp::Difference),
-            u32::from(node.parent().is_some()),
+            u32::from(op == ClipOp::Difference),
+            u32::from(has_parent),
         ];
         encoder.set_fragment_bytes(1, size_of::<[u32; 4]>() as u64, uniforms.as_ptr().cast());
         encoder.set_fragment_texture(0, Some(parent));
@@ -145,6 +257,21 @@ fn texture_render_pass<'a>(
     attachment.set_texture(Some(texture));
     attachment.set_load_action(MTLLoadAction::DontCare);
     attachment.set_store_action(MTLStoreAction::Store);
+    Ok(descriptor)
+}
+
+fn stroke_render_pass<'a>(
+    texture: &Texture,
+) -> Result<&'a metal::RenderPassDescriptorRef, MetalError> {
+    let descriptor = RenderPassDescriptor::new();
+    let attachment = descriptor
+        .color_attachments()
+        .object_at(0)
+        .ok_or(MetalError::new(MetalErrorCode::SurfaceAllocationFailed))?;
+    attachment.set_texture(Some(texture));
+    attachment.set_load_action(MTLLoadAction::Clear);
+    attachment.set_store_action(MTLStoreAction::Store);
+    attachment.set_clear_color(metal::MTLClearColor::new(0.0, 0.0, 0.0, 0.0));
     Ok(descriptor)
 }
 
@@ -175,4 +302,9 @@ fn new_unclipped_texture(device: &Device) -> Texture {
 
 fn submission_failed() -> MetalError {
     MetalError::new(MetalErrorCode::SubmissionFailed)
+}
+
+#[repr(C)]
+struct StrokeVertex {
+    position: [f32; 2],
 }

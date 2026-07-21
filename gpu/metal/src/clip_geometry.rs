@@ -36,7 +36,7 @@ pub(crate) fn clip_edges(
         }
         GpuClipGeometry::Path { path, .. } => {
             let path = commands.path(path).ok_or_else(unsupported_command)?;
-            path_edges(path, node.transform(), &mut output)?;
+            append_path_edges(path, node.transform(), &mut output)?;
         }
     }
     if output.is_empty() {
@@ -45,7 +45,17 @@ pub(crate) fn clip_edges(
     Ok(output)
 }
 
-fn path_edges(
+/// Flattens a fill path into target-space edges for one Metal mask pass.
+pub(crate) fn path_edges(path: &Path, transform: Transform) -> Result<Vec<ClipEdge>, MetalError> {
+    let mut output = Vec::new();
+    append_path_edges(path, transform, &mut output)?;
+    if output.is_empty() {
+        return Err(unsupported_command());
+    }
+    Ok(output)
+}
+
+fn append_path_edges(
     path: &Path,
     transform: Transform,
     output: &mut Vec<ClipEdge>,

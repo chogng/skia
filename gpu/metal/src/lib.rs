@@ -24,6 +24,7 @@ use skia_gpu::{
     GpuBackend, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad,
     GpuSurfaceDescriptor,
 };
+use skia_image::Image;
 
 use crate::clip::ClipRenderer;
 
@@ -124,6 +125,7 @@ pub struct MetalBackend {
     queue: CommandQueue,
     solid_rect_pipeline: RenderPipelineState,
     glyph_pipeline: RenderPipelineState,
+    image_pipeline: RenderPipelineState,
     clip_renderer: ClipRenderer,
     atlas_cache_capacity: usize,
     atlas_cache_max_bytes: u64,
@@ -225,12 +227,35 @@ impl MetalBackend {
         let glyph_pipeline = device
             .new_render_pipeline_state(&glyph_descriptor)
             .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+        let image_vertex = library
+            .get_function("skia_image_vertex", None)
+            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
+        let image_fragment = library
+            .get_function("skia_image_fragment", None)
+            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
+        let image_descriptor = RenderPipelineDescriptor::new();
+        image_descriptor.set_vertex_function(Some(&image_vertex));
+        image_descriptor.set_fragment_function(Some(&image_fragment));
+        let image_attachment = image_descriptor
+            .color_attachments()
+            .object_at(0)
+            .ok_or(MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+        image_attachment.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+        image_attachment.set_blending_enabled(true);
+        image_attachment.set_source_rgb_blend_factor(MTLBlendFactor::SourceAlpha);
+        image_attachment.set_destination_rgb_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
+        image_attachment.set_source_alpha_blend_factor(MTLBlendFactor::One);
+        image_attachment.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
+        let image_pipeline = device
+            .new_render_pipeline_state(&image_descriptor)
+            .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
         let clip_renderer = ClipRenderer::new(&device, &library)?;
         Ok(Self {
             device,
             queue,
             solid_rect_pipeline,
             glyph_pipeline,
+            image_pipeline,
             clip_renderer,
             atlas_cache_capacity: DEFAULT_ATLAS_CACHE_CAPACITY,
             atlas_cache_max_bytes: DEFAULT_ATLAS_CACHE_BYTES,
@@ -315,6 +340,15 @@ impl GpuBackend for MetalBackend {
                 GpuCommand::Clear(_) => {}
                 GpuCommand::FillRect { paint, .. }
                     if paint.blend_mode() == BlendMode::SourceOver => {}
+                GpuCommand::FillPath { path, paint, .. }
+                    if paint.blend_mode() == BlendMode::SourceOver
+                        && commands.path(*path).is_some() => {}
+                GpuCommand::StrokePath { path, paint, .. }
+                    if paint.blend_mode() == BlendMode::SourceOver
+                        && commands.path(*path).is_some() => {}
+                GpuCommand::DrawImage {
+                    image, blend_mode, ..
+                } if *blend_mode == BlendMode::SourceOver && commands.image(*image).is_some() => {}
                 GpuCommand::DrawGlyphs { atlas, paint, .. } => {
                     if paint.blend_mode() != BlendMode::SourceOver
                         || commands.glyph_atlas(*atlas).is_none()
@@ -382,6 +416,80 @@ impl GpuBackend for MetalBackend {
                         clip.is_some(),
                     )?;
                 }
+                GpuCommand::FillPath {
+                    path,
+                    rule,
+                    paint,
+                    transform,
+                    scissor,
+                    clip,
+                } => {
+                    if let Some(clip) = clip {
+                        self.clip_renderer.ensure_texture(
+                            command_buffer,
+                            surface.descriptor,
+                            commands,
+                            *clip,
+                            &mut clip_textures,
+                        )?;
+                    }
+                    let path = commands
+                        .path(*path)
+                        .ok_or(MetalError::new(MetalErrorCode::UnsupportedCommand))?;
+                    let parent = clip.and_then(|id| clip_textures.get(&id));
+                    let fill_mask = self.clip_renderer.rasterize_path(
+                        command_buffer,
+                        surface.descriptor,
+                        path,
+                        *rule,
+                        *transform,
+                        parent,
+                    )?;
+                    self.encode_solid_surface(
+                        command_buffer,
+                        surface,
+                        *paint,
+                        *scissor,
+                        &fill_mask,
+                    )?;
+                }
+                GpuCommand::DrawImage {
+                    image,
+                    destination,
+                    opacity,
+                    transform,
+                    scissor,
+                    clip,
+                    ..
+                } => {
+                    if let Some(clip) = clip {
+                        self.clip_renderer.ensure_texture(
+                            command_buffer,
+                            surface.descriptor,
+                            commands,
+                            *clip,
+                            &mut clip_textures,
+                        )?;
+                    }
+                    let image = commands
+                        .image(*image)
+                        .ok_or(MetalError::new(MetalErrorCode::UnsupportedCommand))?;
+                    let texture = self.upload_image(image);
+                    let clip_texture = clip
+                        .and_then(|id| clip_textures.get(&id))
+                        .unwrap_or(self.clip_renderer.unclipped_texture());
+                    self.encode_image(
+                        command_buffer,
+                        surface,
+                        &texture,
+                        *destination,
+                        *opacity,
+                        *transform,
+                        *scissor,
+                        clip_texture,
+                        clip.is_some(),
+                    )?;
+                }
                 GpuCommand::DrawGlyphs {
                     atlas,
                     glyphs,
@@ -417,10 +525,45 @@ impl GpuBackend for MetalBackend {
                         clip.is_some(),
                     )?;
                 }
-                GpuCommand::FillPath { .. }
-                | GpuCommand::StrokePath { .. }
-                | GpuCommand::DrawImage { .. } => {
-                    unreachable!("commands were prevalidated")
+                GpuCommand::StrokePath {
+                    path,
+                    options,
+                    paint,
+                    transform,
+                    scissor,
+                    clip,
+                } => {
+                    if let Some(clip) = clip {
+                        self.clip_renderer.ensure_texture(
+                            command_buffer,
+                            surface.descriptor,
+                            commands,
+                            *clip,
+                            &mut clip_textures,
+                        )?;
+                    }
+                    let path = commands
+                        .path(*path)
+                        .ok_or(MetalError::new(MetalErrorCode::UnsupportedCommand))?;
+                    let stroke_mask = self.clip_renderer.rasterize_stroke(
+                        command_buffer,
+                        surface.descriptor,
+                        path,
+                        options,
+                        *transform,
+                    )?;
+                    let clip_texture = clip
+                        .and_then(|id| clip_textures.get(&id))
+                        .unwrap_or(self.clip_renderer.unclipped_texture());
+                    self.encode_solid_surface_with_masks(
+                        command_buffer,
+                        surface,
+                        *paint,
+                        *scissor,
+                        clip_texture,
+                        clip.is_some(),
+                        &stroke_mask,
+                    )?;
                 }
             }
         }
@@ -453,7 +596,85 @@ impl MetalBackend {
             return Ok(());
         };
         let vertices = solid_rect_vertices(rect, transform)?;
-        let byte_length = u64::try_from(size_of_val(&vertices))
+        self.encode_solid_vertices(
+            command_buffer,
+            surface,
+            &vertices,
+            paint,
+            scissor,
+            clip_texture,
+            has_clip,
+            self.clip_renderer.unclipped_texture(),
+            false,
+        )
+    }
+
+    fn encode_solid_surface(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: &MetalSurface,
+        paint: skia_core::Paint,
+        scissor: Option<Rect>,
+        clip_texture: &Texture,
+    ) -> Result<(), MetalError> {
+        let Some(scissor) = scissor_rect(scissor, surface.descriptor) else {
+            return Ok(());
+        };
+        let vertices = solid_surface_vertices(surface.descriptor);
+        self.encode_solid_vertices(
+            command_buffer,
+            surface,
+            &vertices,
+            paint,
+            scissor,
+            clip_texture,
+            true,
+            self.clip_renderer.unclipped_texture(),
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_solid_surface_with_masks(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: &MetalSurface,
+        paint: skia_core::Paint,
+        scissor: Option<Rect>,
+        clip_texture: &Texture,
+        has_clip: bool,
+        shape_mask: &Texture,
+    ) -> Result<(), MetalError> {
+        let Some(scissor) = scissor_rect(scissor, surface.descriptor) else {
+            return Ok(());
+        };
+        self.encode_solid_vertices(
+            command_buffer,
+            surface,
+            &solid_surface_vertices(surface.descriptor),
+            paint,
+            scissor,
+            clip_texture,
+            has_clip,
+            shape_mask,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_solid_vertices(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: &MetalSurface,
+        vertices: &[SolidVertex],
+        paint: skia_core::Paint,
+        scissor: MTLScissorRect,
+        clip_texture: &Texture,
+        has_clip: bool,
+        shape_texture: &Texture,
+        has_shape: bool,
+    ) -> Result<(), MetalError> {
+        let byte_length = u64::try_from(size_of_val(vertices))
             .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
         let vertex_buffer = self.device.new_buffer_with_data(
             vertices.as_ptr().cast(),
@@ -476,6 +697,13 @@ impl MetalBackend {
             (&has_clip as *const u32).cast(),
         );
         encoder.set_fragment_texture(0, Some(clip_texture));
+        let has_shape = u32::from(has_shape);
+        encoder.set_fragment_bytes(
+            2,
+            size_of_val(&has_shape) as u64,
+            (&has_shape as *const u32).cast(),
+        );
+        encoder.set_fragment_texture(1, Some(shape_texture));
         encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, vertices.len() as u64);
         encoder.end_encoding();
         Ok(())
@@ -581,7 +809,10 @@ impl MetalBackend {
     }
 
     fn upload_atlas(&self, atlas: &GpuGlyphAtlas) -> Texture {
-        let image = atlas.image();
+        self.upload_image(atlas.image())
+    }
+
+    fn upload_image(&self, image: &Image) -> Texture {
         let descriptor = TextureDescriptor::new();
         descriptor.set_width(u64::from(image.width()));
         descriptor.set_height(u64::from(image.height()));
@@ -653,6 +884,64 @@ impl MetalBackend {
         encoder.end_encoding();
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_image(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: &MetalSurface,
+        image: &Texture,
+        destination: Rect,
+        opacity: u8,
+        transform: Transform,
+        scissor: Option<Rect>,
+        clip_texture: &Texture,
+        has_clip: bool,
+    ) -> Result<(), MetalError> {
+        let Some(scissor) = scissor_rect(scissor, surface.descriptor) else {
+            return Ok(());
+        };
+        let vertices = image_vertices(
+            destination,
+            image.width() as f32,
+            image.height() as f32,
+            transform,
+        )?;
+        let bytes = vertices
+            .len()
+            .checked_mul(size_of::<ImageVertex>())
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        let buffer = self.device.new_buffer_with_data(
+            vertices.as_ptr().cast(),
+            bytes,
+            MTLResourceOptions::CPUCacheModeDefaultCache,
+        );
+        let descriptor = render_pass(surface, MTLLoadAction::Load)?;
+        let encoder = command_buffer.new_render_command_encoder(descriptor);
+        encoder.set_render_pipeline_state(&self.image_pipeline);
+        encoder.set_scissor_rect(scissor);
+        encoder.set_vertex_buffer(0, Some(&buffer), 0);
+        let viewport = viewport_size(surface.descriptor);
+        encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
+        let opacity = f32::from(opacity) / f32::from(u8::MAX);
+        encoder.set_fragment_bytes(
+            0,
+            size_of_val(&opacity) as u64,
+            (&opacity as *const f32).cast(),
+        );
+        let has_clip = u32::from(has_clip);
+        encoder.set_fragment_bytes(
+            1,
+            size_of_val(&has_clip) as u64,
+            (&has_clip as *const u32).cast(),
+        );
+        encoder.set_fragment_texture(0, Some(image));
+        encoder.set_fragment_texture(1, Some(clip_texture));
+        encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, vertices.len() as u64);
+        encoder.end_encoding();
+        Ok(())
+    }
 }
 
 #[repr(C)]
@@ -677,6 +966,13 @@ struct GlyphVertex {
     mask: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ImageVertex {
+    position: [f32; 2],
+    image_position: [f32; 2],
+}
+
 fn solid_rect_vertices(rect: Rect, transform: Transform) -> Result<[SolidVertex; 6], MetalError> {
     let logical = [
         Point::new(rect.left(), rect.top()),
@@ -694,6 +990,15 @@ fn solid_rect_vertices(rect: Rect, transform: Transform) -> Result<[SolidVertex;
     Ok([0, 1, 2, 1, 3, 2].map(|index| SolidVertex {
         position: position[index],
     }))
+}
+
+fn solid_surface_vertices(surface: GpuSurfaceDescriptor) -> [SolidVertex; 6] {
+    let width = surface.width() as f32;
+    let height = surface.height() as f32;
+    let position = [[0.0, 0.0], [width, 0.0], [0.0, height], [width, height]];
+    [0, 1, 2, 1, 3, 2].map(|index| SolidVertex {
+        position: position[index],
+    })
 }
 
 fn viewport_size(descriptor: GpuSurfaceDescriptor) -> [f32; 2] {
@@ -754,6 +1059,32 @@ fn glyph_vertices(
         }
     }
     Ok(vertices)
+}
+
+fn image_vertices(
+    destination: Rect,
+    width: f32,
+    height: f32,
+    transform: Transform,
+) -> Result<[ImageVertex; 6], MetalError> {
+    let logical = [
+        Point::new(destination.left(), destination.top()),
+        Point::new(destination.right(), destination.top()),
+        Point::new(destination.left(), destination.bottom()),
+        Point::new(destination.right(), destination.bottom()),
+    ];
+    let mut position = [[0.0; 2]; 4];
+    for (index, point) in logical.into_iter().enumerate() {
+        let mapped = transform
+            .map_point(point)
+            .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        position[index] = [scalar_to_f32(mapped.x()), scalar_to_f32(mapped.y())];
+    }
+    let image_position = [[0.0, 0.0], [width, 0.0], [0.0, height], [width, height]];
+    Ok([0, 1, 2, 1, 3, 2].map(|index| ImageVertex {
+        position: position[index],
+        image_position: image_position[index],
+    }))
 }
 
 fn encode_clear(

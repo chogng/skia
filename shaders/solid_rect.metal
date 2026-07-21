@@ -22,8 +22,13 @@ fragment float4 skia_solid_rect_fragment(
     float4 position [[position]],
     constant float4& color [[buffer(0)]],
     constant uint& has_clip [[buffer(1)]],
-    texture2d<float, access::read> clip_mask [[texture(0)]]) {
+    constant uint& has_shape [[buffer(2)]],
+    texture2d<float, access::read> clip_mask [[texture(0)]],
+    texture2d<float, access::read> shape_mask [[texture(1)]]) {
     if (has_clip != 0 && clip_mask.read(uint2(position.xy)).r < 0.5) {
+        discard_fragment();
+    }
+    if (has_shape != 0 && shape_mask.read(uint2(position.xy)).r < 0.5) {
         discard_fragment();
     }
     return color;
@@ -72,6 +77,21 @@ fragment float4 skia_glyph_fragment(
         return float4(paint.rgb, paint.a * sample.a);
     }
     return float4(sample.rgb, sample.a * paint.a);
+}
+
+struct ImageVertex { float2 position; float2 image_position; };
+struct ImageVarying { float4 position [[position]]; float2 image_position; };
+vertex ImageVarying skia_image_vertex(const device ImageVertex* vertices [[buffer(0)]], constant float2& viewport_size [[buffer(1)]], uint vertex_id [[vertex_id]]) {
+    ImageVertex input = vertices[vertex_id];
+    ImageVarying output;
+    output.position = float4(input.position.x / viewport_size.x * 2.0 - 1.0, 1.0 - input.position.y / viewport_size.y * 2.0, 0.0, 1.0);
+    output.image_position = input.image_position;
+    return output;
+}
+fragment float4 skia_image_fragment(ImageVarying input [[stage_in]], texture2d<float, access::read> image [[texture(0)]], texture2d<float, access::read> clip_mask [[texture(1)]], constant float& opacity [[buffer(0)]], constant uint& has_clip [[buffer(1)]]) {
+    if (has_clip != 0 && clip_mask.read(uint2(input.position.xy)).r < 0.5) discard_fragment();
+    float4 sample = image.read(uint2(input.image_position));
+    return float4(sample.rgb, sample.a * opacity);
 }
 
 struct ClipEdge {
@@ -127,4 +147,20 @@ fragment float skia_clip_fragment(
     bool inside = uniforms.even_odd != 0 ? parity : winding != 0;
     bool visible = uniforms.difference != 0 ? !inside : inside;
     return visible ? 1.0 : 0.0;
+}
+
+vertex float4 skia_stroke_vertex(
+    const device float2* vertices [[buffer(0)]],
+    constant float2& viewport_size [[buffer(1)]],
+    uint vertex_id [[vertex_id]]) {
+    float2 position = vertices[vertex_id];
+    return float4(
+        position.x / viewport_size.x * 2.0 - 1.0,
+        1.0 - position.y / viewport_size.y * 2.0,
+        0.0,
+        1.0);
+}
+
+fragment float skia_stroke_fragment() {
+    return 1.0;
 }
