@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use skia_core::{
     Color, FontCollection, FontCollectionLimits, FontFace, FontId, Paint, Point, Scalar,
-    TextDecoration, TextLayoutOptions, TextStyleId, TextStyleSpan,
+    TextDecoration, TextDecorationStyle, TextLayoutOptions, TextStyleId, TextStyleSpan,
 };
 use skia_gpu::{GpuBackend, GpuCommand, GpuCommandEncoder, GpuSurfaceDescriptor};
 use skia_gpu_text::{
@@ -154,6 +154,39 @@ fn text_adapter_emits_per_style_decoration_rectangles() {
             baseline - (5 << 16),
         ],
     );
+}
+
+#[test]
+fn text_adapter_expands_all_decoration_patterns() {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts
+        .add_face(
+            FontFace::from_bytes(FontId::new(94), toy_font_with_decorations('A'))
+                .expect("decorated font"),
+        )
+        .expect("register face");
+
+    for (style, expected_rects) in [
+        (TextDecorationStyle::Solid, 1),
+        (TextDecorationStyle::Dashed, 2),
+        (TextDecorationStyle::Dotted, 3),
+        (TextDecorationStyle::Wavy, 6),
+    ] {
+        let layout = fonts
+            .layout_text(
+                "A",
+                20 << 16,
+                TextLayoutOptions::new(20 << 16)
+                    .expect("options")
+                    .with_decoration(TextDecoration::Underline)
+                    .with_decoration_style(style),
+            )
+            .expect("decorated layout");
+        let batches = layout_decoration_batches(&layout, Point::new(Scalar::ZERO, Scalar::ZERO))
+            .expect("decoration batches");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].rects().len(), expected_rects, "{style:?}");
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -112,11 +112,13 @@ and carets all use the resulting width without splitting grapheme or shaping clu
 Callers can plug language dictionaries into `TextBreakProvider`; the layout
 engine validates UTF-8 grapheme boundaries and supports either glyph-free soft breaks
 or synthetic visible hyphens without consuming source bytes. Layout options
-can also request underline and strike-through lines globally or per span.
+can also request underline and strike-through lines globally or per span, with
+independently inherited solid, dashed, dotted, or wavy visual patterns.
 Their scaled position and thickness come from the selected span's preferred
 OpenType face; final visual segments track alignment and justification and stay
-continuous across compatible fallback runs. CPU layout drawing resolves each
-segment's style paint after glyph outlines.
+continuous across compatible fallback runs. A backend-neutral fixed-point
+geometry builder expands every pattern into bounded rectangle strips, which
+CPU layout drawing resolves with each segment's style paint after glyph outlines.
 `TextLayout` also maps layout-local points to editable UTF-8 boundaries and
 resolves source positions back to vertical carets. Font-provided OpenType GDEF
 ligature caret coordinates add internal stops without dividing shaping output.
@@ -133,14 +135,14 @@ Ellipses retain styled font size and bidi placement, prefer U+2026, and fall
 back to three periods without consuming source bytes.
 
 System-font discovery, generic-family mapping, variable-font instance selection,
-language-specific font selection, dictionary data and algorithms, and
-decorative line variants remain upper text-layout responsibilities. GPU glyph
+language-specific font selection, dictionary data and algorithms, and broader
+paragraph formatting remain upper text-layout responsibilities. GPU glyph
 atlases are available through the separate `skia-gpu-text` adapter:
 `TextAtlasBuilder` rasterizes and packs a `TextLayout`, and `TextAtlas` converts
 layout positions into owned generic quads without borrowing an encoder. The
 caller then explicitly registers `into_gpu_atlas()` and records the quads with
 `skia-gpu`. `layout_decoration_batches` independently converts resolved
-underline and strike-through metrics into per-style target-space rectangles;
+underline and strike-through patterns into per-style target-space rectangles;
 callers record those through generic `fill_rect` commands. This keeps text data
 adaptation separate from command ordering and hardware backends. The Metal
 backend draws transformed/scissored solid rectangles, path-fill masks, Alpha8 masks, and color

@@ -368,6 +368,14 @@ pub struct TextDecorationMetrics {
 }
 
 impl TextDecorationMetrics {
+    #[cfg(test)]
+    pub(crate) const fn from_bits_for_test(offset_bits: i32, thickness_bits: i32) -> Self {
+        Self {
+            offset_bits,
+            thickness_bits,
+        }
+    }
+
     /// Returns the signed baseline-to-center offset in canvas coordinates.
     pub const fn offset_bits(self) -> i32 {
         self.offset_bits

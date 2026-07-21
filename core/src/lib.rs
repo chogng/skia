@@ -32,7 +32,8 @@ pub use skia_text::{
     GlyphBitmapFormat, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, OutlinePoint,
     OutlineSegment, PositionedGlyph, ShapedLine, ShapedParagraph, ShapedRun, TextAffinity,
     TextAlignment, TextBreakProvider, TextCaret, TextDecoration, TextDecorationMetrics,
-    TextDecorationSegment, TextDirection, TextError, TextErrorCode, TextHitResult,
-    TextJustification, TextLayout, TextLayoutOptions, TextOverflow, TextPosition,
-    TextSelectionRect, TextStyleId, TextStyleSpan, TextUnit, TextWordBreak, TextWordBreakKind,
+    TextDecorationRect, TextDecorationSegment, TextDecorationStyle, TextDirection, TextError,
+    TextErrorCode, TextHitResult, TextJustification, TextLayout, TextLayoutOptions, TextOverflow,
+    TextPosition, TextSelectionRect, TextStyleId, TextStyleSpan, TextUnit, TextWordBreak,
+    TextWordBreakKind, text_decoration_rects,
 };

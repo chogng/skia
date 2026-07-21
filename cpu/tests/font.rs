@@ -2,9 +2,9 @@ use skia_core::{
     Color, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId, FontLimits,
     FontSlant, FontStyle, FontTag, FontVariation, FontWidth, GlyphBitmapFormat, GlyphId,
     GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAffinity,
-    TextAlignment, TextBreakProvider, TextDecoration, TextDirection, TextError, TextErrorCode,
-    TextJustification, TextLayoutOptions, TextOverflow, TextPosition, TextStyleId, TextStyleSpan,
-    TextWordBreak, TextWordBreakKind, Transform,
+    TextAlignment, TextBreakProvider, TextDecoration, TextDecorationStyle, TextDirection,
+    TextError, TextErrorCode, TextJustification, TextLayoutOptions, TextOverflow, TextPosition,
+    TextStyleId, TextStyleSpan, TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -2524,6 +2524,46 @@ fn font_decorations_use_primary_metrics_across_fallback_and_alignment() {
 }
 
 #[test]
+fn text_decoration_patterns_share_resolved_cpu_geometry() {
+    let face = FontFace::from_bytes(
+        FontId::new(119),
+        toy_styled_font(&['A'], "Decoration Patterns", FontStyle::NORMAL),
+    )
+    .expect("decorated font");
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts.add_face(face).expect("add decorated font");
+    let layout = fonts
+        .layout_text(
+            "AA",
+            20 << 16,
+            TextLayoutOptions::new(30 << 16)
+                .expect("options")
+                .with_decoration(TextDecoration::Underline)
+                .with_decoration_style(TextDecorationStyle::Wavy),
+        )
+        .expect("wavy underline layout");
+    assert_eq!(
+        layout.lines()[0].decoration_style(),
+        TextDecorationStyle::Wavy
+    );
+
+    let mut surface = Surface::new(30, 24, SurfaceLimits::default()).expect("surface");
+    surface
+        .canvas()
+        .draw_text_layout(
+            &layout,
+            &fonts,
+            Point::new(Scalar::ZERO, scalar(1)),
+            Paint::new(Color::RED),
+        )
+        .expect("draw wavy underline");
+
+    assert_eq!(pixel(&surface, 0, 16), Color::RED.channels());
+    assert_eq!(pixel(&surface, 0, 20), Color::TRANSPARENT.channels());
+    assert_eq!(pixel(&surface, 4, 20), Color::RED.channels());
+}
+
+#[test]
 fn requested_font_decoration_requires_native_metrics() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
@@ -2637,6 +2677,27 @@ fn styled_layout_resolves_per_span_paints_and_decorations() {
         )
         .expect_err("missing blue style must fail closed");
     assert_eq!(error.code(), SkiaErrorCode::InvalidResource);
+
+    let patterned = fonts
+        .layout_styled_text(
+            "AA",
+            &[
+                spans[0].with_decoration_style(TextDecorationStyle::Dashed),
+                spans[1].with_decoration(TextDecoration::Underline),
+            ],
+            TextLayoutOptions::new(30 << 16)
+                .expect("pattern options")
+                .with_decoration_style(TextDecorationStyle::Dotted),
+        )
+        .expect("span pattern overrides");
+    assert_eq!(
+        patterned.lines()[0].decoration_segments()[0].decoration_style(),
+        TextDecorationStyle::Dashed
+    );
+    assert_eq!(
+        patterned.lines()[0].decoration_segments()[1].decoration_style(),
+        TextDecorationStyle::Dotted
+    );
 }
 
 fn scalar(value: i32) -> Scalar {

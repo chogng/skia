@@ -1,6 +1,9 @@
-use skia_core::{Point, Rect, Scalar, TextDecorationMetrics, TextLayout, TextStyleId};
+use skia_core::{
+    Point, Rect, Scalar, TextDecorationMetrics, TextDecorationStyle, TextLayout, TextStyleId,
+    text_decoration_rects,
+};
 
-use crate::{TextGpuError, TextGpuErrorCode};
+use crate::{TextGpuError, TextGpuErrorCode, error::map_text_error};
 
 /// One contiguous GPU text-decoration batch sharing a caller-defined style.
 ///
@@ -62,10 +65,14 @@ pub fn layout_decoration_batches(
                 .into_iter()
                 .flatten()
             {
-                push_decoration(
+                push_decoration_line(
                     &mut batches,
                     TextStyleId::DEFAULT,
-                    decoration_rect(line_x, right, baseline_y, metrics)?,
+                    line_x,
+                    right,
+                    baseline_y,
+                    metrics,
+                    line.decoration_style(),
                 )?;
             }
             continue;
@@ -84,10 +91,14 @@ pub fn layout_decoration_batches(
             .into_iter()
             .flatten()
             {
-                push_decoration(
+                push_decoration_line(
                     &mut batches,
                     segment.style_id(),
-                    decoration_rect(left, right, baseline_y, metrics)?,
+                    left,
+                    right,
+                    baseline_y,
+                    metrics,
+                    segment.decoration_style(),
                 )?;
             }
         }
@@ -95,28 +106,28 @@ pub fn layout_decoration_batches(
     Ok(batches)
 }
 
-fn decoration_rect(
+fn push_decoration_line(
+    batches: &mut Vec<TextDecorationBatch>,
+    style_id: TextStyleId,
     left_bits: i32,
     right_bits: i32,
     baseline_bits: i32,
     metrics: TextDecorationMetrics,
-) -> Result<Rect, TextGpuError> {
-    let center = baseline_bits
-        .checked_add(metrics.offset_bits())
-        .ok_or(TextGpuError::new(TextGpuErrorCode::NumericOverflow))?;
-    let top = center
-        .checked_sub(metrics.thickness_bits() / 2)
-        .ok_or(TextGpuError::new(TextGpuErrorCode::NumericOverflow))?;
-    let bottom = top
-        .checked_add(metrics.thickness_bits())
-        .ok_or(TextGpuError::new(TextGpuErrorCode::NumericOverflow))?;
-    Rect::new(
-        Scalar::from_bits(left_bits),
-        Scalar::from_bits(top),
-        Scalar::from_bits(right_bits),
-        Scalar::from_bits(bottom),
-    )
-    .map_err(|_| TextGpuError::new(TextGpuErrorCode::NumericOverflow))
+    style: TextDecorationStyle,
+) -> Result<(), TextGpuError> {
+    for rect in text_decoration_rects(left_bits, right_bits, baseline_bits, metrics, style)
+        .map_err(map_text_error)?
+    {
+        let rect = Rect::new(
+            Scalar::from_bits(rect.left_bits()),
+            Scalar::from_bits(rect.top_bits()),
+            Scalar::from_bits(rect.right_bits()),
+            Scalar::from_bits(rect.bottom_bits()),
+        )
+        .map_err(|_| TextGpuError::new(TextGpuErrorCode::NumericOverflow))?;
+        push_decoration(batches, style_id, rect)?;
+    }
+    Ok(())
 }
 
 fn push_decoration(

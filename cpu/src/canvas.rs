@@ -5,7 +5,7 @@ use skia_core::{
     GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder, Point,
     PositionedGlyph, Rect, SamplingFilter, SamplingOptions, Scalar, ShapedParagraph, SkiaError,
     SkiaErrorCode, StrokeCap, StrokeJoin, StrokeOptions, TextLayout, TextStyleId, TextUnit,
-    Transform,
+    Transform, text_decoration_rects,
 };
 use skia_image::Image;
 use skia_tessellation::{
@@ -17,6 +17,16 @@ use crate::{
     clip::{apply_clip, mask_index},
     stroke::stroke_bounds,
 };
+
+fn map_text_decoration_error(error: skia_core::TextError) -> SkiaError {
+    let code = match error.code() {
+        skia_core::TextErrorCode::NumericOverflow => SkiaErrorCode::NumericOverflow,
+        skia_core::TextErrorCode::ResourceLimit => SkiaErrorCode::ResourceLimit,
+        skia_core::TextErrorCode::AllocationFailed => SkiaErrorCode::AllocationFailed,
+        _ => SkiaErrorCode::TextResolverFailed,
+    };
+    SkiaError::new(code)
+}
 
 /// Limits for one CPU-owned RGBA8 surface and Canvas state stack.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -589,6 +599,7 @@ impl Canvas<'_> {
                             .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
                         baseline_bits,
                         metrics,
+                        line.decoration_style(),
                         paint,
                     )?;
                 }
@@ -614,6 +625,7 @@ impl Canvas<'_> {
                             right_bits,
                             baseline_bits,
                             metrics,
+                            segment.decoration_style(),
                             paint,
                         )?;
                     }
@@ -629,26 +641,23 @@ impl Canvas<'_> {
         right_bits: i32,
         baseline_bits: i32,
         metrics: skia_core::TextDecorationMetrics,
+        style: skia_core::TextDecorationStyle,
         paint: Paint,
     ) -> Result<(), SkiaError> {
-        let center_bits = baseline_bits
-            .checked_add(metrics.offset_bits())
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-        let top_bits = center_bits
-            .checked_sub(metrics.thickness_bits() / 2)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-        let bottom_bits = top_bits
-            .checked_add(metrics.thickness_bits())
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-        self.fill_rect(
-            Rect::new(
-                Scalar::from_bits(left_bits),
-                Scalar::from_bits(top_bits),
-                Scalar::from_bits(right_bits),
-                Scalar::from_bits(bottom_bits),
-            )?,
-            paint,
-        )
+        for rect in text_decoration_rects(left_bits, right_bits, baseline_bits, metrics, style)
+            .map_err(map_text_decoration_error)?
+        {
+            self.fill_rect(
+                Rect::new(
+                    Scalar::from_bits(rect.left_bits()),
+                    Scalar::from_bits(rect.top_bits()),
+                    Scalar::from_bits(rect.right_bits()),
+                    Scalar::from_bits(rect.bottom_bits()),
+                )?,
+                paint,
+            )?;
+        }
+        Ok(())
     }
 
     fn draw_positioned_glyph(

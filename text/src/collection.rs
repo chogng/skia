@@ -3,7 +3,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     FontFace, FontId, FontMetrics, FontSlant, FontStyle, FontWidth, GlyphOutline,
-    GlyphOutlineProvider, GlyphRun, TextError, TextErrorCode, TextJustification,
+    GlyphOutlineProvider, GlyphRun, TextDecorationStyle, TextError, TextErrorCode,
+    TextJustification,
 };
 
 /// Horizontal direction of one shaped text run.
@@ -71,6 +72,7 @@ pub struct TextStyleSpan {
     font_size_bits: i32,
     style_id: TextStyleId,
     decoration: Option<TextDecoration>,
+    decoration_style: Option<TextDecorationStyle>,
 }
 
 impl TextStyleSpan {
@@ -91,6 +93,7 @@ impl TextStyleSpan {
             font_size_bits,
             style_id: TextStyleId::DEFAULT,
             decoration: None,
+            decoration_style: None,
         })
     }
 
@@ -106,6 +109,12 @@ impl TextStyleSpan {
     /// decoration for this range.
     pub const fn with_decoration(mut self, decoration: TextDecoration) -> Self {
         self.decoration = Some(decoration);
+        self
+    }
+
+    /// Overrides the layout-wide visual pattern for this span's decorations.
+    pub const fn with_decoration_style(mut self, style: TextDecorationStyle) -> Self {
+        self.decoration_style = Some(style);
         self
     }
 
@@ -137,6 +146,11 @@ impl TextStyleSpan {
     /// Returns this span's decoration override, or `None` to inherit layout options.
     pub const fn decoration(self) -> Option<TextDecoration> {
         self.decoration
+    }
+
+    /// Returns this span's decoration-pattern override, or `None` to inherit it.
+    pub const fn decoration_style(self) -> Option<TextDecorationStyle> {
+        self.decoration_style
     }
 }
 
@@ -256,6 +270,11 @@ impl ShapedRun {
         self.style.decoration
     }
 
+    /// Returns this run's optional span-level decoration-pattern override.
+    pub const fn decoration_style(&self) -> Option<TextDecorationStyle> {
+        self.style.decoration_style
+    }
+
     pub(crate) const fn run_style(&self) -> RunStyle {
         self.style
     }
@@ -267,6 +286,7 @@ pub(crate) struct RunStyle {
     pub(crate) preferred_font: FontId,
     pub(crate) font_size_bits: i32,
     pub(crate) decoration: Option<TextDecoration>,
+    pub(crate) decoration_style: Option<TextDecorationStyle>,
 }
 
 /// Shaped output for one unwrapped bidi paragraph.
@@ -843,10 +863,7 @@ impl FontCollection {
 
     pub(crate) fn shape_ellipsis_marker(
         &self,
-        font_size_bits: i32,
-        preferred_font: FontId,
-        style_id: TextStyleId,
-        decoration: Option<TextDecoration>,
+        style: RunStyle,
         direction: TextDirection,
         source_offset: u32,
         language: Option<&str>,
@@ -854,14 +871,14 @@ impl FontCollection {
         let preferred_face = self
             .faces
             .iter()
-            .position(|face| face.id() == preferred_font)
+            .position(|face| face.id() == style.preferred_font)
             .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
         let (face_index, marker) =
             self.select_synthetic_marker(&["\u{2026}", "..."], preferred_face)?;
         let face = &self.faces[face_index];
         let run = face.shape_segment(
             marker,
-            font_size_bits,
+            style.font_size_bits,
             Some(direction),
             source_offset,
             language,
@@ -885,19 +902,14 @@ impl FontCollection {
             origin_x_bits: 0,
             glyph_offsets_x_bits,
             direction,
-            style: RunStyle {
-                id: style_id,
-                preferred_font,
-                font_size_bits,
-                decoration,
-            },
+            style,
         });
         Ok(ShapedParagraph {
             runs,
             advance_x_bits,
             spacing_added_bits: 0,
             base_direction: direction,
-            metrics: face.metrics(font_size_bits)?,
+            metrics: face.metrics(style.font_size_bits)?,
         })
     }
 
@@ -1230,6 +1242,7 @@ impl FontCollection {
                             preferred_font: span.font,
                             font_size_bits: span.font_size_bits,
                             decoration: span.decoration,
+                            decoration_style: span.decoration_style,
                         },
                     )
                 }
@@ -1244,6 +1257,7 @@ impl FontCollection {
                             .id(),
                         font_size_bits,
                         decoration: None,
+                        decoration_style: None,
                     },
                 ),
             };
