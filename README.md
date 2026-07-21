@@ -190,10 +190,19 @@ deterministic fixed-step curve flattener from `skia-tessellation`. Stroke
 normalization, dashing, and cap/join/miter coverage also live there; CPU keeps
 only device-pixel bounds and raster iteration, while backend-specific mask and
 edge formats remain local.
-Boolean path operations, path effects, and tangent-/endpoint-defined arc
-variants remain separate geometry-processing work; their design must stay
-independent of any consumer. `stroke_to_path` is available through the facade
-and produces a deterministic non-zero triangle-fill path.
+`path_boolean` exposes bounded union, intersection, difference, and XOR over
+flattened Q16.16 contours, including holes and self-intersections; empty set
+results are represented as `None`, while non-empty output uses non-zero fill.
+`trim_path`, `corner_path`, and `discrete_path` provide bounded path effects for
+normalized arc-length trimming, deterministic quadratic corner rounding, and
+seeded fixed-point contour perturbation. Trim supports wrap-around intervals;
+corner radii are clamped to half of each adjacent edge; discrete resampling
+keeps open endpoints and closed seams stable. All implement the extensible
+`PathEffect` contract and can run left-to-right through `compose_path_effects`
+without reapplying the input transform. Tangent-/endpoint-defined arc variants
+and additional path effects remain separate work.
+`stroke_to_path` is also available through the facade and produces a
+deterministic non-zero triangle-fill path.
 
 ## Path implementation layout
 
