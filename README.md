@@ -174,10 +174,12 @@ control-point bounds and curve-extrema-aware conservative bounds (with rational
 quadratics retaining their control hull). `DisplayList` and the GPU encoder
 expose both transform replacement and affine concatenation as generic
 graphics-state operations. Backend-neutral `StrokeOptions` defines
-butt/round/square caps, miter/round/bevel joins, miter limits, and canonical
-dash patterns. CPU Canvas and DisplayList replay implement those semantics;
-the generic GPU command preserves the same options and its software reference
-backend replays them without introducing backend-specific stroke types.
+center/inside/outside alignment, butt/round/square caps, miter/round/bevel
+joins, miter limits, and canonical dash patterns. Non-center alignment is
+defined only for closed, non-degenerate contours and follows contour winding.
+CPU Canvas and Metal consume the same expanded triangle mesh; DisplayList and
+generic GPU commands preserve the options, and software replay introduces no
+backend-specific stroke policy.
 Backend-neutral `SamplingOptions` similarly preserves nearest or bilinear
 clamp-to-edge image reconstruction through DisplayList and GPU commands. CPU
 uses deterministic integer bilinear interpolation for axis-aligned images;

@@ -1,5 +1,6 @@
 use skia_core::{
-    Color, Paint, Path, PathBuilder, Point, Scalar, StrokeCap, StrokeJoin, StrokeOptions,
+    Color, Paint, Path, PathBuilder, Point, Scalar, SkiaErrorCode, StrokeAlign, StrokeCap,
+    StrokeJoin, StrokeOptions,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
@@ -128,4 +129,44 @@ fn closed_dash_continues_through_the_contour_seam() {
     let surface = draw(&path, &options, 12, 12);
 
     assert!(painted(&surface, 2, 2), "mitered seam must remain joined");
+}
+
+#[test]
+fn closed_strokes_place_width_inside_center_or_outside() {
+    let path = closed_path(&[(4, 4), (12, 4), (12, 12), (4, 12)]);
+    let options = |align| {
+        StrokeOptions::new(scalar(2))
+            .expect("stroke")
+            .with_align(align)
+            .with_join(StrokeJoin::Miter)
+    };
+    let inside = draw(&path, &options(StrokeAlign::Inside), 16, 16);
+    let center = draw(&path, &options(StrokeAlign::Center), 16, 16);
+    let outside = draw(&path, &options(StrokeAlign::Outside), 16, 16);
+
+    assert!(!painted(&inside, 3, 8));
+    assert!(painted(&inside, 4, 8));
+    assert!(!painted(&inside, 8, 8));
+    assert!(painted(&center, 3, 8));
+    assert!(painted(&center, 4, 8));
+    assert!(painted(&outside, 3, 8));
+    assert!(!painted(&outside, 4, 8));
+
+    let reversed = path.reversed().expect("reverse");
+    let reversed_inside = draw(&reversed, &options(StrokeAlign::Inside), 16, 16);
+    assert_eq!(inside.pixels(), reversed_inside.pixels());
+}
+
+#[test]
+fn non_center_alignment_rejects_open_contours() {
+    let path = line(&[(2, 2), (8, 2)]);
+    let options = StrokeOptions::new(scalar(2))
+        .expect("stroke")
+        .with_align(StrokeAlign::Inside);
+    let mut surface = Surface::new(10, 5, SurfaceLimits::default()).expect("surface");
+    let error = surface
+        .canvas()
+        .stroke_path_with_options(&path, &options, Paint::new(Color::WHITE))
+        .expect_err("open inside stroke");
+    assert_eq!(error.code(), SkiaErrorCode::InvalidPath);
 }

@@ -1,8 +1,8 @@
 use skia_error::SkiaErrorCode;
 use skia_geometry::{Point, Rect, Scalar, Transform};
 use skia_path::{
-    Angle, ArcDirection, ArcStart, ConicWeight, PathBuilder, PathVerb, StrokeCap, StrokeJoin,
-    StrokeOptions,
+    Angle, ArcDirection, ArcStart, ConicWeight, PathBuilder, PathVerb, StrokeAlign, StrokeCap,
+    StrokeJoin, StrokeOptions,
 };
 
 fn scalar(value: i32) -> Scalar {
@@ -21,6 +21,7 @@ fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
 fn stroke_options_validate_and_canonicalize_geometry() {
     let options = StrokeOptions::new(scalar(3))
         .expect("positive width")
+        .with_align(StrokeAlign::Outside)
         .with_cap(StrokeCap::Square)
         .with_join(StrokeJoin::Bevel)
         .with_miter_limit(scalar(7))
@@ -28,6 +29,7 @@ fn stroke_options_validate_and_canonicalize_geometry() {
         .with_dash_pattern(&[scalar(2), scalar(3)], scalar(-1))
         .expect("valid dash pattern");
     assert_eq!(options.width(), scalar(3));
+    assert_eq!(options.align(), StrokeAlign::Outside);
     assert_eq!(options.cap(), StrokeCap::Square);
     assert_eq!(options.join(), StrokeJoin::Bevel);
     assert_eq!(options.miter_limit(), scalar(7));
@@ -35,6 +37,7 @@ fn stroke_options_validate_and_canonicalize_geometry() {
     assert_eq!(options.dash_phase(), scalar(4));
 
     let defaults = StrokeOptions::new(scalar(1)).expect("default stroke");
+    assert_eq!(defaults.align(), StrokeAlign::Center);
     assert_eq!(defaults.cap(), StrokeCap::Butt);
     assert_eq!(defaults.join(), StrokeJoin::Miter);
     assert_eq!(defaults.miter_limit(), scalar(4));

@@ -1,4 +1,4 @@
-use skia_core::{SkiaError, SkiaErrorCode, StrokeCap, StrokeJoin, StrokeOptions};
+use skia_core::{SkiaError, SkiaErrorCode, StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions};
 
 use crate::canvas::{Contour, DeviceRect, ceil_q16_i64, contour_bounds, floor_q16_i64};
 
@@ -7,7 +7,10 @@ pub(crate) fn stroke_bounds(
     options: &StrokeOptions,
 ) -> Result<DeviceRect, SkiaError> {
     let bounds = contour_bounds(contours);
-    let radius = i64::from(options.width().bits()).div_euclid(2);
+    let radius = match options.align() {
+        StrokeAlign::Center => i64::from(options.width().bits()).div_euclid(2),
+        StrokeAlign::Inside | StrokeAlign::Outside => i64::from(options.width().bits()),
+    };
     let mut extent = radius;
     if options.cap() == StrokeCap::Square {
         extent = extent

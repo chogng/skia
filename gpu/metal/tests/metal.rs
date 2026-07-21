@@ -1,6 +1,6 @@
 use skia_core::{
     BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, SamplingOptions, Scalar,
-    StrokeCap, StrokeOptions, Transform,
+    StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandBuffer, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphAtlasKey,
@@ -98,6 +98,44 @@ fn metal_backend_strokes_paths_with_caps_and_complex_clips_on_hardware() {
     assert_eq!(pixel(&pixels, 7, 2, 3), Color::WHITE.channels());
     assert_eq!(pixel(&pixels, 7, 4, 3), Color::WHITE.channels());
     assert_eq!(pixel(&pixels, 7, 5, 3), Color::BLACK.channels());
+}
+
+#[test]
+fn metal_backend_places_closed_strokes_inside_or_outside() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let mut path = PathBuilder::new(5).unwrap();
+    path.add_rect(rect(4, 4, 12, 12)).unwrap();
+    let path = path.finish().unwrap();
+
+    let render = |backend: &mut MetalBackend, align| {
+        let mut surface = backend
+            .create_surface(GpuSurfaceDescriptor::new(16, 16).unwrap())
+            .unwrap();
+        let mut commands = GpuCommandEncoder::new(2).unwrap();
+        let path = commands.add_path(path.clone()).unwrap();
+        commands.clear(Color::BLACK).unwrap();
+        commands
+            .stroke_path(
+                path,
+                StrokeOptions::new(Scalar::from_i32(2).unwrap())
+                    .unwrap()
+                    .with_align(align)
+                    .with_join(StrokeJoin::Miter),
+                Paint::new(Color::WHITE),
+            )
+            .unwrap();
+        backend.submit(&mut surface, &commands.finish()).unwrap();
+        surface.read_rgba8().unwrap()
+    };
+    let inside = render(&mut backend, StrokeAlign::Inside);
+    let outside = render(&mut backend, StrokeAlign::Outside);
+
+    assert_eq!(pixel(&inside, 16, 3, 8), Color::BLACK.channels());
+    assert_eq!(pixel(&inside, 16, 4, 8), Color::WHITE.channels());
+    assert_eq!(pixel(&outside, 16, 3, 8), Color::WHITE.channels());
+    assert_eq!(pixel(&outside, 16, 4, 8), Color::BLACK.channels());
 }
 
 #[test]

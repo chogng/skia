@@ -10,7 +10,7 @@ use skia_core::{
 use skia_image::Image;
 use skia_tessellation::{
     DEFAULT_CURVE_STEPS, FlattenedContour, FlatteningLimits, PathFlattener, TessellationErrorCode,
-    stroke_contains, stroke_pieces,
+    stroke_mesh,
 };
 
 use crate::{
@@ -356,12 +356,12 @@ impl Canvas<'_> {
         if contours.iter().all(|contour| contour.points().len() < 2) {
             return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
         }
-        let pieces = stroke_pieces(&contours, options)?;
+        let mesh = stroke_mesh(&contours, options)?;
         let bounds = stroke_bounds(&contours, options)?.intersection(self.state.scissor);
         for y in bounds.top..bounds.bottom {
             for x in bounds.left..bounds.right {
                 let sample = pixel_center(x, y)?;
-                if stroke_contains(&pieces, sample, options)? {
+                if mesh.contains(sample)? {
                     self.blend_pixel(x, y, paint)?;
                 }
             }

@@ -2,7 +2,7 @@ use std::fmt;
 
 use skia_core::{
     BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, SamplingOptions, Scalar,
-    StrokeCap, StrokeJoin, StrokeOptions, Transform,
+    StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuClipGeometry, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode,
@@ -355,6 +355,7 @@ fn gpu_stroke_commands_preserve_options_and_replay_dashes() {
     path.line_to(point(18, 5)).unwrap();
     let options = StrokeOptions::new(scalar(2))
         .unwrap()
+        .with_align(StrokeAlign::Center)
         .with_cap(StrokeCap::Butt)
         .with_join(StrokeJoin::Bevel)
         .with_dash_pattern(&[scalar(4), scalar(4)], Scalar::ZERO)

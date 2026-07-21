@@ -1,6 +1,6 @@
 use skia_error::{SkiaError, SkiaErrorCode};
 use skia_geometry::{Point, Scalar};
-use skia_path::{Path, PathBuilder, StrokeCap, StrokeJoin, StrokeOptions};
+use skia_path::{Path, PathBuilder, StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions};
 
 use crate::{
     DEFAULT_CURVE_STEPS, FlattenedContour, FlatteningLimits, PathFlattener, TessellationError,
@@ -12,6 +12,7 @@ use crate::{
 pub struct StrokePiece {
     points: Vec<Point>,
     closed: bool,
+    interior_side: i8,
 }
 
 /// Triangle-list geometry for one fully expanded stroke.
@@ -24,6 +25,22 @@ impl StrokeMesh {
     /// Borrows triangle-list vertices; every consecutive three form one triangle.
     pub fn vertices(&self) -> &[Point] {
         &self.vertices
+    }
+
+    /// Tests whether a fixed-point sample is covered by any stroke triangle.
+    pub fn contains(&self, sample: Point) -> Result<bool, SkiaError> {
+        let sample = (i128::from(sample.x().bits()), i128::from(sample.y().bits()));
+        for triangle in self.vertices.chunks_exact(3) {
+            if point_in_triangle(
+                sample,
+                point_coordinates(triangle[0]),
+                point_coordinates(triangle[1]),
+                point_coordinates(triangle[2]),
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Converts this triangle list to a non-zero fill path.
@@ -66,6 +83,13 @@ pub fn stroke_pieces(
         if points.len() < 2 {
             continue;
         }
+        let interior_side = if options.align() == StrokeAlign::Center {
+            0
+        } else if !contour.is_closed() {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
+        } else {
+            contour_interior_side(&points)?
+        };
         if options.dash_pattern().is_empty() {
             pieces
                 .try_reserve(1)
@@ -73,9 +97,10 @@ pub fn stroke_pieces(
             pieces.push(StrokePiece {
                 points,
                 closed: contour.is_closed(),
+                interior_side,
             });
         } else {
-            let dashed = dash_contour(&points, contour.is_closed(), options)?;
+            let dashed = dash_contour(&points, contour.is_closed(), interior_side, options)?;
             pieces
                 .try_reserve(dashed.len())
                 .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
@@ -93,11 +118,18 @@ pub fn stroke_mesh(
     contours: &[FlattenedContour],
     options: &StrokeOptions,
 ) -> Result<StrokeMesh, SkiaError> {
-    const ROUND_STEPS: usize = 24;
     let pieces = stroke_pieces(contours, options)?;
-    let radius = f64::from(options.width().bits()) / 131_072.0;
+    stroke_mesh_from_pieces(&pieces, options)
+}
+
+fn stroke_mesh_from_pieces(
+    pieces: &[StrokePiece],
+    options: &StrokeOptions,
+) -> Result<StrokeMesh, SkiaError> {
+    const ROUND_STEPS: usize = 24;
+    let cap_radius = f64::from(options.width().bits()) / 131_072.0;
     let mut vertices = Vec::new();
-    for piece in &pieces {
+    for piece in pieces {
         let points = piece.points();
         if points.len() < 2 {
             continue;
@@ -107,6 +139,7 @@ pub fn stroke_mesh(
         } else {
             points.len() - 1
         };
+        let offsets = stroke_offsets(piece, options);
         for index in 0..segment_count {
             let start = point_to_f64(points[index]);
             let end = point_to_f64(points[(index + 1) % points.len()]);
@@ -119,31 +152,40 @@ pub fn stroke_mesh(
                 && index + 1 == segment_count
                 && options.cap() == StrokeCap::Square;
             let start = if extend_start {
-                subtract(start, scale(direction, radius))
+                subtract(start, scale(direction, cap_radius))
             } else {
                 start
             };
             let end = if extend_end {
-                add(end, scale(direction, radius))
+                add(end, scale(direction, cap_radius))
             } else {
                 end
             };
             append_quad(
                 &mut vertices,
-                add(start, scale(normal, radius)),
-                add(end, scale(normal, radius)),
-                subtract(start, scale(normal, radius)),
-                subtract(end, scale(normal, radius)),
+                add(start, scale(normal, offsets.0)),
+                add(end, scale(normal, offsets.0)),
+                add(start, scale(normal, offsets.1)),
+                add(end, scale(normal, offsets.1)),
             )?;
         }
         if !piece.is_closed() && options.cap() == StrokeCap::Round {
-            append_circle(&mut vertices, point_to_f64(points[0]), radius, ROUND_STEPS)?;
-            append_circle(
-                &mut vertices,
+            let midpoint = (offsets.0 + offsets.1) / 2.0;
+            let first_direction =
+                direction_and_normal(point_to_f64(points[0]), point_to_f64(points[1]))
+                    .ok_or(SkiaError::new(SkiaErrorCode::InvalidPath))?;
+            let first_center = add(point_to_f64(points[0]), scale(first_direction.1, midpoint));
+            append_circle(&mut vertices, first_center, cap_radius, ROUND_STEPS)?;
+            let last_direction = direction_and_normal(
+                point_to_f64(points[points.len() - 2]),
                 point_to_f64(points[points.len() - 1]),
-                radius,
-                ROUND_STEPS,
-            )?;
+            )
+            .ok_or(SkiaError::new(SkiaErrorCode::InvalidPath))?;
+            let last_center = add(
+                point_to_f64(points[points.len() - 1]),
+                scale(last_direction.1, midpoint),
+            );
+            append_circle(&mut vertices, last_center, cap_radius, ROUND_STEPS)?;
         }
         let join_start = if piece.is_closed() { 0 } else { 1 };
         let join_end = if piece.is_closed() {
@@ -160,7 +202,7 @@ pub fn stroke_mesh(
                 previous,
                 vertex,
                 next,
-                radius,
+                offsets,
                 options,
                 ROUND_STEPS,
             )?;
@@ -209,7 +251,7 @@ fn append_join(
     previous: (f64, f64),
     vertex: (f64, f64),
     next: (f64, f64),
-    radius: f64,
+    offsets: (f64, f64),
     options: &StrokeOptions,
     round_steps: usize,
 ) -> Result<(), SkiaError> {
@@ -223,12 +265,26 @@ fn append_join(
     if turn.abs() < f64::EPSILON {
         return Ok(());
     }
-    if options.join() == StrokeJoin::Round {
-        return append_circle(output, vertex, radius, round_steps);
+    let outer_distance = if turn > 0.0 {
+        offsets.0.min(offsets.1)
+    } else {
+        offsets.0.max(offsets.1)
+    };
+    if outer_distance.abs() < f64::EPSILON {
+        return Ok(());
     }
-    let side = if turn > 0.0 { -1.0 } else { 1.0 };
-    let outer_incoming = add(vertex, scale(incoming_normal, radius * side));
-    let outer_outgoing = add(vertex, scale(outgoing_normal, radius * side));
+    let outer_incoming = add(vertex, scale(incoming_normal, outer_distance));
+    let outer_outgoing = add(vertex, scale(outgoing_normal, outer_distance));
+    if options.join() == StrokeJoin::Round {
+        return append_round_join(
+            output,
+            vertex,
+            outer_incoming,
+            outer_outgoing,
+            turn > 0.0,
+            round_steps,
+        );
+    }
     if options.join() == StrokeJoin::Bevel {
         return append_triangle(output, vertex, outer_incoming, outer_outgoing);
     }
@@ -239,12 +295,64 @@ fn append_join(
     let delta = subtract(outer_outgoing, outer_incoming);
     let t = cross(delta, outgoing) / denominator;
     let miter = add(outer_incoming, scale(incoming, t));
-    let limit = radius * f64::from(options.miter_limit().bits()) / 65_536.0;
+    let limit = outer_distance.abs() * f64::from(options.miter_limit().bits()) / 65_536.0;
     if distance_squared(vertex, miter) > limit * limit {
         return append_triangle(output, vertex, outer_incoming, outer_outgoing);
     }
     append_triangle(output, outer_incoming, miter, vertex)?;
     append_triangle(output, vertex, miter, outer_outgoing)
+}
+
+fn stroke_offsets(piece: &StrokePiece, options: &StrokeOptions) -> (f64, f64) {
+    let width = f64::from(options.width().bits()) / 65_536.0;
+    match options.align() {
+        StrokeAlign::Center => (width / 2.0, -width / 2.0),
+        StrokeAlign::Inside => (width * f64::from(piece.interior_side), 0.0),
+        StrokeAlign::Outside => (0.0, -width * f64::from(piece.interior_side)),
+    }
+}
+
+fn append_round_join(
+    output: &mut Vec<Point>,
+    center: (f64, f64),
+    start: (f64, f64),
+    end: (f64, f64),
+    positive_sweep: bool,
+    round_steps: usize,
+) -> Result<(), SkiaError> {
+    let start_delta = subtract(start, center);
+    let end_delta = subtract(end, center);
+    let radius = (start_delta.0 * start_delta.0 + start_delta.1 * start_delta.1).sqrt();
+    let start_angle = start_delta.1.atan2(start_delta.0);
+    let mut sweep = end_delta.1.atan2(end_delta.0) - start_angle;
+    if positive_sweep {
+        while sweep <= 0.0 {
+            sweep += std::f64::consts::TAU;
+        }
+    } else {
+        while sweep >= 0.0 {
+            sweep -= std::f64::consts::TAU;
+        }
+    }
+    let steps = ((sweep.abs() / std::f64::consts::TAU * round_steps as f64).ceil() as usize)
+        .clamp(1, round_steps);
+    for index in 0..steps {
+        let first_angle = start_angle + sweep * index as f64 / steps as f64;
+        let second_angle = start_angle + sweep * (index + 1) as f64 / steps as f64;
+        append_triangle(
+            output,
+            center,
+            (
+                center.0 + radius * first_angle.cos(),
+                center.1 + radius * first_angle.sin(),
+            ),
+            (
+                center.0 + radius * second_angle.cos(),
+                center.1 + radius * second_angle.sin(),
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 fn append_quad(
@@ -314,6 +422,10 @@ fn point_to_f64(point: Point) -> (f64, f64) {
     )
 }
 
+fn point_coordinates(point: Point) -> (i128, i128) {
+    (i128::from(point.x().bits()), i128::from(point.y().bits()))
+}
+
 fn point_from_f64(point: (f64, f64)) -> Result<Point, SkiaError> {
     let scalar = |value: f64| {
         if !value.is_finite() {
@@ -374,9 +486,34 @@ fn normalized_stroke_points(contour: &FlattenedContour) -> Result<Vec<Point>, Sk
     Ok(points)
 }
 
+fn contour_interior_side(points: &[Point]) -> Result<i8, SkiaError> {
+    let mut area = 0_i128;
+    for index in 0..points.len() {
+        let current = points[index];
+        let next = points[(index + 1) % points.len()];
+        let cross = i128::from(current.x().bits())
+            .checked_mul(i128::from(next.y().bits()))
+            .and_then(|value| {
+                i128::from(current.y().bits())
+                    .checked_mul(i128::from(next.x().bits()))
+                    .and_then(|other| value.checked_sub(other))
+            })
+            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+        area = area
+            .checked_add(cross)
+            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    }
+    match area.cmp(&0) {
+        std::cmp::Ordering::Greater => Ok(1),
+        std::cmp::Ordering::Less => Ok(-1),
+        std::cmp::Ordering::Equal => Err(SkiaError::new(SkiaErrorCode::InvalidPath)),
+    }
+}
+
 fn dash_contour(
     points: &[Point],
     closed: bool,
+    interior_side: i8,
     options: &StrokeOptions,
 ) -> Result<Vec<StrokePiece>, SkiaError> {
     let pattern = options.dash_pattern();
@@ -421,7 +558,7 @@ fn dash_contour(
             pattern_remaining -= step;
             if pattern_remaining == 0 {
                 if pattern_index.is_multiple_of(2) {
-                    finish_stroke_piece(&mut pieces, &mut current)?;
+                    finish_stroke_piece(&mut pieces, &mut current, interior_side)?;
                 }
                 pattern_index = (pattern_index + 1) % pattern.len();
                 pattern_remaining = i64::from(pattern[pattern_index].bits());
@@ -430,7 +567,7 @@ fn dash_contour(
     }
 
     let unfinished_on_at_end = !current.is_empty();
-    finish_stroke_piece(&mut pieces, &mut current)?;
+    finish_stroke_piece(&mut pieces, &mut current, interior_side)?;
     if closed && starts_on && unfinished_on_at_end && pieces.len() > 1 {
         let first_starts_at_seam = pieces
             .first()
@@ -467,6 +604,7 @@ fn dash_contour(
 fn finish_stroke_piece(
     pieces: &mut Vec<StrokePiece>,
     current: &mut Vec<Point>,
+    interior_side: i8,
 ) -> Result<(), SkiaError> {
     if current.len() >= 2 {
         pieces
@@ -475,6 +613,7 @@ fn finish_stroke_piece(
         pieces.push(StrokePiece {
             points: std::mem::take(current),
             closed: false,
+            interior_side,
         });
     } else {
         current.clear();
@@ -561,270 +700,13 @@ pub fn interpolate_stroke_segment(
     ))
 }
 
-/// Tests whether a point lies within the exact coverage geometry of a stroke.
+/// Tests whether a point lies within the shared triangle coverage of a stroke.
 pub fn stroke_contains(
     pieces: &[StrokePiece],
     sample: Point,
     options: &StrokeOptions,
 ) -> Result<bool, SkiaError> {
-    let radius = i128::from(options.width().bits()).div_euclid(2);
-    for piece in pieces {
-        let points = piece.points();
-        if points.len() < 2 {
-            continue;
-        }
-        let segment_count = if piece.is_closed() {
-            points.len()
-        } else {
-            points.len() - 1
-        };
-        for index in 0..segment_count {
-            let start = points[index];
-            let end = points[(index + 1) % points.len()];
-            let square_start =
-                !piece.is_closed() && index == 0 && options.cap() == StrokeCap::Square;
-            let square_end = !piece.is_closed()
-                && index + 1 == segment_count
-                && options.cap() == StrokeCap::Square;
-            if point_in_segment_strip(sample, start, end, radius, square_start, square_end)? {
-                return Ok(true);
-            }
-        }
-        if !piece.is_closed()
-            && options.cap() == StrokeCap::Round
-            && (point_near_point(sample, points[0], options.width())?
-                || point_near_point(sample, points[points.len() - 1], options.width())?)
-        {
-            return Ok(true);
-        }
-        if piece.is_closed() {
-            for index in 0..points.len() {
-                let previous = points[(index + points.len() - 1) % points.len()];
-                let vertex = points[index];
-                let next = points[(index + 1) % points.len()];
-                if stroke_join_contains(sample, previous, vertex, next, options)? {
-                    return Ok(true);
-                }
-            }
-        } else {
-            for index in 1..points.len() - 1 {
-                if stroke_join_contains(
-                    sample,
-                    points[index - 1],
-                    points[index],
-                    points[index + 1],
-                    options,
-                )? {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-    Ok(false)
-}
-
-fn point_in_segment_strip(
-    sample: Point,
-    start: Point,
-    end: Point,
-    radius: i128,
-    extend_start: bool,
-    extend_end: bool,
-) -> Result<bool, SkiaError> {
-    let start_x = i128::from(start.x().bits());
-    let start_y = i128::from(start.y().bits());
-    let delta_x = i128::from(end.x().bits()) - start_x;
-    let delta_y = i128::from(end.y().bits()) - start_y;
-    let length_squared = delta_x
-        .checked_mul(delta_x)
-        .and_then(|value| {
-            delta_y
-                .checked_mul(delta_y)
-                .and_then(|other| value.checked_add(other))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    if length_squared == 0 {
-        return Ok(false);
-    }
-    let sample_x = i128::from(sample.x().bits());
-    let sample_y = i128::from(sample.y().bits());
-    let relative_x = sample_x - start_x;
-    let relative_y = sample_y - start_y;
-    let projection = relative_x
-        .checked_mul(delta_x)
-        .and_then(|value| {
-            relative_y
-                .checked_mul(delta_y)
-                .and_then(|other| value.checked_add(other))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let length = i128::from(stroke_segment_length_bits(start, end)?);
-    let extension = radius
-        .checked_mul(length)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let lower = if extend_start { -extension } else { 0 };
-    let upper = length_squared
-        .checked_add(if extend_end { extension } else { 0 })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    if projection < lower || projection > upper {
-        return Ok(false);
-    }
-    let cross = relative_x
-        .checked_mul(delta_y)
-        .and_then(|value| {
-            relative_y
-                .checked_mul(delta_x)
-                .and_then(|other| value.checked_sub(other))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let distance = cross
-        .checked_mul(cross)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let limit = radius
-        .checked_mul(radius)
-        .and_then(|value| value.checked_mul(length_squared))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    Ok(distance <= limit)
-}
-
-fn stroke_join_contains(
-    sample: Point,
-    previous: Point,
-    vertex: Point,
-    next: Point,
-    options: &StrokeOptions,
-) -> Result<bool, SkiaError> {
-    if options.join() == StrokeJoin::Round {
-        return point_near_point(sample, vertex, options.width());
-    }
-    let incoming = (
-        i128::from(vertex.x().bits()) - i128::from(previous.x().bits()),
-        i128::from(vertex.y().bits()) - i128::from(previous.y().bits()),
-    );
-    let outgoing = (
-        i128::from(next.x().bits()) - i128::from(vertex.x().bits()),
-        i128::from(next.y().bits()) - i128::from(vertex.y().bits()),
-    );
-    let turn = cross_coordinates(incoming, outgoing)?;
-    if turn == 0 {
-        return Ok(false);
-    }
-    let side = if turn > 0 { -1_i128 } else { 1_i128 };
-    let radius = i128::from(options.width().bits()).div_euclid(2);
-    if radius == 0 {
-        return Ok(false);
-    }
-    let center = (i128::from(vertex.x().bits()), i128::from(vertex.y().bits()));
-    let outer_incoming = offset_coordinate(center, incoming, radius, side)?;
-    let outer_outgoing = offset_coordinate(center, outgoing, radius, side)?;
-    let sample = (i128::from(sample.x().bits()), i128::from(sample.y().bits()));
-    if options.join() == StrokeJoin::Bevel {
-        return point_in_triangle(sample, center, outer_incoming, outer_outgoing);
-    }
-    let delta = (
-        outer_outgoing.0 - outer_incoming.0,
-        outer_outgoing.1 - outer_incoming.1,
-    );
-    let numerator = cross_coordinates(delta, outgoing)?;
-    let miter = (
-        outer_incoming
-            .0
-            .checked_add(rounded_div_signed(
-                incoming
-                    .0
-                    .checked_mul(numerator)
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
-                turn,
-            )?)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
-        outer_incoming
-            .1
-            .checked_add(rounded_div_signed(
-                incoming
-                    .1
-                    .checked_mul(numerator)
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
-                turn,
-            )?)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
-    );
-    let miter_delta = (miter.0 - center.0, miter.1 - center.1);
-    let miter_length_squared = miter_delta
-        .0
-        .checked_mul(miter_delta.0)
-        .and_then(|value| {
-            miter_delta
-                .1
-                .checked_mul(miter_delta.1)
-                .and_then(|other| value.checked_add(other))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let limit = radius
-        .checked_mul(i128::from(options.miter_limit().bits()))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?
-        / (1 << 16);
-    if miter_length_squared
-        > limit
-            .checked_mul(limit)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?
-    {
-        return point_in_triangle(sample, center, outer_incoming, outer_outgoing);
-    }
-    Ok(point_in_triangle(sample, center, outer_incoming, miter)?
-        || point_in_triangle(sample, center, miter, outer_outgoing)?)
-}
-
-fn offset_coordinate(
-    center: (i128, i128),
-    direction: (i128, i128),
-    radius: i128,
-    side: i128,
-) -> Result<(i128, i128), SkiaError> {
-    let squared = direction
-        .0
-        .checked_mul(direction.0)
-        .and_then(|value| {
-            direction
-                .1
-                .checked_mul(direction.1)
-                .and_then(|other| value.checked_add(other))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let length = i128::try_from(
-        u128::try_from(squared)
-            .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?
-            .isqrt(),
-    )
-    .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    if length == 0 {
-        return Ok(center);
-    }
-    let scale = radius
-        .checked_mul(side)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let x = rounded_div_signed(
-        (-direction.1)
-            .checked_mul(scale)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
-        length,
-    )?;
-    let y = rounded_div_signed(
-        direction
-            .0
-            .checked_mul(scale)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
-        length,
-    )?;
-    Ok((
-        center
-            .0
-            .checked_add(x)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
-        center
-            .1
-            .checked_add(y)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
-    ))
+    stroke_mesh_from_pieces(pieces, options)?.contains(sample)
 }
 
 fn cross_coordinates(first: (i128, i128), second: (i128, i128)) -> Result<i128, SkiaError> {
@@ -864,53 +746,4 @@ fn point_in_triangle(
     let third_edge = edge(third, first)?;
     Ok(!((first_edge < 0 || second_edge < 0 || third_edge < 0)
         && (first_edge > 0 || second_edge > 0 || third_edge > 0)))
-}
-
-fn point_near_point(sample: Point, point: Point, width: Scalar) -> Result<bool, SkiaError> {
-    point_near_coordinates(
-        i128::from(sample.x().bits()),
-        i128::from(sample.y().bits()),
-        i128::from(point.x().bits()),
-        i128::from(point.y().bits()),
-        width,
-    )
-}
-
-fn point_near_coordinates(
-    sample_x: i128,
-    sample_y: i128,
-    point_x: i128,
-    point_y: i128,
-    width: Scalar,
-) -> Result<bool, SkiaError> {
-    let dx = sample_x - point_x;
-    let dy = sample_y - point_y;
-    let distance_squared = dx
-        .checked_mul(dx)
-        .and_then(|value| {
-            dy.checked_mul(dy)
-                .and_then(|other| value.checked_add(other))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let radius = i128::from(width.bits()).div_euclid(2);
-    let radius_squared = radius
-        .checked_mul(radius)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    Ok(distance_squared <= radius_squared)
-}
-
-fn rounded_div_signed(numerator: i128, denominator: i128) -> Result<i128, SkiaError> {
-    let half = denominator.unsigned_abs() / 2;
-    let magnitude = numerator
-        .unsigned_abs()
-        .checked_add(half)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?
-        / denominator.unsigned_abs();
-    let magnitude =
-        i128::try_from(magnitude).map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    Ok(if (numerator < 0) == (denominator < 0) {
-        magnitude
-    } else {
-        -magnitude
-    })
 }

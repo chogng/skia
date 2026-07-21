@@ -119,9 +119,21 @@ pub enum StrokeJoin {
     Bevel,
 }
 
+/// Placement of stroke width relative to a path contour.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StrokeAlign {
+    /// Splits the width equally across the path centerline.
+    Center,
+    /// Places the full width on the interior side of each closed contour.
+    Inside,
+    /// Places the full width on the exterior side of each closed contour.
+    Outside,
+}
+
 /// Backend-neutral geometry options for stroking one path.
 ///
-/// The default cap is [`StrokeCap::Butt`], the default join is
+/// The default alignment is [`StrokeAlign::Center`], the default cap is
+/// [`StrokeCap::Butt`], the default join is
 /// [`StrokeJoin::Miter`], and the default miter limit is four times the
 /// half-width. An empty dash pattern means a solid stroke. Non-empty patterns
 /// contain an even number of positive alternating on/off lengths and store a
@@ -129,6 +141,7 @@ pub enum StrokeJoin {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct StrokeOptions {
     width: Scalar,
+    align: StrokeAlign,
     cap: StrokeCap,
     join: StrokeJoin,
     miter_limit: Scalar,
@@ -146,6 +159,7 @@ impl StrokeOptions {
         }
         Ok(Self {
             width,
+            align: StrokeAlign::Center,
             cap: StrokeCap::Butt,
             join: StrokeJoin::Miter,
             miter_limit: Self::DEFAULT_MITER_LIMIT,
@@ -157,6 +171,11 @@ impl StrokeOptions {
     /// Returns the positive logical stroke width.
     pub const fn width(&self) -> Scalar {
         self.width
+    }
+
+    /// Returns placement of the width relative to the contour.
+    pub const fn align(&self) -> StrokeAlign {
+        self.align
     }
 
     /// Returns the open-contour and dash cap.
@@ -187,6 +206,15 @@ impl StrokeOptions {
     /// Replaces the open-contour and dash cap.
     pub fn with_cap(mut self, cap: StrokeCap) -> Self {
         self.cap = cap;
+        self
+    }
+
+    /// Replaces stroke alignment.
+    ///
+    /// Inside and outside alignment are accepted by the option value but
+    /// require closed, non-degenerate contours when geometry is generated.
+    pub fn with_align(mut self, align: StrokeAlign) -> Self {
+        self.align = align;
         self
     }
 
@@ -786,10 +814,9 @@ pub(crate) fn build_ellipse_arc(
     let center_y = midpoint(bounds.top(), bounds.bottom())?;
     let radius_x = subtract(bounds.right(), center_x)?;
     let radius_y = subtract(bounds.bottom(), center_y)?;
-    let segment_count = usize::try_from(
-        (sweep_bits.unsigned_abs() + QUARTER_TURN_BITS as u64 - 1) / QUARTER_TURN_BITS as u64,
-    )
-    .map_err(|_| SkiaError::new(SkiaErrorCode::ResourceLimit))?;
+    let segment_count =
+        usize::try_from(sweep_bits.unsigned_abs().div_ceil(QUARTER_TURN_BITS as u64))
+            .map_err(|_| SkiaError::new(SkiaErrorCode::ResourceLimit))?;
     let mut segments = Vec::new();
     segments
         .try_reserve_exact(segment_count)

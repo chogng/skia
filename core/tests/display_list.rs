@@ -1,6 +1,6 @@
 use skia_core::{
     ClipOp, Color, DisplayListBuilder, DrawCommand, FillRule, Paint, SamplingOptions, Scalar,
-    SkiaErrorCode, StrokeCap, StrokeJoin, StrokeOptions, Transform,
+    SkiaErrorCode, StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
 #[cfg(feature = "text")]
 use skia_core::{FontId, GlyphId, GlyphRun, PositionedGlyph, TextUnit};
@@ -63,6 +63,7 @@ fn display_list_owns_explicit_stroke_geometry() {
     let path = builder.add_path(empty_path()).expect("store path");
     let options = StrokeOptions::new(Scalar::from_i32(3).expect("width"))
         .expect("stroke")
+        .with_align(StrokeAlign::Outside)
         .with_cap(StrokeCap::Square)
         .with_join(StrokeJoin::Bevel)
         .with_dash_pattern(
