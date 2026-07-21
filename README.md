@@ -133,8 +133,9 @@ underline and strike-through metrics into per-style target-space rectangles;
 callers record those through generic `fill_rect` commands. This keeps text data
 adaptation separate from command ordering and hardware backends. The Metal
 backend draws transformed/scissored solid rectangles, Alpha8 masks, and color
-glyphs through real shader pipelines; these paths currently support
-source-over blending. `TextAtlasCache` retains
+glyphs through real shader pipelines; rectangle and glyph draws can sample
+parent-linked R8 complex-clip masks rendered on the GPU, and these paths
+currently support source-over blending. `TextAtlasCache` retains
 bounded immutable packed atlases with least-recently-used eviction, while stable
 generic atlas keys let Metal retain and reuse a separately bounded native
 texture across submissions. Both layers expose hit, upload, and eviction stats;
@@ -167,7 +168,9 @@ Backend-neutral `ClipOp` defines intersection and difference. CPU Canvas,
 DisplayList replay, and the generic GPU encoder apply it to rectangles or paths.
 Axis-aligned rectangle intersections retain a scissor fast path; CPU complex
 clips use deterministic masks, while generic GPU commands retain immutable
-parent-linked `GpuClipId` nodes that the software reference backend replays.
+parent-linked `GpuClipId` nodes. The software reference backend replays those
+nodes through CPU masks, and Metal materializes only used nodes as transient R8
+textures shared by subsequent rectangle and glyph draws in the submission.
 Boolean path operations, stroke-to-path expansion,
 path effects, and tangent-/endpoint-defined arc variants remain separate
 geometry-processing work; their design must stay independent of any consumer.

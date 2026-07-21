@@ -8,6 +8,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod clip;
+mod clip_geometry;
+
 use std::{collections::HashMap, fmt, mem::size_of};
 
 use metal::{
@@ -21,6 +24,8 @@ use skia_gpu::{
     GpuBackend, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad,
     GpuSurfaceDescriptor,
 };
+
+use crate::clip::ClipRenderer;
 
 const DEFAULT_ATLAS_CACHE_CAPACITY: usize = 8;
 const DEFAULT_ATLAS_CACHE_BYTES: u64 = 64 * 1024 * 1024;
@@ -119,6 +124,7 @@ pub struct MetalBackend {
     queue: CommandQueue,
     solid_rect_pipeline: RenderPipelineState,
     glyph_pipeline: RenderPipelineState,
+    clip_renderer: ClipRenderer,
     atlas_cache_capacity: usize,
     atlas_cache_max_bytes: u64,
     atlas_cache_bytes: u64,
@@ -219,11 +225,13 @@ impl MetalBackend {
         let glyph_pipeline = device
             .new_render_pipeline_state(&glyph_descriptor)
             .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+        let clip_renderer = ClipRenderer::new(&device, &library)?;
         Ok(Self {
             device,
             queue,
             solid_rect_pipeline,
             glyph_pipeline,
+            clip_renderer,
             atlas_cache_capacity: DEFAULT_ATLAS_CACHE_CAPACITY,
             atlas_cache_max_bytes: DEFAULT_ATLAS_CACHE_BYTES,
             atlas_cache_bytes: 0,
@@ -305,13 +313,10 @@ impl GpuBackend for MetalBackend {
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(_) => {}
-                GpuCommand::FillRect { paint, clip, .. }
-                    if paint.blend_mode() == BlendMode::SourceOver && clip.is_none() => {}
-                GpuCommand::DrawGlyphs {
-                    atlas, paint, clip, ..
-                } => {
+                GpuCommand::FillRect { paint, .. }
+                    if paint.blend_mode() == BlendMode::SourceOver => {}
+                GpuCommand::DrawGlyphs { atlas, paint, .. } => {
                     if paint.blend_mode() != BlendMode::SourceOver
-                        || clip.is_some()
                         || commands.glyph_atlas(*atlas).is_none()
                     {
                         return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
@@ -341,6 +346,7 @@ impl GpuBackend for MetalBackend {
             }
         }
         let command_buffer = self.queue.new_command_buffer();
+        let mut clip_textures = HashMap::new();
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(color) => {
@@ -351,8 +357,20 @@ impl GpuBackend for MetalBackend {
                     paint,
                     transform,
                     scissor,
-                    clip: _,
+                    clip,
                 } => {
+                    if let Some(clip) = clip {
+                        self.clip_renderer.ensure_texture(
+                            command_buffer,
+                            surface.descriptor,
+                            commands,
+                            *clip,
+                            &mut clip_textures,
+                        )?;
+                    }
+                    let clip_texture = clip
+                        .and_then(|id| clip_textures.get(&id))
+                        .unwrap_or(self.clip_renderer.unclipped_texture());
                     self.encode_solid_rect(
                         command_buffer,
                         surface,
@@ -360,6 +378,8 @@ impl GpuBackend for MetalBackend {
                         *paint,
                         *transform,
                         *scissor,
+                        clip_texture,
+                        clip.is_some(),
                     )?;
                 }
                 GpuCommand::DrawGlyphs {
@@ -368,11 +388,23 @@ impl GpuBackend for MetalBackend {
                     paint,
                     transform,
                     scissor,
-                    clip: _,
+                    clip,
                 } => {
+                    if let Some(clip) = clip {
+                        self.clip_renderer.ensure_texture(
+                            command_buffer,
+                            surface.descriptor,
+                            commands,
+                            *clip,
+                            &mut clip_textures,
+                        )?;
+                    }
                     let texture = atlas_textures
                         .get(atlas)
                         .ok_or(MetalError::new(MetalErrorCode::SubmissionFailed))?;
+                    let clip_texture = clip
+                        .and_then(|id| clip_textures.get(&id))
+                        .unwrap_or(self.clip_renderer.unclipped_texture());
                     self.encode_glyphs(
                         command_buffer,
                         surface,
@@ -381,6 +413,8 @@ impl GpuBackend for MetalBackend {
                         *paint,
                         *transform,
                         *scissor,
+                        clip_texture,
+                        clip.is_some(),
                     )?;
                 }
                 GpuCommand::FillPath { .. }
@@ -411,9 +445,11 @@ impl MetalBackend {
         rect: Rect,
         paint: skia_core::Paint,
         transform: Transform,
-        clip: Option<Rect>,
+        scissor: Option<Rect>,
+        clip_texture: &Texture,
+        has_clip: bool,
     ) -> Result<(), MetalError> {
-        let Some(scissor) = scissor_rect(clip, surface.descriptor) else {
+        let Some(scissor) = scissor_rect(scissor, surface.descriptor) else {
             return Ok(());
         };
         let vertices = solid_rect_vertices(rect, transform)?;
@@ -433,6 +469,13 @@ impl MetalBackend {
         encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
         let color = paint_color(paint.color());
         encoder.set_fragment_bytes(0, size_of_val(&color) as u64, color.as_ptr().cast());
+        let has_clip = u32::from(has_clip);
+        encoder.set_fragment_bytes(
+            1,
+            size_of_val(&has_clip) as u64,
+            (&has_clip as *const u32).cast(),
+        );
+        encoder.set_fragment_texture(0, Some(clip_texture));
         encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, vertices.len() as u64);
         encoder.end_encoding();
         Ok(())
@@ -571,9 +614,11 @@ impl MetalBackend {
         glyphs: &[GpuGlyphQuad],
         paint: skia_core::Paint,
         transform: Transform,
-        clip: Option<Rect>,
+        scissor: Option<Rect>,
+        clip_texture: &Texture,
+        has_clip: bool,
     ) -> Result<(), MetalError> {
-        let Some(scissor) = scissor_rect(clip, surface.descriptor) else {
+        let Some(scissor) = scissor_rect(scissor, surface.descriptor) else {
             return Ok(());
         };
         let vertices = glyph_vertices(glyphs, transform)?;
@@ -596,7 +641,14 @@ impl MetalBackend {
         encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
         let paint = paint_color(paint.color());
         encoder.set_fragment_bytes(0, size_of_val(&paint) as u64, paint.as_ptr().cast());
+        let has_clip = u32::from(has_clip);
+        encoder.set_fragment_bytes(
+            1,
+            size_of_val(&has_clip) as u64,
+            (&has_clip as *const u32).cast(),
+        );
         encoder.set_fragment_texture(0, Some(atlas));
+        encoder.set_fragment_texture(1, Some(clip_texture));
         encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, vertices.len() as u64);
         encoder.end_encoding();
         Ok(())

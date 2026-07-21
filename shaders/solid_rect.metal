@@ -19,7 +19,13 @@ vertex float4 skia_solid_rect_vertex(
 }
 
 fragment float4 skia_solid_rect_fragment(
-    constant float4& color [[buffer(0)]]) {
+    float4 position [[position]],
+    constant float4& color [[buffer(0)]],
+    constant uint& has_clip [[buffer(1)]],
+    texture2d<float, access::read> clip_mask [[texture(0)]]) {
+    if (has_clip != 0 && clip_mask.read(uint2(position.xy)).r < 0.5) {
+        discard_fragment();
+    }
     return color;
 }
 
@@ -54,11 +60,71 @@ vertex GlyphVarying skia_glyph_vertex(
 fragment float4 skia_glyph_fragment(
     GlyphVarying input [[stage_in]],
     texture2d<float, access::read> atlas [[texture(0)]],
-    constant float4& paint [[buffer(0)]]) {
+    texture2d<float, access::read> clip_mask [[texture(1)]],
+    constant float4& paint [[buffer(0)]],
+    constant uint& has_clip [[buffer(1)]]) {
+    if (has_clip != 0 && clip_mask.read(uint2(input.position.xy)).r < 0.5) {
+        discard_fragment();
+    }
     uint2 coordinate = uint2(input.atlas_position);
     float4 sample = atlas.read(coordinate);
     if (input.mask != 0) {
         return float4(paint.rgb, paint.a * sample.a);
     }
     return float4(sample.rgb, sample.a * paint.a);
+}
+
+struct ClipEdge {
+    float2 start;
+    float2 end;
+};
+
+struct ClipUniforms {
+    uint edge_count;
+    uint even_odd;
+    uint difference;
+    uint has_parent;
+};
+
+vertex float4 skia_clip_vertex(uint vertex_id [[vertex_id]]) {
+    const float2 positions[3] = {
+        float2(-1.0, -1.0),
+        float2(3.0, -1.0),
+        float2(-1.0, 3.0),
+    };
+    return float4(positions[vertex_id], 0.0, 1.0);
+}
+
+fragment float skia_clip_fragment(
+    float4 position [[position]],
+    const device ClipEdge* edges [[buffer(0)]],
+    constant ClipUniforms& uniforms [[buffer(1)]],
+    texture2d<float, access::read> parent [[texture(0)]]) {
+    uint2 coordinate = uint2(position.xy);
+    bool parent_visible = uniforms.has_parent == 0 || parent.read(coordinate).r >= 0.5;
+    if (!parent_visible) {
+        return 0.0;
+    }
+
+    bool parity = false;
+    int winding = 0;
+    float2 sample = position.xy;
+    for (uint index = 0; index < uniforms.edge_count; ++index) {
+        ClipEdge edge = edges[index];
+        bool rising = edge.start.y <= sample.y && sample.y < edge.end.y;
+        bool falling = edge.end.y <= sample.y && sample.y < edge.start.y;
+        if (!rising && !falling) {
+            continue;
+        }
+        float intersection = edge.start.x
+            + (sample.y - edge.start.y) * (edge.end.x - edge.start.x)
+                / (edge.end.y - edge.start.y);
+        if (intersection > sample.x) {
+            parity = !parity;
+            winding += rising ? 1 : -1;
+        }
+    }
+    bool inside = uniforms.even_odd != 0 ? parity : winding != 0;
+    bool visible = uniforms.difference != 0 ? !inside : inside;
+    return visible ? 1.0 : 0.0;
 }

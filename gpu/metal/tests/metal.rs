@@ -1,5 +1,6 @@
 use skia_core::{
-    BlendMode, Color, Paint, PathBuilder, Point, Rect, Scalar, StrokeOptions, Transform,
+    BlendMode, ClipOp, Color, FillRule, Paint, PathBuilder, Point, Rect, Scalar, StrokeOptions,
+    Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandBuffer, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphAtlasKey,
@@ -153,6 +154,109 @@ fn metal_backend_draws_mask_and_color_glyphs_on_hardware() {
     assert_eq!(
         surface.read_rgba8().unwrap(),
         [0, 0, 128, 255, 255, 0, 0, 255]
+    );
+}
+
+#[test]
+fn metal_backend_applies_path_and_difference_clip_masks_on_hardware() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(7, 7).unwrap())
+        .unwrap();
+    let mut path = PathBuilder::new(5).unwrap();
+    path.add_rect(rect(1, 1, 6, 6)).unwrap();
+    let mut commands = GpuCommandEncoder::new(2).unwrap();
+    let path = commands.add_path(path.finish().unwrap()).unwrap();
+    commands.clear(Color::BLACK).unwrap();
+    commands
+        .clip_path(path, FillRule::NonZero, ClipOp::Intersect)
+        .unwrap();
+    commands
+        .clip_rect_with_op(rect(2, 2, 5, 5), ClipOp::Difference)
+        .unwrap();
+    commands
+        .fill_rect(rect(0, 0, 7, 7), Paint::new(Color::WHITE))
+        .unwrap();
+    backend.submit(&mut surface, &commands.finish()).unwrap();
+
+    let pixels = surface.read_rgba8().unwrap();
+    assert_eq!(pixel(&pixels, 7, 1, 1), Color::WHITE.channels());
+    assert_eq!(pixel(&pixels, 7, 3, 3), Color::BLACK.channels());
+    assert_eq!(pixel(&pixels, 7, 5, 5), Color::WHITE.channels());
+    assert_eq!(pixel(&pixels, 7, 0, 0), Color::BLACK.channels());
+}
+
+#[test]
+fn metal_backend_applies_transformed_rect_clip_masks_on_hardware() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(6, 6).unwrap())
+        .unwrap();
+    let mut commands = GpuCommandEncoder::new(2).unwrap();
+    commands.clear(Color::BLACK).unwrap();
+    commands.set_transform(Transform::new(
+        Scalar::ZERO,
+        Scalar::from_i32(1).unwrap(),
+        Scalar::from_i32(-1).unwrap(),
+        Scalar::ZERO,
+        Scalar::from_i32(5).unwrap(),
+        Scalar::ZERO,
+    ));
+    commands.clip_rect(rect(1, 1, 4, 3)).unwrap();
+    commands.set_transform(Transform::IDENTITY);
+    commands
+        .fill_rect(rect(0, 0, 6, 6), Paint::new(Color::WHITE))
+        .unwrap();
+    backend.submit(&mut surface, &commands.finish()).unwrap();
+
+    let pixels = surface.read_rgba8().unwrap();
+    assert_eq!(pixel(&pixels, 6, 2, 1), Color::WHITE.channels());
+    assert_eq!(pixel(&pixels, 6, 3, 3), Color::WHITE.channels());
+    assert_eq!(pixel(&pixels, 6, 1, 2), Color::BLACK.channels());
+    assert_eq!(pixel(&pixels, 6, 4, 2), Color::BLACK.channels());
+}
+
+#[test]
+fn metal_backend_applies_complex_clips_to_glyph_batches_on_hardware() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(2, 1).unwrap())
+        .unwrap();
+    let mut path = PathBuilder::new(5).unwrap();
+    path.add_rect(rect(0, 0, 1, 1)).unwrap();
+    let mut commands = GpuCommandEncoder::new(2).unwrap();
+    let path = commands.add_path(path.finish().unwrap()).unwrap();
+    let atlas = commands
+        .add_glyph_atlas(GpuGlyphAtlas::from_image(
+            Image::from_rgba8(1, 1, vec![255, 255, 255, 255]).unwrap(),
+        ))
+        .unwrap();
+    commands.clear(Color::BLACK).unwrap();
+    commands
+        .clip_path(path, FillRule::NonZero, ClipOp::Intersect)
+        .unwrap();
+    commands
+        .draw_glyph_batch(
+            atlas,
+            vec![GpuGlyphQuad::new(
+                GpuAtlasRect::new(0, 0, 1, 1).unwrap(),
+                rect(0, 0, 2, 1),
+                true,
+            )],
+            Paint::new(Color::WHITE),
+        )
+        .unwrap();
+    backend.submit(&mut surface, &commands.finish()).unwrap();
+
+    assert_eq!(
+        surface.read_rgba8().unwrap(),
+        [255, 255, 255, 255, 0, 0, 0, 255]
     );
 }
 
