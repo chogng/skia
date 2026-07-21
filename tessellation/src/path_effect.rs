@@ -1,6 +1,6 @@
 use skia_error::{SkiaError, SkiaErrorCode};
 use skia_geometry::{Point, Scalar, Transform};
-use skia_path::{Path, PathBuilder};
+use skia_path::{Path, PathBuilder, StrokeOptions};
 
 use crate::{
     DEFAULT_CURVE_STEPS, FlattenedContour, FlatteningLimits, PathFlattener, TessellationError,
@@ -30,6 +30,32 @@ pub struct DiscretePathEffect {
     seed: u64,
 }
 
+/// Alternating visible and hidden intervals applied to a path centerline.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct DashPathEffect {
+    options: StrokeOptions,
+}
+
+/// Sequential composition of two borrowed path effects.
+///
+/// The inner effect runs first and consumes the supplied transform. The outer
+/// effect then receives the inner output in target coordinates.
+#[derive(Clone, Copy)]
+pub struct ComposePathEffect<'a> {
+    outer: &'a dyn PathEffect,
+    inner: &'a dyn PathEffect,
+}
+
+/// Union-by-concatenation of two borrowed path-effect results.
+///
+/// Both effects receive the same source path and transform. Their output
+/// contours are appended without a geometric boolean operation.
+#[derive(Clone, Copy)]
+pub struct SumPathEffect<'a> {
+    first: &'a dyn PathEffect,
+    second: &'a dyn PathEffect,
+}
+
 /// Extensible operation that maps one path to another bounded path.
 ///
 /// Implementations receive the transform only for the path entering that
@@ -43,6 +69,44 @@ pub trait PathEffect {
         transform: Transform,
         limits: PathEffectLimits,
     ) -> Result<Option<Path>, SkiaError>;
+}
+
+impl DashPathEffect {
+    /// Creates a non-empty, even-length positive dash pattern.
+    ///
+    /// The phase is normalized into one complete pattern cycle.
+    pub fn new(pattern: &[Scalar], phase: Scalar) -> Result<Self, SkiaError> {
+        if pattern.is_empty() {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        let options =
+            StrokeOptions::new(Scalar::from_bits(1))?.with_dash_pattern(pattern, phase)?;
+        Ok(Self { options })
+    }
+
+    /// Borrows alternating visible and hidden lengths.
+    pub fn pattern(&self) -> &[Scalar] {
+        self.options.dash_pattern()
+    }
+
+    /// Returns the canonical non-negative phase within one cycle.
+    pub const fn phase(&self) -> Scalar {
+        self.options.dash_phase()
+    }
+}
+
+impl<'a> ComposePathEffect<'a> {
+    /// Creates an outer-after-inner composition.
+    pub const fn new(outer: &'a dyn PathEffect, inner: &'a dyn PathEffect) -> Self {
+        Self { outer, inner }
+    }
+}
+
+impl<'a> SumPathEffect<'a> {
+    /// Creates a concatenating pair of independently evaluated effects.
+    pub const fn new(first: &'a dyn PathEffect, second: &'a dyn PathEffect) -> Self {
+        Self { first, second }
+    }
 }
 
 impl CornerPathEffect {
@@ -145,6 +209,44 @@ impl PathEffect for DiscretePathEffect {
     }
 }
 
+impl PathEffect for DashPathEffect {
+    fn apply(
+        &self,
+        path: &Path,
+        transform: Transform,
+        limits: PathEffectLimits,
+    ) -> Result<Option<Path>, SkiaError> {
+        dash_path(path, self, transform, limits)
+    }
+}
+
+impl PathEffect for ComposePathEffect<'_> {
+    fn apply(
+        &self,
+        path: &Path,
+        transform: Transform,
+        limits: PathEffectLimits,
+    ) -> Result<Option<Path>, SkiaError> {
+        let Some(inner) = apply_path_effect(path, self.inner, transform, limits)? else {
+            return Ok(None);
+        };
+        apply_path_effect(&inner, self.outer, Transform::IDENTITY, limits)
+    }
+}
+
+impl PathEffect for SumPathEffect<'_> {
+    fn apply(
+        &self,
+        path: &Path,
+        transform: Transform,
+        limits: PathEffectLimits,
+    ) -> Result<Option<Path>, SkiaError> {
+        let first = apply_path_effect(path, self.first, transform, limits)?;
+        let second = apply_path_effect(path, self.second, transform, limits)?;
+        concatenate_effect_outputs(first.as_ref(), second.as_ref(), limits)
+    }
+}
+
 /// Resource ceilings for one path-effect operation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PathEffectLimits {
@@ -229,6 +331,63 @@ pub fn compose_path_effects(
         current = next;
     }
     Ok(Some(current))
+}
+
+/// Splits every transformed contour into visible dash centerline pieces.
+///
+/// Curves are flattened with the configured fixed resolution. Closed seams
+/// remain joined when the visible interval crosses the contour origin.
+pub fn dash_path(
+    path: &Path,
+    effect: &DashPathEffect,
+    transform: Transform,
+    limits: PathEffectLimits,
+) -> Result<Option<Path>, SkiaError> {
+    let flattening =
+        FlatteningLimits::new(limits.max_contours, limits.max_points, limits.curve_steps)
+            .map_err(map_tessellation_error)?;
+    let contours = PathFlattener::new(flattening)
+        .flatten(path, transform)
+        .map_err(map_tessellation_error)?;
+    let pieces = crate::stroke_pieces(contours.contours(), &effect.options)?;
+    let mut builder = PathBuilder::new(limits.max_output_verbs)?;
+    let mut emitted = false;
+    for piece in pieces {
+        let Some(first) = piece.points().first().copied() else {
+            continue;
+        };
+        builder.move_to(first)?;
+        for point in piece.points().iter().copied().skip(1) {
+            builder.line_to(point)?;
+        }
+        if piece.is_closed() {
+            builder.close()?;
+        }
+        emitted = true;
+    }
+    if emitted {
+        builder.finish().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn concatenate_effect_outputs(
+    first: Option<&Path>,
+    second: Option<&Path>,
+    limits: PathEffectLimits,
+) -> Result<Option<Path>, SkiaError> {
+    if first.is_none() && second.is_none() {
+        return Ok(None);
+    }
+    let mut builder = PathBuilder::new(limits.max_output_verbs)?;
+    if let Some(path) = first {
+        builder.append_path(path)?;
+    }
+    if let Some(path) = second {
+        builder.append_path(path)?;
+    }
+    builder.finish().map(Some)
 }
 
 /// Trims every transformed contour by the same normalized arc-length interval.

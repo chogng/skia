@@ -207,14 +207,15 @@ edge formats remain local.
 `path_boolean` exposes bounded union, intersection, difference, and XOR over
 flattened Q16.16 contours, including holes and self-intersections; empty set
 results are represented as `None`, while non-empty output uses non-zero fill.
-`trim_path`, `corner_path`, and `discrete_path` provide bounded path effects for
-normalized arc-length trimming, deterministic quadratic corner rounding, and
-seeded fixed-point contour perturbation. Trim supports wrap-around intervals;
-corner radii are clamped to half of each adjacent edge; discrete resampling
-keeps open endpoints and closed seams stable. All implement the extensible
-`PathEffect` contract and can run left-to-right through `compose_path_effects`
-without reapplying the input transform. Tangent-/endpoint-defined arc variants
-and additional path effects remain separate work.
+`trim_path`, `corner_path`, `discrete_path`, and `dash_path` provide bounded path
+effects for normalized arc-length trimming, deterministic quadratic corner
+rounding, seeded fixed-point contour perturbation, and dashed centerlines. Trim
+supports wrap-around intervals; corner radii are clamped to half of each
+adjacent edge; discrete resampling keeps open endpoints and closed seams stable.
+All implement the extensible `PathEffect` contract and can run left-to-right
+through `compose_path_effects` or nest through `ComposePathEffect`; parallel
+results can be concatenated with `SumPathEffect`. Input transforms are never
+reapplied between stages.
 `stroke_to_path` is also available through the facade and produces a
 deterministic non-zero triangle-fill path.
 

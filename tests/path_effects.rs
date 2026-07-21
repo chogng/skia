@@ -1,7 +1,8 @@
 use skia::{
-    CornerPathEffect, DiscretePathEffect, PathBuilder, PathEffect, PathEffectLimits, PathVerb,
-    Point, Rect, Scalar, SkiaErrorCode, Transform, TrimPathEffect, compose_path_effects,
-    corner_path, discrete_path, trim_path,
+    ComposePathEffect, CornerPathEffect, DashPathEffect, DiscretePathEffect, PathBuilder,
+    PathEffect, PathEffectLimits, PathVerb, Point, Rect, Scalar, SkiaErrorCode, SumPathEffect,
+    Transform, TrimPathEffect, apply_path_effect, compose_path_effects, corner_path, dash_path,
+    discrete_path, trim_path,
 };
 
 fn scalar(value: i32) -> Scalar {
@@ -235,6 +236,109 @@ fn path_effects_compose_left_to_right_without_reapplying_transform() {
             PathVerb::LineTo(point(6, 5)),
         ]
     );
+}
+
+#[test]
+fn dash_path_splits_transformed_centerlines_and_normalizes_phase() {
+    let effect = DashPathEffect::new(&[scalar(2), scalar(2)], scalar(5)).expect("dash");
+    assert_eq!(effect.pattern(), &[scalar(2), scalar(2)]);
+    assert_eq!(effect.phase(), scalar(1));
+    let dashed = dash_path(
+        &line(),
+        &effect,
+        Transform::translate(scalar(1), scalar(2)),
+        PathEffectLimits::default(),
+    )
+    .expect("dash path")
+    .expect("visible intervals");
+    assert_eq!(
+        dashed.verbs(),
+        &[
+            PathVerb::MoveTo(point(1, 2)),
+            PathVerb::LineTo(point(2, 2)),
+            PathVerb::MoveTo(point(4, 2)),
+            PathVerb::LineTo(point(6, 2)),
+            PathVerb::MoveTo(point(8, 2)),
+            PathVerb::LineTo(point(9, 2)),
+        ]
+    );
+}
+
+#[test]
+fn dash_path_validates_pattern_and_output_limit() {
+    assert_eq!(
+        DashPathEffect::new(&[], Scalar::ZERO)
+            .expect_err("empty pattern")
+            .code(),
+        SkiaErrorCode::InvalidGeometry
+    );
+    assert_eq!(
+        DashPathEffect::new(&[scalar(1)], Scalar::ZERO)
+            .expect_err("odd pattern")
+            .code(),
+        SkiaErrorCode::InvalidGeometry
+    );
+    let error = dash_path(
+        &line(),
+        &DashPathEffect::new(&[scalar(1), scalar(1)], Scalar::ZERO).expect("dash"),
+        Transform::IDENTITY,
+        PathEffectLimits::new(8, 64, 4, 16).expect("limits"),
+    )
+    .expect_err("verb limit");
+    assert_eq!(error.code(), SkiaErrorCode::ResourceLimit);
+}
+
+#[test]
+fn object_composition_and_sum_obey_transform_and_limits() {
+    let inner = TrimPathEffect::new(Scalar::ZERO, fraction(3, 4)).expect("inner");
+    let outer = CornerPathEffect::new(scalar(1)).expect("outer");
+    let composed = ComposePathEffect::new(&outer, &inner);
+    let result = apply_path_effect(
+        &right_angle(),
+        &composed,
+        Transform::translate(scalar(2), scalar(3)),
+        PathEffectLimits::default(),
+    )
+    .expect("compose")
+    .expect("path");
+    assert_eq!(
+        result.verbs(),
+        &[
+            PathVerb::MoveTo(point(2, 3)),
+            PathVerb::LineTo(point(5, 3)),
+            PathVerb::QuadTo(point(6, 3), point(6, 4)),
+            PathVerb::LineTo(point(6, 5)),
+        ]
+    );
+
+    let first = TrimPathEffect::new(Scalar::ZERO, fraction(1, 2)).expect("first");
+    let second = TrimPathEffect::new(fraction(1, 2), fraction(1, 1)).expect("second");
+    let sum = SumPathEffect::new(&first, &second);
+    let result = apply_path_effect(
+        &line(),
+        &sum,
+        Transform::translate(scalar(1), Scalar::ZERO),
+        PathEffectLimits::default(),
+    )
+    .expect("sum")
+    .expect("path");
+    assert_eq!(
+        result.verbs(),
+        &[
+            PathVerb::MoveTo(point(1, 0)),
+            PathVerb::LineTo(point(5, 0)),
+            PathVerb::MoveTo(point(5, 0)),
+            PathVerb::LineTo(point(9, 0)),
+        ]
+    );
+    let error = apply_path_effect(
+        &line(),
+        &sum,
+        Transform::IDENTITY,
+        PathEffectLimits::new(8, 64, 3, 16).expect("limits"),
+    )
+    .expect_err("sum limit");
+    assert_eq!(error.code(), SkiaErrorCode::ResourceLimit);
 }
 
 #[test]

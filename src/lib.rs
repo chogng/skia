@@ -34,7 +34,8 @@ pub use skia_path::{
     Angle, ArcDirection, ArcStart, ConicWeight, FillRule, Path, PathBounds, PathBuilder, PathVerb,
 };
 pub use skia_tessellation::{
-    CornerPathEffect, DiscretePathEffect, PathBooleanLimits, PathBooleanOp, PathEffect,
-    PathEffectLimits, TrimPathEffect, apply_path_effect, compose_path_effects, corner_path,
-    discrete_path, path_boolean, stroke_to_path, trim_path,
+    ComposePathEffect, CornerPathEffect, DashPathEffect, DiscretePathEffect, PathBooleanLimits,
+    PathBooleanOp, PathEffect, PathEffectLimits, SumPathEffect, TrimPathEffect, apply_path_effect,
+    compose_path_effects, corner_path, dash_path, discrete_path, path_boolean, stroke_to_path,
+    trim_path,
 };
