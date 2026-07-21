@@ -9,6 +9,7 @@ members = [
     "gpu",
     "gpu/metal",
     "gpu/text",
+    "gpu/vulkan",
     "image",
     "path",
     "tessellation",

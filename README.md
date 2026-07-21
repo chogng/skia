@@ -44,6 +44,10 @@ flowchart LR
   submission. `skia/gpu/text` is the one-way adapter from font/layout data to
   those primitives. Hardware backends depend on `skia-gpu`, never on the text
   adapter, so adding Vulkan or WebGPU does not duplicate shaping or atlas policy.
+- `skia/gpu/metal` and `skia/gpu/vulkan` are platform execution adapters. The
+  Vulkan bring-up dynamically loads the platform loader and owns a real instance,
+  device, graphics queue, offscreen RGBA8 image, clear submission, and staging
+  readback; unsupported draws fail closed without a CPU fallback.
 - `skia/image` owns the immutable RGBA8 resource representation. `skia/codec`
   parses untrusted, general-purpose image bytes into that representation and
   encodes those resources as general-purpose image formats. It does not depend
