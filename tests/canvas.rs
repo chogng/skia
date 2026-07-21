@@ -274,6 +274,37 @@ fn concatenated_transforms_and_curve_order_fail_closed() {
 }
 
 #[test]
+fn affine_transforms_round_trip_points_and_reject_singular_matrices() {
+    let transform = Transform::new(
+        scalar(1),
+        scalar(1),
+        Scalar::ZERO,
+        scalar(1),
+        scalar(2),
+        scalar(3),
+    );
+    let mapped = transform.map_point(point(4, 5)).expect("map point");
+    assert_eq!(mapped, point(6, 12));
+    assert_eq!(
+        transform.inverse().unwrap().map_point(mapped).unwrap(),
+        point(4, 5)
+    );
+
+    let singular = Transform::new(
+        scalar(1),
+        scalar(2),
+        scalar(2),
+        scalar(4),
+        Scalar::ZERO,
+        Scalar::ZERO,
+    );
+    assert_eq!(
+        singular.inverse().unwrap_err().code(),
+        SkiaErrorCode::InvalidGeometry
+    );
+}
+
+#[test]
 fn rgba_images_scale_nearest_neighbor_and_keep_source_color_under_opacity() {
     let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
     let mut surface = Surface::new(4, 2, SurfaceLimits::default()).unwrap();
@@ -312,6 +343,30 @@ fn rgba_images_support_texel_center_linear_sampling() {
     assert_eq!(pixel(&surface, 1, 0), [191, 0, 64, 255]);
     assert_eq!(pixel(&surface, 2, 0), [64, 0, 191, 255]);
     assert_eq!(pixel(&surface, 3, 0), [0, 0, 255, 255]);
+}
+
+#[test]
+fn rgba_images_support_rotated_inverse_mapped_sampling() {
+    let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let mut surface = Surface::new(3, 3, SurfaceLimits::default()).unwrap();
+    let mut canvas = surface.canvas();
+    canvas.set_transform(Transform::new(
+        Scalar::ZERO,
+        scalar(1),
+        scalar(-1),
+        Scalar::ZERO,
+        scalar(2),
+        Scalar::ZERO,
+    ));
+    canvas
+        .draw_image(&image, rect(0, 0, 2, 1), 255, BlendMode::SourceOver)
+        .unwrap();
+    drop(canvas);
+
+    assert_eq!(pixel(&surface, 1, 0), [255, 0, 0, 255]);
+    assert_eq!(pixel(&surface, 1, 1), [0, 0, 255, 255]);
+    assert_eq!(pixel(&surface, 0, 0), [0, 0, 0, 0]);
+    assert_eq!(pixel(&surface, 2, 1), [0, 0, 0, 0]);
 }
 
 #[test]

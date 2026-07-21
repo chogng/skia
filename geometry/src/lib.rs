@@ -195,10 +195,83 @@ impl Transform {
         ))
     }
 
+    /// Returns the checked inverse affine transform.
+    ///
+    /// Singular matrices fail with [`SkiaErrorCode::InvalidGeometry`]. Each
+    /// Q16.16 coefficient is rounded to the nearest representable value with
+    /// ties away from zero.
+    pub fn inverse(self) -> Result<Self, SkiaError> {
+        let a = i128::from(self.a.bits());
+        let b = i128::from(self.b.bits());
+        let c = i128::from(self.c.bits());
+        let d = i128::from(self.d.bits());
+        let e = i128::from(self.e.bits());
+        let f = i128::from(self.f.bits());
+        let determinant = a
+            .checked_mul(d)
+            .and_then(|value| b.checked_mul(c).and_then(|other| value.checked_sub(other)))
+            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+        if determinant == 0 {
+            return Err(SkiaError::new(SkiaErrorCode::InvalidGeometry));
+        }
+        let coefficient = |value: i128| {
+            value
+                .checked_shl((FRACTION_BITS * 2) as u32)
+                .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))
+                .and_then(|value| rounded_div(value, determinant))
+                .and_then(scalar_from_i128)
+        };
+        let translation = |value: i128| {
+            value
+                .checked_shl(FRACTION_BITS as u32)
+                .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))
+                .and_then(|value| rounded_div(value, determinant))
+                .and_then(scalar_from_i128)
+        };
+        Ok(Self::new(
+            coefficient(d)?,
+            coefficient(-b)?,
+            coefficient(-c)?,
+            coefficient(a)?,
+            translation(
+                c.checked_mul(f)
+                    .and_then(|value| d.checked_mul(e).and_then(|other| value.checked_sub(other)))
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
+            )?,
+            translation(
+                b.checked_mul(e)
+                    .and_then(|value| a.checked_mul(f).and_then(|other| value.checked_sub(other)))
+                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
+            )?,
+        ))
+    }
+
     /// Returns whether this transform preserves axis-aligned rectangles.
     pub const fn is_axis_aligned(self) -> bool {
         self.b.bits() == 0 && self.c.bits() == 0
     }
+}
+
+fn scalar_from_i128(bits: i128) -> Result<Scalar, SkiaError> {
+    i32::try_from(bits)
+        .map(Scalar::from_bits)
+        .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))
+}
+
+fn rounded_div(numerator: i128, denominator: i128) -> Result<i128, SkiaError> {
+    let divisor = denominator.unsigned_abs();
+    let rounded = numerator
+        .unsigned_abs()
+        .checked_add(divisor / 2)
+        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?
+        / divisor;
+    let rounded =
+        i128::try_from(rounded).map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))?;
+    Ok(if (numerator < 0) == (denominator < 0) {
+        rounded
+    } else {
+        -rounded
+    })
 }
 
 fn multiply_add(

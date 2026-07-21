@@ -379,12 +379,11 @@ impl Canvas<'_> {
         Ok(())
     }
 
-    /// Draws an immutable RGBA8 bitmap into an axis-aligned destination rectangle.
+    /// Draws an immutable RGBA8 bitmap into a transformed destination rectangle.
     ///
     /// Sampling is nearest-neighbor at destination pixel centers. `opacity`
     /// multiplies only the source alpha; it does not tint the source color.
-    /// Rotated and sheared bitmap sampling is deliberately rejected until the
-    /// inverse-mapping and filtering contract is available.
+    /// Rotation, reflection, and shear use checked inverse mapping.
     pub fn draw_image(
         &mut self,
         image: &Image,
@@ -414,25 +413,25 @@ impl Canvas<'_> {
         blend_mode: BlendMode,
         sampling: SamplingOptions,
     ) -> Result<(), SkiaError> {
-        if !self.state.transform.is_axis_aligned() {
-            return Err(SkiaError::new(SkiaErrorCode::UnsupportedTransform));
-        }
-        let rectangle = self.device_rect(destination)?;
+        let inverse = self.state.transform.inverse()?;
+        let rectangle = self.transformed_device_rect(destination)?;
         let clipped = rectangle.intersection(self.state.scissor);
-        let width = rectangle.right - rectangle.left;
-        let height = rectangle.bottom - rectangle.top;
-        if width == 0 || height == 0 {
+        if clipped.left == clipped.right || clipped.top == clipped.bottom {
             return Ok(());
         }
         for y in clipped.top..clipped.bottom {
             for x in clipped.left..clipped.right {
+                let local = inverse.map_point(pixel_center(x, y)?)?;
+                if local.x() < destination.left()
+                    || local.x() >= destination.right()
+                    || local.y() < destination.top()
+                    || local.y() >= destination.bottom()
+                {
+                    continue;
+                }
                 let [red, green, blue, alpha] = match sampling.filter() {
-                    SamplingFilter::Nearest => {
-                        sample_nearest(image, x - rectangle.left, y - rectangle.top, width, height)?
-                    }
-                    SamplingFilter::Linear => {
-                        sample_linear(image, x - rectangle.left, y - rectangle.top, width, height)?
-                    }
+                    SamplingFilter::Nearest => sample_nearest(image, local, destination)?,
+                    SamplingFilter::Linear => sample_linear(image, local, destination)?,
                 };
                 let color = Color::rgba(red, green, blue, alpha).with_opacity(opacity);
                 self.blend_color(x, y, color, blend_mode)?;
@@ -717,6 +716,32 @@ impl Canvas<'_> {
         .normalized())
     }
 
+    fn transformed_device_rect(&self, rect: Rect) -> Result<DeviceRect, SkiaError> {
+        let corners = [
+            Point::new(rect.left(), rect.top()),
+            Point::new(rect.right(), rect.top()),
+            Point::new(rect.right(), rect.bottom()),
+            Point::new(rect.left(), rect.bottom()),
+        ];
+        let mut left = i32::MAX;
+        let mut top = i32::MAX;
+        let mut right = i32::MIN;
+        let mut bottom = i32::MIN;
+        for corner in corners {
+            let point = self.state.transform.map_point(corner)?;
+            left = left.min(point.x().bits());
+            top = top.min(point.y().bits());
+            right = right.max(point.x().bits());
+            bottom = bottom.max(point.y().bits());
+        }
+        Ok(DeviceRect {
+            left: floor_q16(left),
+            top: floor_q16(top),
+            right: ceil_q16(right),
+            bottom: ceil_q16(bottom),
+        })
+    }
+
     fn apply_complex_clip(
         &mut self,
         contours: &[Contour],
@@ -778,30 +803,27 @@ impl Canvas<'_> {
     }
 }
 
-fn sample_nearest(
-    image: &Image,
-    x: i64,
-    y: i64,
-    width: i64,
-    height: i64,
-) -> Result<[u8; 4], SkiaError> {
-    let source_x = nearest_index(x, width, image.width())?;
-    let source_y = nearest_index(y, height, image.height())?;
+fn sample_nearest(image: &Image, sample: Point, destination: Rect) -> Result<[u8; 4], SkiaError> {
+    let source_x = nearest_index(
+        i64::from(sample.x().bits()) - i64::from(destination.left().bits()),
+        i64::from(destination.right().bits()) - i64::from(destination.left().bits()),
+        image.width(),
+    )?;
+    let source_y = nearest_index(
+        i64::from(sample.y().bits()) - i64::from(destination.top().bits()),
+        i64::from(destination.bottom().bits()) - i64::from(destination.top().bits()),
+        image.height(),
+    )?;
     image
         .pixel_at(source_x, source_y)
         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))
 }
 
-fn nearest_index(offset: i64, extent: i64, source_extent: u32) -> Result<u32, SkiaError> {
-    let numerator = i128::from(offset)
-        .checked_mul(2)
-        .and_then(|value| value.checked_add(1))
-        .and_then(|value| value.checked_mul(i128::from(source_extent)))
+fn nearest_index(offset_bits: i64, extent_bits: i64, source_extent: u32) -> Result<u32, SkiaError> {
+    let numerator = i128::from(offset_bits)
+        .checked_mul(i128::from(source_extent))
         .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let denominator = i128::from(extent)
-        .checked_mul(2)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let index = numerator / denominator;
+    let index = numerator / i128::from(extent_bits);
     u32::try_from(index.min(i128::from(source_extent - 1)))
         .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))
 }
@@ -814,14 +836,15 @@ struct LinearAxis {
     denominator: i128,
 }
 
-fn linear_axis(offset: i64, extent: i64, source_extent: u32) -> Result<LinearAxis, SkiaError> {
-    let doubled_offset = i128::from(offset)
+fn linear_axis(
+    offset_bits: i64,
+    extent_bits: i64,
+    source_extent: u32,
+) -> Result<LinearAxis, SkiaError> {
+    let extent = i128::from(extent_bits);
+    let numerator = i128::from(offset_bits)
         .checked_mul(2)
-        .and_then(|value| value.checked_add(1))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let extent = i128::from(extent);
-    let numerator = doubled_offset
-        .checked_mul(i128::from(source_extent))
+        .and_then(|value| value.checked_mul(i128::from(source_extent)))
         .and_then(|value| value.checked_sub(extent))
         .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
     let denominator = extent
@@ -840,15 +863,17 @@ fn linear_axis(offset: i64, extent: i64, source_extent: u32) -> Result<LinearAxi
     })
 }
 
-fn sample_linear(
-    image: &Image,
-    x: i64,
-    y: i64,
-    width: i64,
-    height: i64,
-) -> Result<[u8; 4], SkiaError> {
-    let horizontal = linear_axis(x, width, image.width())?;
-    let vertical = linear_axis(y, height, image.height())?;
+fn sample_linear(image: &Image, sample: Point, destination: Rect) -> Result<[u8; 4], SkiaError> {
+    let horizontal = linear_axis(
+        i64::from(sample.x().bits()) - i64::from(destination.left().bits()),
+        i64::from(destination.right().bits()) - i64::from(destination.left().bits()),
+        image.width(),
+    )?;
+    let vertical = linear_axis(
+        i64::from(sample.y().bits()) - i64::from(destination.top().bits()),
+        i64::from(destination.bottom().bits()) - i64::from(destination.top().bits()),
+        image.height(),
+    )?;
     let top_left = image
         .pixel_at(horizontal.first, vertical.first)
         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;

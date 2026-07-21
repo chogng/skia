@@ -184,8 +184,9 @@ generic GPU commands preserve the options, and software replay introduces no
 backend-specific stroke policy.
 Backend-neutral `SamplingOptions` similarly preserves nearest or bilinear
 clamp-to-edge image reconstruction through DisplayList and GPU commands. CPU
-uses deterministic integer bilinear interpolation for axis-aligned images;
-Metal applies the same texel-center convention to arbitrary affine image draws.
+uses checked affine inverse mapping and deterministic integer bilinear
+interpolation; Metal applies the same texel-center convention to arbitrary
+affine image draws.
 Backend-neutral `ClipOp` defines intersection and difference. CPU Canvas,
 DisplayList replay, and the generic GPU encoder apply it to rectangles or paths.
 Axis-aligned rectangle intersections retain a scissor fast path; CPU complex
