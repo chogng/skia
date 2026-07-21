@@ -18,6 +18,10 @@ flowchart LR
   api --> core["Skia core semantics"]
   api --> cpu["Skia CPU executor"]
   api --> gpu["Skia GPU executor"]
+  gpu --> metal["Metal backend"]
+  path --> tessellation["Shared tessellation"]
+  tessellation --> cpu
+  tessellation --> metal
   text --> gpu_text["GPU text adapter"]
   gpu_text --> gpu
 ```
@@ -25,8 +29,8 @@ flowchart LR
 ## Dependency rule
 
 - `skia/` (`skia`) is the only public graphics API for consumers.
-  `skia/error`, `skia/geometry`, `skia/path`, `skia/text`, `skia/core`, `skia/image`,
-  `skia/codec`, and executor crates are implementation crates;
+  `skia/error`, `skia/geometry`, `skia/path`, `skia/tessellation`, `skia/text`,
+  `skia/core`, `skia/image`, `skia/codec`, and executor crates are implementation crates;
   consumers must not depend on them directly. Skia crates may depend on each
   other, but never on a caller-specific document crate or semantic type.
 - The facade exports an explicit, stable set of canvas, geometry, paint, path,
@@ -40,6 +44,9 @@ flowchart LR
   graphics API, caller-specific parser, document model, or Scene. Its default
   `text` feature adds glyph-run display-list resources; GPU crates disable that
   feature because generic atlas submission does not need shaping types.
+- `skia/tessellation` owns backend-neutral path-to-polyline and path-to-mesh
+  algorithms. Its bounded fixed-step curve flattener is shared by CPU and
+  hardware backends; backend crates own only their raster or GPU buffer format.
 - `skia/gpu` owns only generic GPU resources, atlas quads, commands, and backend
   submission. `skia/gpu/text` is the one-way adapter from font/layout data to
   those primitives. Hardware backends depend on `skia-gpu`, never on the text
@@ -175,6 +182,9 @@ clips use deterministic masks, while generic GPU commands retain immutable
 parent-linked `GpuClipId` nodes. The software reference backend replays those
 nodes through CPU masks, and Metal materializes only used nodes as transient R8
 textures shared by subsequent rectangle and glyph draws in the submission.
+CPU fill/stroke/clip and Metal clip-edge generation consume the same bounded,
+deterministic fixed-step curve flattener from `skia-tessellation`; the CPU
+raster contour and Metal edge formats remain backend-local.
 Boolean path operations, stroke-to-path expansion,
 path effects, and tangent-/endpoint-defined arc variants remain separate
 geometry-processing work; their design must stay independent of any consumer.
@@ -189,3 +199,8 @@ coupled to geometry queries or contour processing:
 - `bounds.rs` owns conservative and polynomial-Bézier extrema bounds helpers.
 - `reverse.rs` owns contour parsing and reverse traversal.
 - `math.rs` owns checked fixed-point scalar operations shared by path code.
+
+Backend consumers must not add their own Bézier flattening. The reusable
+`PathFlattener`, output ceilings, and flattened contour representation live in
+`skia/tessellation/src/flatten.rs`, ready for Metal, Vulkan, WebGPU, and CPU
+consumers without exposing backend command or buffer types.

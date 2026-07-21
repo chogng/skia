@@ -8,3 +8,4 @@ publish = false
 [dependencies]
 skia-core = { path = "../core" }
 skia-image = { path = "../image" }
+skia-tessellation = { path = "../tessellation" }

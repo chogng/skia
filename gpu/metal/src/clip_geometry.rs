@@ -1,9 +1,10 @@
-use skia_core::{PathVerb, Point, Scalar, SkiaError, Transform};
+use skia_core::{Path, Point, Scalar, Transform};
 use skia_gpu::{GpuClipGeometry, GpuClipNode, GpuCommandBuffer};
+use skia_tessellation::{
+    DEFAULT_CURVE_STEPS, FlatteningLimits, PathFlattener, TessellationErrorCode,
+};
 
 use crate::{MetalError, MetalErrorCode};
-
-const CURVE_STEPS: i64 = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -35,7 +36,7 @@ pub(crate) fn clip_edges(
         }
         GpuClipGeometry::Path { path, .. } => {
             let path = commands.path(path).ok_or_else(unsupported_command)?;
-            path_edges(path.verbs(), node.transform(), &mut output)?;
+            path_edges(path, node.transform(), &mut output)?;
         }
     }
     if output.is_empty() {
@@ -45,146 +46,46 @@ pub(crate) fn clip_edges(
 }
 
 fn path_edges(
-    verbs: &[PathVerb],
+    path: &Path,
     transform: Transform,
     output: &mut Vec<ClipEdge>,
 ) -> Result<(), MetalError> {
-    let mut first = None;
-    let mut current = None;
-    for verb in verbs {
-        match *verb {
-            PathVerb::MoveTo(point) => {
-                close_contour(output, current, first)?;
-                let point = transform_point(transform, point)?;
-                first = Some(point);
-                current = Some(point);
-            }
-            PathVerb::LineTo(point) => {
-                let start = current.ok_or_else(unsupported_command)?;
-                let end = transform_point(transform, point)?;
-                push_edge(output, start, end)?;
-                current = Some(end);
-            }
-            PathVerb::QuadTo(control, end) => {
-                let start = current.ok_or_else(unsupported_command)?;
-                let control = transform_point(transform, control)?;
-                let end = transform_point(transform, end)?;
-                current = Some(flatten_quad(output, start, control, end)?);
-            }
-            PathVerb::ConicTo(control, end, weight) => {
-                let start = current.ok_or_else(unsupported_command)?;
-                let control = transform_point(transform, control)?;
-                let end = transform_point(transform, end)?;
-                current = Some(flatten_conic(output, start, control, end, weight.bits())?);
-            }
-            PathVerb::CubicTo(first_control, second_control, end) => {
-                let start = current.ok_or_else(unsupported_command)?;
-                let first_control = transform_point(transform, first_control)?;
-                let second_control = transform_point(transform, second_control)?;
-                let end = transform_point(transform, end)?;
-                current = Some(flatten_cubic(
-                    output,
-                    start,
-                    first_control,
-                    second_control,
-                    end,
-                )?);
-            }
-            PathVerb::Close => {
-                close_contour(output, current, first)?;
-                first = None;
-                current = None;
-            }
+    let limits =
+        FlatteningLimits::for_path(path, DEFAULT_CURVE_STEPS).map_err(map_tessellation_error)?;
+    let flattened = PathFlattener::new(limits)
+        .flatten(path, transform)
+        .map_err(map_tessellation_error)?;
+    let edge_count = flattened
+        .contours()
+        .iter()
+        .try_fold(0_usize, |count, contour| {
+            count.checked_add(contour_edge_count(contour.points()))
+        })
+        .ok_or_else(submission_failed)?;
+    output
+        .try_reserve_exact(edge_count)
+        .map_err(|_| submission_failed())?;
+    for contour in flattened.contours() {
+        let points = contour.points();
+        if points.len() < 2 {
+            continue;
+        }
+        for pair in points.windows(2) {
+            output.push(edge(pair[0], pair[1]));
+        }
+        if points.last() != points.first() {
+            output.push(edge(points[points.len() - 1], points[0]));
         }
     }
-    close_contour(output, current, first)
-}
-
-fn close_contour(
-    output: &mut Vec<ClipEdge>,
-    current: Option<Point>,
-    first: Option<Point>,
-) -> Result<(), MetalError> {
-    if let (Some(current), Some(first)) = (current, first)
-        && current != first
-    {
-        push_edge(output, current, first)?;
-    }
     Ok(())
 }
 
-fn flatten_quad(
-    output: &mut Vec<ClipEdge>,
-    start: Point,
-    control: Point,
-    end: Point,
-) -> Result<Point, MetalError> {
-    let mut previous = start;
-    for step in 1..=CURVE_STEPS {
-        let next = Point::new(
-            bezier2(start.x(), control.x(), end.x(), step)?,
-            bezier2(start.y(), control.y(), end.y(), step)?,
-        );
-        push_edge(output, previous, next)?;
-        previous = next;
+fn contour_edge_count(points: &[Point]) -> usize {
+    match points.len() {
+        0 | 1 => 0,
+        count if points.first() == points.last() => count - 1,
+        count => count,
     }
-    Ok(previous)
-}
-
-fn flatten_conic(
-    output: &mut Vec<ClipEdge>,
-    start: Point,
-    control: Point,
-    end: Point,
-    weight_bits: i32,
-) -> Result<Point, MetalError> {
-    let mut previous = start;
-    for step in 1..=CURVE_STEPS {
-        let next = Point::new(
-            conic_coordinate(start.x(), control.x(), end.x(), weight_bits, step)?,
-            conic_coordinate(start.y(), control.y(), end.y(), weight_bits, step)?,
-        );
-        push_edge(output, previous, next)?;
-        previous = next;
-    }
-    Ok(previous)
-}
-
-fn flatten_cubic(
-    output: &mut Vec<ClipEdge>,
-    start: Point,
-    first_control: Point,
-    second_control: Point,
-    end: Point,
-) -> Result<Point, MetalError> {
-    let mut previous = start;
-    for step in 1..=CURVE_STEPS {
-        let next = Point::new(
-            bezier3(
-                start.x(),
-                first_control.x(),
-                second_control.x(),
-                end.x(),
-                step,
-            )?,
-            bezier3(
-                start.y(),
-                first_control.y(),
-                second_control.y(),
-                end.y(),
-                step,
-            )?,
-        );
-        push_edge(output, previous, next)?;
-        previous = next;
-    }
-    Ok(previous)
-}
-
-fn push_edge(output: &mut Vec<ClipEdge>, start: Point, end: Point) -> Result<(), MetalError> {
-    output.try_reserve(1).map_err(|_| submission_failed())?;
-    output.push(edge(start, end));
-    Ok(())
 }
 
 fn edge(start: Point, end: Point) -> ClipEdge {
@@ -199,72 +100,23 @@ fn point_to_f32(point: Point) -> [f32; 2] {
 }
 
 fn transform_point(transform: Transform, point: Point) -> Result<Point, MetalError> {
-    transform.map_point(point).map_err(map_geometry_error)
-}
-
-fn bezier2(start: Scalar, control: Scalar, end: Scalar, step: i64) -> Result<Scalar, MetalError> {
-    let inverse = CURVE_STEPS - step;
-    let value = i128::from(start.bits()) * i128::from(inverse * inverse)
-        + i128::from(control.bits()) * i128::from(2 * inverse * step)
-        + i128::from(end.bits()) * i128::from(step * step);
-    rounded_scalar(value, i128::from(CURVE_STEPS * CURVE_STEPS))
-}
-
-fn conic_coordinate(
-    start: Scalar,
-    control: Scalar,
-    end: Scalar,
-    weight_bits: i32,
-    step: i64,
-) -> Result<Scalar, MetalError> {
-    let inverse = CURVE_STEPS - step;
-    let start_weight = i128::from(inverse * inverse) * i128::from(1_i64 << 16);
-    let control_weight = i128::from(2 * inverse * step) * i128::from(weight_bits);
-    let end_weight = i128::from(step * step) * i128::from(1_i64 << 16);
-    let denominator = start_weight + control_weight + end_weight;
-    let numerator = i128::from(start.bits()) * start_weight
-        + i128::from(control.bits()) * control_weight
-        + i128::from(end.bits()) * end_weight;
-    rounded_scalar(numerator, denominator)
-}
-
-fn bezier3(
-    start: Scalar,
-    first_control: Scalar,
-    second_control: Scalar,
-    end: Scalar,
-    step: i64,
-) -> Result<Scalar, MetalError> {
-    let inverse = CURVE_STEPS - step;
-    let value = i128::from(start.bits()) * i128::from(inverse * inverse * inverse)
-        + i128::from(first_control.bits()) * i128::from(3 * inverse * inverse * step)
-        + i128::from(second_control.bits()) * i128::from(3 * inverse * step * step)
-        + i128::from(end.bits()) * i128::from(step * step * step);
-    rounded_scalar(value, i128::from(CURVE_STEPS * CURVE_STEPS * CURVE_STEPS))
-}
-
-fn rounded_scalar(value: i128, divisor: i128) -> Result<Scalar, MetalError> {
-    let half = divisor / 2;
-    let value = if value >= 0 {
-        value.checked_add(half).ok_or_else(submission_failed)? / divisor
-    } else {
-        -(value
-            .checked_neg()
-            .and_then(|value| value.checked_add(half))
-            .ok_or_else(submission_failed)?
-            / divisor)
-    };
-    i32::try_from(value)
-        .map(Scalar::from_bits)
-        .map_err(|_| submission_failed())
+    transform.map_point(point).map_err(|_| submission_failed())
 }
 
 fn scalar_to_f32(value: Scalar) -> f32 {
     value.bits() as f32 / 65_536.0
 }
 
-fn map_geometry_error(_: SkiaError) -> MetalError {
-    submission_failed()
+fn map_tessellation_error(error: skia_tessellation::TessellationError) -> MetalError {
+    match error.code() {
+        TessellationErrorCode::InvalidPath | TessellationErrorCode::UnsupportedTopology => {
+            unsupported_command()
+        }
+        TessellationErrorCode::InvalidLimits
+        | TessellationErrorCode::NumericOverflow
+        | TessellationErrorCode::ResourceLimit
+        | TessellationErrorCode::AllocationFailed => submission_failed(),
+    }
 }
 
 fn unsupported_command() -> MetalError {
@@ -282,7 +134,7 @@ mod tests {
     };
     use skia_gpu::{GpuCommand, GpuCommandEncoder};
 
-    use super::clip_edges;
+    use super::{clip_edges, contour_edge_count};
 
     fn point(x: i32, y: i32) -> Point {
         Point::new(
@@ -331,5 +183,13 @@ mod tests {
             .expect("flattened edges");
 
         assert_eq!(edges.len(), 49);
+    }
+
+    #[test]
+    fn explicit_return_to_start_does_not_add_a_duplicate_closing_edge() {
+        assert_eq!(
+            contour_edge_count(&[point(0, 0), point(2, 0), point(0, 0)]),
+            2
+        );
     }
 }

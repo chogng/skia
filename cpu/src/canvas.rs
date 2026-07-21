@@ -2,11 +2,14 @@ use std::sync::Arc;
 
 use skia_core::{
     BlendMode, ClipOp, Color, DisplayList, DrawCommand, FillRule, GlyphOutline,
-    GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder,
-    PathVerb, Point, PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode,
-    StrokeCap, StrokeJoin, StrokeOptions, TextLayout, TextStyleId, TextUnit, Transform,
+    GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, Paint, Path, PathBuilder, Point,
+    PositionedGlyph, Rect, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, StrokeCap,
+    StrokeJoin, StrokeOptions, TextLayout, TextStyleId, TextUnit, Transform,
 };
 use skia_image::Image;
+use skia_tessellation::{
+    DEFAULT_CURVE_STEPS, FlatteningLimits, PathFlattener, TessellationErrorCode,
+};
 
 use crate::{
     clip::{apply_clip, mask_index},
@@ -781,8 +784,6 @@ impl DeviceRect {
     }
 }
 
-const CURVE_STEPS: i64 = 16;
-
 #[derive(Debug)]
 pub(crate) struct Contour {
     pub(crate) points: Vec<Point>,
@@ -870,282 +871,33 @@ pub(crate) fn transformed_contours(
     path: &Path,
     transform: Transform,
 ) -> Result<Vec<Contour>, SkiaError> {
+    let limits =
+        FlatteningLimits::for_path(path, DEFAULT_CURVE_STEPS).map_err(map_tessellation_error)?;
+    let flattened = PathFlattener::new(limits)
+        .flatten(path, transform)
+        .map_err(map_tessellation_error)?;
     let mut contours = Vec::new();
-    let mut current = Vec::new();
-    for verb in path.verbs() {
-        match *verb {
-            PathVerb::MoveTo(point) => {
-                if !current.is_empty() {
-                    push_contour(&mut contours, current, false)?;
-                    current = Vec::new();
-                }
-                push_point(&mut current, transform.map_point(point)?)?;
-            }
-            PathVerb::LineTo(point) => {
-                if current.is_empty() {
-                    return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
-                }
-                push_point(&mut current, transform.map_point(point)?)?;
-            }
-            PathVerb::QuadTo(control, end) => {
-                let start = *current
-                    .last()
-                    .ok_or(SkiaError::new(SkiaErrorCode::InvalidPath))?;
-                flatten_quad(
-                    &mut current,
-                    start,
-                    transform.map_point(control)?,
-                    transform.map_point(end)?,
-                )?;
-            }
-            PathVerb::ConicTo(control, end, weight) => {
-                let start = *current
-                    .last()
-                    .ok_or(SkiaError::new(SkiaErrorCode::InvalidPath))?;
-                flatten_conic(
-                    &mut current,
-                    start,
-                    transform.map_point(control)?,
-                    transform.map_point(end)?,
-                    weight,
-                )?;
-            }
-            PathVerb::CubicTo(first_control, second_control, end) => {
-                let start = *current
-                    .last()
-                    .ok_or(SkiaError::new(SkiaErrorCode::InvalidPath))?;
-                flatten_cubic(
-                    &mut current,
-                    start,
-                    transform.map_point(first_control)?,
-                    transform.map_point(second_control)?,
-                    transform.map_point(end)?,
-                )?;
-            }
-            PathVerb::Close => {
-                if !current.is_empty() {
-                    push_contour(&mut contours, current, true)?;
-                    current = Vec::new();
-                }
-            }
-        }
-    }
-    if !current.is_empty() {
-        push_contour(&mut contours, current, false)?;
-    }
-    if contours.is_empty() {
-        return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
+    contours
+        .try_reserve_exact(flattened.contours().len())
+        .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
+    for contour in flattened.into_contours() {
+        let (points, closed) = contour.into_parts();
+        contours.push(Contour { points, closed });
     }
     Ok(contours)
 }
 
-fn push_contour(
-    contours: &mut Vec<Contour>,
-    points: Vec<Point>,
-    closed: bool,
-) -> Result<(), SkiaError> {
-    contours
-        .try_reserve(1)
-        .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
-    contours.push(Contour { points, closed });
-    Ok(())
-}
-
-fn push_point(points: &mut Vec<Point>, point: Point) -> Result<(), SkiaError> {
-    points
-        .try_reserve(1)
-        .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
-    points.push(point);
-    Ok(())
-}
-
-fn flatten_quad(
-    output: &mut Vec<Point>,
-    start: Point,
-    control: Point,
-    end: Point,
-) -> Result<(), SkiaError> {
-    output
-        .try_reserve(usize::try_from(CURVE_STEPS).unwrap_or(usize::MAX))
-        .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
-    for step in 1..=CURVE_STEPS {
-        push_point(
-            output,
-            Point::new(
-                bezier2(start.x(), control.x(), end.x(), step)?,
-                bezier2(start.y(), control.y(), end.y(), step)?,
-            ),
-        )?;
-    }
-    Ok(())
-}
-
-fn flatten_conic(
-    output: &mut Vec<Point>,
-    start: Point,
-    control: Point,
-    end: Point,
-    weight: skia_core::ConicWeight,
-) -> Result<(), SkiaError> {
-    output
-        .try_reserve(usize::try_from(CURVE_STEPS).unwrap_or(usize::MAX))
-        .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
-    for step in 1..=CURVE_STEPS {
-        push_point(
-            output,
-            Point::new(
-                conic_coordinate(start.x(), control.x(), end.x(), weight, step)?,
-                conic_coordinate(start.y(), control.y(), end.y(), weight, step)?,
-            ),
-        )?;
-    }
-    Ok(())
-}
-
-fn conic_coordinate(
-    start: Scalar,
-    control: Scalar,
-    end: Scalar,
-    weight: skia_core::ConicWeight,
-    step: i64,
-) -> Result<Scalar, SkiaError> {
-    let inverse = CURVE_STEPS
-        .checked_sub(step)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let start_weight = i128::from(inverse)
-        .checked_mul(i128::from(inverse))
-        .and_then(|value| value.checked_mul(i128::from(1_i64 << 16)))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let control_weight = i128::from(2_i64)
-        .checked_mul(i128::from(inverse))
-        .and_then(|value| value.checked_mul(i128::from(step)))
-        .and_then(|value| value.checked_mul(i128::from(weight.bits())))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let end_weight = i128::from(step)
-        .checked_mul(i128::from(step))
-        .and_then(|value| value.checked_mul(i128::from(1_i64 << 16)))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let denominator = start_weight
-        .checked_add(control_weight)
-        .and_then(|value| value.checked_add(end_weight))
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let numerator = i128::from(start.bits())
-        .checked_mul(start_weight)
-        .and_then(|value| {
-            i128::from(control.bits())
-                .checked_mul(control_weight)
-                .and_then(|middle| value.checked_add(middle))
-        })
-        .and_then(|value| {
-            i128::from(end.bits())
-                .checked_mul(end_weight)
-                .and_then(|last| value.checked_add(last))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    rounded_scalar(numerator, denominator)
-}
-
-fn flatten_cubic(
-    output: &mut Vec<Point>,
-    start: Point,
-    first_control: Point,
-    second_control: Point,
-    end: Point,
-) -> Result<(), SkiaError> {
-    output
-        .try_reserve(usize::try_from(CURVE_STEPS).unwrap_or(usize::MAX))
-        .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
-    for step in 1..=CURVE_STEPS {
-        push_point(
-            output,
-            Point::new(
-                bezier3(
-                    start.x(),
-                    first_control.x(),
-                    second_control.x(),
-                    end.x(),
-                    step,
-                )?,
-                bezier3(
-                    start.y(),
-                    first_control.y(),
-                    second_control.y(),
-                    end.y(),
-                    step,
-                )?,
-            ),
-        )?;
-    }
-    Ok(())
-}
-
-fn bezier2(start: Scalar, control: Scalar, end: Scalar, step: i64) -> Result<Scalar, SkiaError> {
-    let inverse = CURVE_STEPS
-        .checked_sub(step)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let value = i128::from(start.bits())
-        .checked_mul(i128::from(inverse * inverse))
-        .and_then(|value| {
-            i128::from(control.bits())
-                .checked_mul(i128::from(2 * inverse * step))
-                .and_then(|middle| value.checked_add(middle))
-        })
-        .and_then(|value| {
-            i128::from(end.bits())
-                .checked_mul(i128::from(step * step))
-                .and_then(|last| value.checked_add(last))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    rounded_scalar(value, i128::from(CURVE_STEPS * CURVE_STEPS))
-}
-
-fn bezier3(
-    start: Scalar,
-    first_control: Scalar,
-    second_control: Scalar,
-    end: Scalar,
-    step: i64,
-) -> Result<Scalar, SkiaError> {
-    let inverse = CURVE_STEPS
-        .checked_sub(step)
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    let value = i128::from(start.bits())
-        .checked_mul(i128::from(inverse * inverse * inverse))
-        .and_then(|value| {
-            i128::from(first_control.bits())
-                .checked_mul(i128::from(3 * inverse * inverse * step))
-                .and_then(|term| value.checked_add(term))
-        })
-        .and_then(|value| {
-            i128::from(second_control.bits())
-                .checked_mul(i128::from(3 * inverse * step * step))
-                .and_then(|term| value.checked_add(term))
-        })
-        .and_then(|value| {
-            i128::from(end.bits())
-                .checked_mul(i128::from(step * step * step))
-                .and_then(|term| value.checked_add(term))
-        })
-        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-    rounded_scalar(value, i128::from(CURVE_STEPS * CURVE_STEPS * CURVE_STEPS))
-}
-
-fn rounded_scalar(value: i128, divisor: i128) -> Result<Scalar, SkiaError> {
-    let half = divisor / 2;
-    let value = if value >= 0 {
-        value
-            .checked_add(half)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?
-            / divisor
-    } else {
-        -((-value
-            .checked_add(half)
-            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?)
-            / divisor)
+fn map_tessellation_error(error: skia_tessellation::TessellationError) -> SkiaError {
+    let code = match error.code() {
+        TessellationErrorCode::InvalidLimits => SkiaErrorCode::InvalidLimits,
+        TessellationErrorCode::NumericOverflow => SkiaErrorCode::NumericOverflow,
+        TessellationErrorCode::InvalidPath | TessellationErrorCode::UnsupportedTopology => {
+            SkiaErrorCode::InvalidPath
+        }
+        TessellationErrorCode::ResourceLimit => SkiaErrorCode::ResourceLimit,
+        TessellationErrorCode::AllocationFailed => SkiaErrorCode::AllocationFailed,
     };
-    i32::try_from(value)
-        .map(Scalar::from_bits)
-        .map_err(|_| SkiaError::new(SkiaErrorCode::NumericOverflow))
+    SkiaError::new(code)
 }
 
 pub(crate) fn contour_bounds(contours: &[Contour]) -> DeviceRect {

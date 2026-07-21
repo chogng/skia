@@ -1,9 +1,10 @@
-//! Deterministic path-to-triangle conversion for drawing backends.
+//! Deterministic path processing and triangle conversion for drawing backends.
 //!
-//! The initial implementation accepts one closed, convex, line-only contour.
-//! Unsupported topology fails closed instead of silently producing a different
-//! fill. Future releases extend this contract with curve flattening, holes,
-//! non-convex contours, and stroke meshes.
+//! Curve flattening is shared by CPU and hardware backends. The triangle-mesh
+//! implementation currently accepts one closed, convex, line-only contour;
+//! unsupported topology fails closed instead of silently producing a different
+//! fill. Future releases extend that mesh contract with holes, non-convex
+//! contours, and stroke meshes.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -13,12 +14,20 @@ use std::fmt;
 use skia_geometry::Point;
 use skia_path::{Path, PathVerb};
 
+mod flatten;
+
+pub use flatten::{
+    DEFAULT_CURVE_STEPS, FlattenedContour, FlattenedPath, FlatteningLimits, PathFlattener,
+};
+
 /// Stable tessellation failure code.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TessellationErrorCode {
     /// A configured geometry ceiling is invalid.
     InvalidLimits,
-    /// The path has no supported closed contour.
+    /// A coordinate or intermediate calculation overflowed.
+    NumericOverflow,
+    /// The path has no usable contour or violates contour ordering.
     InvalidPath,
     /// The path uses curves, holes, open contours, or non-convex geometry.
     UnsupportedTopology,

@@ -469,6 +469,7 @@ version = "0.1.0"
 dependencies = [
  "skia-core",
  "skia-image",
+ "skia-tessellation",
 ]
 
 [[package]]
@@ -514,6 +515,7 @@ dependencies = [
  "skia-core",
  "skia-gpu",
  "skia-image",
+ "skia-tessellation",
 ]
 
 [[package]]

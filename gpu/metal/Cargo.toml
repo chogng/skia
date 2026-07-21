@@ -9,6 +9,7 @@ publish = false
 metal = "0.33.0"
 skia-core = { path = "../../core", default-features = false }
 skia-gpu = { path = ".." }
+skia-tessellation = { path = "../../tessellation" }
 
 [dev-dependencies]
 skia-image = { path = "../../image" }
