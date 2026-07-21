@@ -143,10 +143,13 @@ caller then explicitly registers `into_gpu_atlas()` and records the quads with
 underline and strike-through metrics into per-style target-space rectangles;
 callers record those through generic `fill_rect` commands. This keeps text data
 adaptation separate from command ordering and hardware backends. The Metal
-backend draws transformed/scissored solid rectangles, Alpha8 masks, and color
+backend draws transformed/scissored solid rectangles, path-fill masks, Alpha8 masks, and color
 glyphs through real shader pipelines; rectangle and glyph draws can sample
 parent-linked R8 complex-clip masks rendered on the GPU, and these paths
-currently support source-over blending. `TextAtlasCache` retains
+currently support source-over blending. `StrokePath` shares deterministic
+normalization, dashing, and cap/join policy with CPU; Metal rasterizes its
+fixed-resolution triangle list to R8 before the final blend and clip.
+`TextAtlasCache` retains
 bounded immutable packed atlases with least-recently-used eviction, while stable
 generic atlas keys let Metal retain and reuse a separately bounded native
 texture across submissions. Both layers expose hit, upload, and eviction stats;
@@ -181,13 +184,16 @@ Axis-aligned rectangle intersections retain a scissor fast path; CPU complex
 clips use deterministic masks, while generic GPU commands retain immutable
 parent-linked `GpuClipId` nodes. The software reference backend replays those
 nodes through CPU masks, and Metal materializes only used nodes as transient R8
-textures shared by subsequent rectangle and glyph draws in the submission.
+textures shared by subsequent rectangle, path-fill, and glyph draws in the submission.
 CPU fill/stroke/clip and Metal clip-edge generation consume the same bounded,
-deterministic fixed-step curve flattener from `skia-tessellation`; the CPU
-raster contour and Metal edge formats remain backend-local.
-Boolean path operations, stroke-to-path expansion,
-path effects, and tangent-/endpoint-defined arc variants remain separate
-geometry-processing work; their design must stay independent of any consumer.
+deterministic fixed-step curve flattener from `skia-tessellation`. Stroke
+normalization, dashing, and cap/join/miter coverage also live there; CPU keeps
+only device-pixel bounds and raster iteration, while backend-specific mask and
+edge formats remain local.
+Boolean path operations, path effects, and tangent-/endpoint-defined arc
+variants remain separate geometry-processing work; their design must stay
+independent of any consumer. `stroke_to_path` is available through the facade
+and produces a deterministic non-zero triangle-fill path.
 
 ## Path implementation layout
 
