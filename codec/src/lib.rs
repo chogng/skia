@@ -385,7 +385,7 @@ impl AnimatedImageAsset {
     }
 
     /// Attaches global format metadata.
-    pub const fn with_metadata(mut self, metadata: ImageMetadata) -> Self {
+    pub fn with_metadata(mut self, metadata: ImageMetadata) -> Self {
         self.metadata = metadata;
         self
     }
@@ -926,7 +926,10 @@ impl ImageCodec {
         Ok(EncodedImage { bytes, report })
     }
 
-    /// Encodes a multi-frame asset as APNG or animated WebP.
+    /// Encodes a multi-frame asset as APNG.
+    ///
+    /// Animated WebP encoding currently returns
+    /// [`CodecErrorCode::UnsupportedEncodeOption`].
     pub fn encode_animated(
         asset: &AnimatedImageAsset,
         options: &EncodeOptions,
@@ -967,7 +970,10 @@ impl ImageCodec {
         })
     }
 
-    /// Encodes a multi-frame asset to a writer as APNG or animated WebP.
+    /// Encodes a multi-frame asset to a writer as APNG.
+    ///
+    /// Animated WebP encoding currently returns
+    /// [`CodecErrorCode::UnsupportedEncodeOption`].
     pub fn encode_animated_to<W: Write>(
         mut writer: W,
         asset: &AnimatedImageAsset,
@@ -983,8 +989,8 @@ impl ImageCodec {
                 Err(CodecError::new(CodecErrorCode::UnsupportedEncodeOption)),
                 EncodedFormat::Jpeg,
             ),
-            EncodeFormat::WebP(webp) => (
-                webp::encode_animated(&mut limited, asset, options.metadata, webp),
+            EncodeFormat::WebP(_) => (
+                Err(CodecError::new(CodecErrorCode::UnsupportedEncodeOption)),
                 EncodedFormat::WebP,
             ),
         };
@@ -1360,6 +1366,31 @@ mod tests {
                 .unwrap_err()
                 .code(),
             CodecErrorCode::OutputTooLarge
+        );
+    }
+
+    #[test]
+    fn animation_rejects_still_webp_and_unavailable_webp_encoding() {
+        assert_eq!(
+            ImageCodec::decode_animated(&encoded(ImageFormat::WebP))
+                .expect_err("still WebP is not animated")
+                .code(),
+            CodecErrorCode::NotAnimated
+        );
+
+        let frame = super::AnimationFrame::new(
+            Image::from_rgba8(1, 1, vec![0, 0, 0, 255]).expect("frame image"),
+            super::FrameDuration::from_millis(10),
+        );
+        let animation =
+            super::AnimatedImageAsset::new(1, 1, vec![frame], super::AnimationLoop::Infinite)
+                .expect("animation");
+        let options = EncodeOptions::new(EncodeFormat::WebP(WebPOptions::lossless_v1()));
+        assert_eq!(
+            ImageCodec::encode_animated(&animation, &options)
+                .expect_err("animated WebP encoder is unavailable")
+                .code(),
+            CodecErrorCode::UnsupportedEncodeOption
         );
     }
 }
