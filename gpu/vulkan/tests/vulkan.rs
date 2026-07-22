@@ -1,5 +1,12 @@
-use skia_core::{Color, Paint, Rect, Scalar};
-use skia_gpu::{GpuBackend, GpuCommandEncoder, GpuSurfaceDescriptor};
+use skia_core::{
+    BlendMode, ClipOp, Color, FillRule, ImageFilter, Paint, PathBuilder, Rect, SamplingOptions,
+    SaveLayerOptions, Scalar, StrokeCap, StrokeOptions, Transform,
+};
+use skia_gpu::{
+    GpuAtlasRect, GpuBackend, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphQuad, GpuSurfaceDescriptor,
+    software::SoftwareGpuBackend,
+};
+use skia_image::Image;
 use skia_vulkan::{VulkanBackend, VulkanErrorCode};
 
 #[test]
@@ -53,33 +60,183 @@ fn vulkan_backend_clears_and_reads_an_offscreen_surface() {
 }
 
 #[test]
-fn vulkan_backend_fails_closed_for_unimplemented_draws() {
+fn vulkan_backend_executes_portable_draw_commands() {
     let Some(mut backend) = backend_or_skip() else {
         return;
     };
     let mut surface = backend
-        .create_surface(GpuSurfaceDescriptor::new(2, 2).expect("descriptor"))
+        .create_surface(GpuSurfaceDescriptor::new(5, 3).expect("descriptor"))
         .expect("surface");
-    let mut commands = GpuCommandEncoder::new(1).expect("encoder");
+
+    let mut clip_path = PathBuilder::new(5).expect("clip path");
+    clip_path
+        .add_rect(rect(1, 0, 4, 3))
+        .expect("clip rectangle");
+    let mut fill_path = PathBuilder::new(5).expect("fill path");
+    fill_path
+        .add_rect(rect(0, 0, 2, 2))
+        .expect("fill rectangle");
+
+    let mut commands = GpuCommandEncoder::new(5).expect("encoder");
+    let clip_path = commands
+        .add_path(clip_path.finish().expect("clip path finish"))
+        .expect("clip path resource");
+    let fill_path = commands
+        .add_path(fill_path.finish().expect("fill path finish"))
+        .expect("fill path resource");
+    let image = commands
+        .add_image(Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).expect("image"))
+        .expect("image resource");
+
+    commands.clear(Color::BLACK).expect("clear");
     commands
-        .fill_rect(
-            Rect::new(
-                Scalar::ZERO,
-                Scalar::ZERO,
-                Scalar::from_i32(1).expect("right"),
-                Scalar::from_i32(1).expect("bottom"),
-            )
-            .expect("rect"),
-            Paint::new(Color::WHITE),
+        .clip_path(clip_path, FillRule::NonZero, ClipOp::Intersect)
+        .expect("complex clip");
+    commands.set_transform(Transform::translate(
+        Scalar::from_i32(1).expect("x"),
+        Scalar::ZERO,
+    ));
+    commands
+        .fill_path(fill_path, FillRule::NonZero, Paint::new(Color::WHITE))
+        .expect("path draw");
+    commands.set_transform(Transform::IDENTITY);
+    commands
+        .draw_image_with_sampling(
+            image,
+            rect(2, 2, 4, 3),
+            u8::MAX,
+            BlendMode::SourceOver,
+            SamplingOptions::NEAREST,
         )
-        .expect("record draw");
-    assert_eq!(
-        backend
-            .submit(&mut surface, &commands.finish())
-            .expect_err("unsupported draw")
-            .code(),
-        VulkanErrorCode::UnsupportedCommand
-    );
+        .expect("image draw");
+    backend
+        .submit(&mut surface, &commands.finish())
+        .expect("portable submission");
+
+    let pixels = surface.read_rgba8().expect("readback");
+    assert_eq!(pixel(&pixels, 5, 1, 0), Color::WHITE.channels());
+    assert_eq!(pixel(&pixels, 5, 2, 1), Color::WHITE.channels());
+    assert_eq!(pixel(&pixels, 5, 0, 0), Color::BLACK.channels());
+    assert_eq!(pixel(&pixels, 5, 2, 2), Color::RED.channels());
+    assert_eq!(pixel(&pixels, 5, 3, 2), Color::BLUE.channels());
+    assert_eq!(pixel(&pixels, 5, 4, 2), Color::BLACK.channels());
+
+    let mut follow_up = GpuCommandEncoder::new(1).expect("follow-up encoder");
+    follow_up
+        .fill_rect(rect(4, 0, 5, 1), Paint::new(Color::RED))
+        .expect("follow-up draw");
+    backend
+        .submit(&mut surface, &follow_up.finish())
+        .expect("follow-up submission");
+    let pixels = surface.read_rgba8().expect("follow-up readback");
+    assert_eq!(pixel(&pixels, 5, 4, 0), Color::RED.channels());
+    assert_eq!(pixel(&pixels, 5, 2, 2), Color::RED.channels());
+}
+
+#[test]
+fn vulkan_backend_matches_the_reference_for_every_command_variant() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let descriptor = GpuSurfaceDescriptor::new(8, 8).expect("descriptor");
+    let mut path = PathBuilder::new(5).expect("path");
+    path.add_rect(rect(1, 1, 7, 7)).expect("path rectangle");
+
+    let mut encoder = GpuCommandEncoder::new(8).expect("encoder");
+    let path = encoder
+        .add_path(path.finish().expect("path finish"))
+        .expect("path resource");
+    let image = encoder
+        .add_image(Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 128]).expect("image"))
+        .expect("image resource");
+    let atlas = encoder
+        .add_glyph_atlas(GpuGlyphAtlas::from_image(
+            Image::from_rgba8(1, 1, vec![255, 255, 255, 192]).expect("atlas image"),
+        ))
+        .expect("atlas resource");
+
+    encoder.clear(Color::BLACK).expect("clear");
+    encoder
+        .clip_path(path, FillRule::NonZero, ClipOp::Intersect)
+        .expect("clip");
+    encoder
+        .save_layer(
+            SaveLayerOptions::new()
+                .with_bounds(rect(1, 1, 7, 7))
+                .with_opacity(224)
+                .with_filter(ImageFilter::box_blur(1).expect("blur")),
+        )
+        .expect("save layer");
+    encoder
+        .fill_rect(rect(1, 1, 4, 4), Paint::new(Color::BLUE))
+        .expect("fill rectangle");
+    encoder
+        .fill_path(
+            path,
+            FillRule::EvenOdd,
+            Paint::new(Color::rgba(255, 255, 0, 160)),
+        )
+        .expect("fill path");
+    encoder
+        .stroke_path(
+            path,
+            StrokeOptions::new(Scalar::from_i32(1).expect("stroke width"))
+                .expect("stroke")
+                .with_cap(StrokeCap::Round),
+            Paint::new(Color::WHITE).with_blend_mode(BlendMode::Multiply),
+        )
+        .expect("stroke path");
+    encoder
+        .draw_image_with_sampling(
+            image,
+            rect(2, 2, 6, 4),
+            192,
+            BlendMode::SourceOver,
+            SamplingOptions::LINEAR,
+        )
+        .expect("draw image");
+    encoder
+        .draw_glyph_batch(
+            atlas,
+            vec![GpuGlyphQuad::new(
+                GpuAtlasRect::new(0, 0, 1, 1).expect("atlas rectangle"),
+                rect(3, 3, 6, 6),
+                true,
+            )],
+            Paint::new(Color::RED),
+        )
+        .expect("draw glyphs");
+    encoder.restore().expect("restore layer");
+    let commands = encoder.finish();
+
+    let mut reference = SoftwareGpuBackend::default();
+    let mut expected = reference
+        .create_surface(descriptor)
+        .expect("reference surface");
+    reference
+        .submit(&mut expected, &commands)
+        .expect("reference submission");
+    let mut actual = backend.create_surface(descriptor).expect("Vulkan surface");
+    backend
+        .submit(&mut actual, &commands)
+        .expect("Vulkan submission");
+
+    assert_eq!(actual.read_rgba8().expect("readback"), expected.pixels());
+}
+
+fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
+    Rect::new(
+        Scalar::from_i32(left).expect("left"),
+        Scalar::from_i32(top).expect("top"),
+        Scalar::from_i32(right).expect("right"),
+        Scalar::from_i32(bottom).expect("bottom"),
+    )
+    .expect("rect")
+}
+
+fn pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+    let offset = (y * width + x) * 4;
+    pixels[offset..offset + 4].try_into().expect("pixel")
 }
 
 fn backend_or_skip() -> Option<VulkanBackend> {

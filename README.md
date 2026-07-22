@@ -52,9 +52,11 @@ flowchart LR
   those primitives. Hardware backends depend on `skia-gpu`, never on the text
   adapter, so adding Vulkan or WebGPU does not duplicate shaping or atlas policy.
 - `skia/gpu/metal` and `skia/gpu/vulkan` are platform execution adapters. The
-  Vulkan bring-up dynamically loads the platform loader and owns a real instance,
-  device, graphics queue, offscreen RGBA8 image, clear submission, and staging
-  readback; unsupported draws fail closed without a CPU fallback.
+  Vulkan adapter dynamically loads the platform loader and owns a real instance,
+  device, graphics queue, and offscreen RGBA8 image. It implements the complete
+  portable command vocabulary through deterministic composition plus Vulkan
+  staging upload, preserves target contents across submissions, retains a native
+  clear fast path, and reads pixels back from device-owned memory.
 - `skia/text/system` is the platform filesystem adapter for system/user font
   discovery, generic-family resolution, and language-preferred family policy.
   It returns stable path/index identities and reloadable records; `skia/text`

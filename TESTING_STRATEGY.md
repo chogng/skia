@@ -9,11 +9,13 @@ that can be dropped into this workspace unchanged.
 
 The current baseline is useful but predominantly behavioural: workspace Rust
 tests cover the public facade, CPU canvas, display lists, paths/path effects,
-the software GPU replay contract, Metal, Vulkan bring-up, codecs, and text.
-`cargo test --workspace --all-features` is the portable regression gate.  The
-three full Unicode conformance tests are intentionally external, checksum
-pinned downloads; run `scripts/fetch_unicode_conformance.sh` followed by the
-command in `text/tests/data/unicode/SOURCES.md`.
+the software GPU replay contract, Metal, Vulkan offscreen execution, codecs, and text.
+`cargo test --workspace --exclude skia-metal --exclude skia-vulkan
+--all-features` is the portable regression gate; platform executors run in
+their dedicated Metal and forced-Lavapipe jobs.  The three full Unicode
+conformance tests are intentionally external, checksum pinned downloads; run
+`scripts/fetch_unicode_conformance.sh` followed by the command in
+`text/tests/data/unicode/SOURCES.md`.
 
 Known gaps are a checked-in/rendered pixel-golden harness, a versioned media
 fixture manifest, cross-backend scene comparison, property/fuzz targets,
@@ -76,8 +78,9 @@ assumption that every path in the repository has the same terms.
 
 ### Phase 0 — portable gate (now)
 
-Run formatting, Clippy with warnings denied, `cargo test --workspace
---all-features`, and the checksum-verified Unicode conformance suite on Linux.
+Run formatting, Clippy with warnings denied, the portable workspace tests
+excluding Metal and Vulkan executors, and the checksum-verified Unicode
+conformance suite on Linux.
 The Unicode gate tests grapheme boundaries, line breaks, and bidi ordering
 against the exact data version advertised by each Rust dependency.  It is
 small enough to download in CI (roughly 8 MiB) and avoids vendoring any binary
@@ -88,6 +91,12 @@ separate, protected required-hardware job must run on a known device and set
 `SKIA_REQUIRE_METAL_DEVICE=1`; it must not be silently replaced by an
 emulated/absent-device runner.  The ordinary job protects compilation and
 device-less behaviour, while the protected job protects pixel execution.
+
+On Linux, the required `vulkan-lavapipe` job selects Mesa's software Vulkan ICD,
+enables `VK_LAYER_KHRONOS_validation`, and sets `SKIA_REQUIRE_VULKAN_DEVICE=1`.
+This makes loader, synchronization, staging upload/readback, and portable-command
+pixel tests mandatory on every change without relying on a hosted runner having
+a physical GPU.  Vendor hardware remains a separate main/nightly runner concern.
 
 ### Phase 1 — owned scenes and pixel oracle (initial implementation complete)
 
@@ -119,6 +128,7 @@ CI lanes:
 | Lane | Trigger | Required work |
 | --- | --- | --- |
 | Linux portable | every change | fmt, Clippy, workspace tests, Unicode download/conformance |
+| Linux Vulkan Lavapipe | every change | forced software ICD, validation layer, Vulkan command/readback tests |
 | macOS device-optional | every change | workspace/Metal tests; absence is visible but allowed |
 | macOS Metal-required | protected runner, main/nightly and GPU changes | `SKIA_REQUIRE_METAL_DEVICE=1`, selected scene comparison, artifact upload on mismatch |
 | fuzz/property | nightly and changed boundary | bounded fuzz smoke plus deterministic property seeds |

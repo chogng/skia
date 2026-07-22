@@ -4,8 +4,8 @@
 Developer PowerShell 中执行，可以按顺序直接复制。
 
 当前测试范围是 Vulkan loader、instance、physical/logical device、graphics queue、
-离屏 RGBA8 image、`Clear`、同步提交和 staging readback。它不创建窗口或 swapchain；
-`FillRect`、`FillPath`、`StrokePath`、`DrawImage`、glyph 和复杂裁剪尚未纳入这一阶段。
+离屏 RGBA8 image、原生 `Clear`、完整 portable command 回放、staging upload、跨提交内容保留、
+同步提交和 staging readback。它不创建窗口或 swapchain。
 
 ## 1. 准备环境
 
@@ -44,14 +44,12 @@ cargo test -p skia-vulkan -- --nocapture --test-threads=1
 
 成功时必须同时满足：
 
-- 输出包含 `running 2 tests`；
+- 输出包含 `running 3 tests`；
 - 输出包含 `Vulkan device: <设备名称>`；
 - `vulkan_backend_clears_and_reads_an_offscreen_surface` 为 `ok`；
-- `vulkan_backend_fails_closed_for_unimplemented_draws` 为 `ok`；
-- 最终为 `2 passed; 0 failed`。
-
-第二个测试中的 `UnsupportedCommand` 是当前契约的一部分：测试会确认未实现的 draw 明确
-失败，而不是偷偷回退到 CPU。只要测试本身显示 `ok`，它就不是异常。
+- `vulkan_backend_executes_portable_draw_commands` 为 `ok`；
+- `vulkan_backend_matches_the_reference_for_every_command_variant` 为 `ok`；
+- 最终为 `3 passed; 0 failed`。
 
 ## 3. 运行 Validation Layer 测试
 
@@ -69,7 +67,7 @@ $env:SKIA_VULKAN_VALIDATION = "1"
 cargo test -p skia-vulkan -- --nocapture --test-threads=1
 ```
 
-成功标准仍是 `2 passed; 0 failed`。此外，测试会确认 backend 确实启用了
+成功标准仍是 `3 passed; 0 failed`。此外，测试会确认 backend 确实启用了
 `VK_LAYER_KHRONOS_validation`。如果 layer 不存在，测试必须以
 `ValidationUnavailable` 失败，不能静默跳过。
 
@@ -102,6 +100,7 @@ Remove-Item Env:SKIA_VULKAN_VALIDATION -ErrorAction SilentlyContinue
 | `DeviceUnavailable` | 没有 graphics-capable physical device/queue | 检查虚拟机、远程桌面会话和显卡驱动是否暴露 Vulkan |
 | `DeviceCreationFailed` | logical device、queue 或 command pool 创建失败 | 更新驱动并保留完整 backtrace |
 | `SurfaceAllocationFailed` | RGBA8 image、格式能力或 device memory 不可用 | 记录 GPU/驱动版本并保留完整输出 |
+| `UploadFailed` | upload staging buffer、mapping、flush 或 image copy 失败 | 保留完整输出和 backtrace |
 | `SubmissionFailed` | command recording、queue submit 或 fence wait 失败 | 保留完整输出和 backtrace |
 | `ReadbackFailed` | staging buffer、copy、mapping 或像素读回失败 | 保留完整输出和 backtrace |
 
@@ -139,5 +138,5 @@ Remove-Item Env:SKIA_VULKAN_VALIDATION -ErrorAction SilentlyContinue
 Remove-Item Env:RUST_BACKTRACE -ErrorAction SilentlyContinue
 ```
 
-基础轮和 Validation Layer 轮都通过，表示当前 Vulkan 离屏 clear/readback foundation 在该
-Windows GPU/驱动组合上成立；它不代表尚未实现的绘制命令或窗口呈现已经通过。
+基础轮和 Validation Layer 轮都通过，表示当前 Vulkan 离屏命令回放、upload、同步和
+readback 在该 Windows GPU/驱动组合上成立；它不代表窗口呈现已经通过。
