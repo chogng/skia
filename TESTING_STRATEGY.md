@@ -105,9 +105,9 @@ a physical GPU.  Vendor hardware remains a separate main/nightly runner concern.
 exercise clips/alpha, even-odd paths/transforms, layers/gradients, and linear
 image sampling.  `skia-rs/gpu/tests/render_oracle.rs` renders them through CPU and
 `skia-gpu` software replay, requiring exact RGBA8 equality and dimensions.
-`skia-rs/gpu/tests/golden/` holds their reviewed raw-pixel/PNG fixtures and manifest.
+`skia-rs/tests/golden/` holds their reviewed raw-pixel/PNG fixtures and manifest.
 
-Introduce `skia-rs/gpu/tests/golden/manifest.toml` only for explicitly accepted expected
+Introduce `skia-rs/tests/golden/manifest.toml` only for explicitly accepted expected
 images.  Each entry should include renderer version, scene ID, width/height,
 pixel format/color space, SHA-256 of raw RGBA and PNG, and an update reason.
 `scripts/regenerate_goldens.sh` refuses to overwrite without

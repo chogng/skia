@@ -156,7 +156,10 @@ pub fn render_software_gpu(case: RenderCase) -> Surface {
 }
 
 pub fn golden_directory() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("gpu is inside the workspace")
+        .join("tests/golden")
 }
 
 pub fn write_goldens(directory: &Path) -> Result<(), String> {
