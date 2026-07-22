@@ -8,9 +8,7 @@ use image::{
     codecs::png::{CompressionType, FilterType, PngEncoder},
     metadata::LoopCount,
 };
-use png::{
-    BitDepth, BlendOp, ColorType, DeflateCompression, DisposeOp, Encoder, Filter, Info,
-};
+use png::{BitDepth, BlendOp, ColorType, DeflateCompression, DisposeOp, Encoder, Filter, Info};
 use skia_image::{ColorSpace, Image};
 
 use crate::{
@@ -161,9 +159,7 @@ pub(crate) fn encode_animated<W: Write>(
         writer
             .set_frame_delay(delay_num, delay_den)
             .and_then(|_| writer.set_frame_position(frame.x, frame.y))
-            .and_then(|_| {
-                writer.set_frame_dimension(frame.image.width(), frame.image.height())
-            })
+            .and_then(|_| writer.set_frame_dimension(frame.image.width(), frame.image.height()))
             .and_then(|_| {
                 writer.set_blend_op(match frame.blend {
                     AnimationBlend::Source => BlendOp::Source,
@@ -187,11 +183,7 @@ pub(crate) fn encode_animated<W: Write>(
         .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))
 }
 
-fn validate_canvas(
-    width: u32,
-    height: u32,
-    limits: AnimationLimits,
-) -> Result<(), CodecError> {
+fn validate_canvas(width: u32, height: u32, limits: AnimationLimits) -> Result<(), CodecError> {
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .ok_or(CodecError::new(CodecErrorCode::AnimationTooLarge))?;
@@ -217,12 +209,10 @@ fn map_compression(compression: PngCompression) -> Result<DeflateCompression, Co
         PngCompression::Balanced => Ok(DeflateCompression::Level(6)),
         PngCompression::Best => Ok(DeflateCompression::Level(9)),
         PngCompression::Uncompressed => Ok(DeflateCompression::NoCompression),
-        PngCompression::DeflateLevel(level @ 0..=9) => {
-            Ok(DeflateCompression::Level(level))
+        PngCompression::DeflateLevel(level @ 0..=9) => Ok(DeflateCompression::Level(level)),
+        PngCompression::DeflateLevel(_) => {
+            Err(CodecError::new(CodecErrorCode::InvalidPngCompressionLevel))
         }
-        PngCompression::DeflateLevel(_) => Err(CodecError::new(
-            CodecErrorCode::InvalidPngCompressionLevel,
-        )),
     }
 }
 
