@@ -1,6 +1,6 @@
 # Unicode conformance sources
 
-The full conformance files are downloaded into `target/` instead of being
+The full conformance files are downloaded into `skia-rs/target/` instead of being
 stored in Git. `scripts/fetch_unicode_conformance.sh` pins every URL and
 SHA-256 digest.
 
@@ -17,10 +17,11 @@ text dependencies in `text/Cargo.toml`:
 The files are provided by Unicode, Inc. under the Unicode License v3. See
 <https://www.unicode.org/license.txt>.
 
-Run the complete suite from the repository root:
+Run the download from the repository root, then run the test from `skia-rs/`:
 
 ```sh
-scripts/fetch_unicode_conformance.sh
+scripts/fetch_unicode_conformance.sh skia-rs/target/unicode-conformance
+cd skia-rs
 SKIA_UNICODE_CONFORMANCE_DIR=target/unicode-conformance \
   cargo test -p skia-text --test unicode_conformance -- --ignored
 ```

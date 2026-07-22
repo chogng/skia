@@ -5,6 +5,11 @@
 这些类型记录的是 Skia 下层目前能执行或编码的绘制能力；上层集成层应根据本表把上游
 请求转换为合适的下层调用。
 
+## 仓库布局
+
+Rust workspace 位于 `skia-rs/`。除非另有说明，本文中的源码路径和 Cargo 命令均相对于
+该目录；仓库根目录的脚本应从根目录执行。
+
 ## 调用方向与职责
 
 ```text
@@ -603,13 +608,14 @@ Vulkan loader/device/queue 生命周期在 `gpu/vulkan/src/context.rs`，offscre
 
 ## Rust 工具链维护
 
-本仓库使用 `rustup` 管理 Cargo 与 Rust 工具链。根目录的
-`rust-toolchain.toml` 会让 `cargo` / `rustc` 自动选择 `stable`，并安装
-`clippy` 和 `rustfmt`；`Cargo.toml` 的 `rust-version = "1.89"` 是本仓库当前的
+本仓库使用 `rustup` 管理 Cargo 与 Rust 工具链。`skia-rs/rust-toolchain.toml`
+会让 `cargo` / `rustc` 自动选择 `stable`，并安装 `clippy` 和 `rustfmt`；
+`skia-rs/Cargo.toml` 的 `rust-version = "1.89"` 是本仓库当前的
 最低支持版本（由纯 Rust `mozjpeg-rs` 要求）。更新 stable 工具链（以及 Cargo）后，用以下
 命令确认版本：
 
 ```sh
+cd skia-rs
 rustup update stable
 cargo --version
 rustc --version

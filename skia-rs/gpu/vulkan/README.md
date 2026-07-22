@@ -18,7 +18,7 @@ separate work.
 
 ## Testing
 
-Run the test suite from the repository root:
+Run the test suite from `skia-rs/`:
 
 ```console
 cargo test -p skia-vulkan

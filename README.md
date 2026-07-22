@@ -1,6 +1,6 @@
 # Skia subsystem boundary
 
-`skia/` is an independently developed 2D graphics subsystem and reusable
+`skia-rs/` is the Rust workspace for an independently developed 2D graphics subsystem and reusable
 library. It owns portable geometry, paths, paints, image resources and codecs,
 text-glyph drawing contracts, display lists, and CPU/GPU execution. It is **not** an
 implementation detail of a particular caller and it does not model caller-specific
@@ -28,44 +28,44 @@ flowchart LR
 
 ## Dependency rule
 
-- `skia/` (`skia`) is the only public graphics API for consumers.
-  `skia/error`, `skia/geometry`, `skia/path`, `skia/tessellation`, `skia/text`,
-  `skia/core`, `skia/image`, `skia/codec`, and executor crates are implementation crates;
+- `skia-rs/` (`skia`) is the only public graphics API for consumers.
+  `skia-rs/error`, `skia-rs/geometry`, `skia-rs/path`, `skia-rs/tessellation`, `skia-rs/text`,
+  `skia-rs/core`, `skia-rs/image`, `skia-rs/codec`, and executor crates are implementation crates;
   consumers must not depend on them directly. Skia crates may depend on each
   other, but never on a caller-specific document crate or semantic type.
 - The facade exports an explicit, stable set of canvas, geometry, paint, path,
   image, text-outline, and error types. It does not expose display-list
   resource IDs, command representations, or backend command encoders.
-- `skia/error` contains shared failure types; `skia/geometry` contains fixed
-  point coordinates and affine transforms; `skia/path` contains immutable
+- `skia-rs/error` contains shared failure types; `skia-rs/geometry` contains fixed
+  point coordinates and affine transforms; `skia-rs/path` contains immutable
   paths and path construction. Their dependencies flow only downward.
-- `skia/core` contains paint and backend-neutral display-list semantics. It
+- `skia-rs/core` contains paint and backend-neutral display-list semantics. It
   depends on the foundational crates but never on an executor, platform
   graphics API, caller-specific parser, document model, or Scene. Its default
   `text` feature adds glyph-run display-list resources; GPU crates disable that
   feature because generic atlas submission does not need shaping types.
-- `skia/tessellation` owns backend-neutral path-to-polyline and path-to-mesh
+- `skia-rs/tessellation` owns backend-neutral path-to-polyline and path-to-mesh
   algorithms. Its bounded fixed-step curve flattener is shared by CPU and
   hardware backends; backend crates own only their raster or GPU buffer format.
-- `skia/gpu` owns only generic GPU resources, atlas quads, commands, and backend
-  submission. `skia/gpu/text` is the one-way adapter from font/layout data to
+- `skia-rs/gpu` owns only generic GPU resources, atlas quads, commands, and backend
+  submission. `skia-rs/gpu/text` is the one-way adapter from font/layout data to
   those primitives. Hardware backends depend on `skia-gpu`, never on the text
   adapter, so adding Vulkan or WebGPU does not duplicate shaping or atlas policy.
-- `skia/gpu/metal` and `skia/gpu/vulkan` are platform execution adapters. The
+- `skia-rs/gpu/metal` and `skia-rs/gpu/vulkan` are platform execution adapters. The
   Vulkan adapter dynamically loads the platform loader and owns a real instance,
   device, graphics queue, and offscreen RGBA8 image. It implements the complete
   portable command vocabulary through deterministic composition plus Vulkan
   staging upload, preserves target contents across submissions, retains a native
   clear fast path, and reads pixels back from device-owned memory.
-- `skia/text/system` is the platform filesystem adapter for system/user font
+- `skia-rs/text/system` is the platform filesystem adapter for system/user font
   discovery, generic-family resolution, and language-preferred family policy.
-  It returns stable path/index identities and reloadable records; `skia/text`
+  It returns stable path/index identities and reloadable records; `skia-rs/text`
   remains independent of operating-system directories and font handles.
-- `skia/image` owns the immutable RGBA8 resource representation. `skia/codec`
+- `skia-rs/image` owns the immutable RGBA8 resource representation. `skia-rs/codec`
   parses untrusted, general-purpose image bytes into that representation and
   encodes those resources as general-purpose image formats. It does not depend
   on rendering backends or caller-specific types, so both decode and encode
-  remain in `skia/codec`, not in the resource crate.
+  remain in `skia-rs/codec`, not in the resource crate.
 - Every consumer calls Skia only through its public API. Each consumer owns its
   source-domain adapter and reports its rendering
   intent, target description, and source data to the Skia upper integration
@@ -77,7 +77,7 @@ flowchart LR
 
 ## Text implementation boundary
 
-`skia/text` owns portable font identities, ordered in-memory font collections,
+`skia-rs/text` owns portable font identities, ordered in-memory font collections,
 shaped glyph runs, source UTF-8 clusters, bidi visual runs, and validated
 vector outlines. These remain one cohesive crate: its root only assembles and
 re-exports the public API, while internal modules separate foundational glyph
@@ -240,7 +240,7 @@ deterministic non-zero triangle-fill path.
 
 ## Path implementation layout
 
-The public `Path` and `PathBuilder` API is implemented in `skia/path/src/lib.rs`.
+The public `Path` and `PathBuilder` API is implemented in `skia-rs/path/src/lib.rs`.
 Algorithm families are split beneath it so construction contracts do not become
 coupled to geometry queries or contour processing:
 
@@ -251,5 +251,5 @@ coupled to geometry queries or contour processing:
 
 Backend consumers must not add their own Bézier flattening. The reusable
 `PathFlattener`, output ceilings, and flattened contour representation live in
-`skia/tessellation/src/flatten.rs`, ready for Metal, Vulkan, WebGPU, and CPU
+`skia-rs/tessellation/src/flatten.rs`, ready for Metal, Vulkan, WebGPU, and CPU
 consumers without exposing backend command or buffer types.

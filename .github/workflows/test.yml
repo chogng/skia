@@ -14,14 +14,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Format
+        working-directory: skia-rs
         run: cargo fmt --all -- --check
       - name: Lint
+        working-directory: skia-rs
         run: cargo clippy --workspace --exclude skia-metal --all-targets --all-features -- -D warnings
       - name: Workspace tests
+        working-directory: skia-rs
         run: cargo test --workspace --exclude skia-metal --exclude skia-vulkan --all-features
       - name: Download pinned Unicode conformance data
-        run: scripts/fetch_unicode_conformance.sh
+        working-directory: skia-rs
+        run: ../scripts/fetch_unicode_conformance.sh
       - name: Unicode conformance
+        working-directory: skia-rs
         env:
           SKIA_UNICODE_CONFORMANCE_DIR: target/unicode-conformance
         run: cargo test -p skia-text --test unicode_conformance -- --ignored
@@ -44,6 +49,7 @@ jobs:
       - name: Inspect Vulkan runtime
         run: vulkaninfo --summary
       - name: Vulkan tests
+        working-directory: skia-rs
         env:
           SKIA_REQUIRE_VULKAN_DEVICE: "1"
           SKIA_VULKAN_VALIDATION: "1"
@@ -55,4 +61,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Metal tests
+        working-directory: skia-rs
         run: cargo test -p skia-metal -p skia-gpu-text

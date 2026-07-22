@@ -10,12 +10,13 @@ that can be dropped into this workspace unchanged.
 The current baseline is useful but predominantly behavioural: workspace Rust
 tests cover the public facade, CPU canvas, display lists, paths/path effects,
 the software GPU replay contract, Metal, Vulkan offscreen execution, codecs, and text.
-`cargo test --workspace --exclude skia-metal --exclude skia-vulkan
+Run Rust commands from `skia-rs/`; `cargo test --workspace --exclude skia-metal --exclude skia-vulkan
 --all-features` is the portable regression gate; platform executors run in
 their dedicated Metal and forced-Lavapipe jobs.  The three full Unicode
 conformance tests are intentionally external, checksum pinned downloads; run
-`scripts/fetch_unicode_conformance.sh` followed by the command in
-`text/tests/data/unicode/SOURCES.md`.
+`scripts/fetch_unicode_conformance.sh skia-rs/target/unicode-conformance` from
+the repository root, followed by the command in
+`skia-rs/text/tests/data/unicode/SOURCES.md`.
 
 Known gaps are a checked-in/rendered pixel-golden harness, a versioned media
 fixture manifest, cross-backend scene comparison, property/fuzz targets,
@@ -100,13 +101,13 @@ a physical GPU.  Vendor hardware remains a separate main/nightly runner concern.
 
 ### Phase 1 — owned scenes and pixel oracle (initial implementation complete)
 
-`gpu/tests/support/render_cases.rs` now contains four repository-authored scenes that
+`skia-rs/gpu/tests/support/render_cases.rs` now contains four repository-authored scenes that
 exercise clips/alpha, even-odd paths/transforms, layers/gradients, and linear
-image sampling.  `gpu/tests/render_oracle.rs` renders them through CPU and
+image sampling.  `skia-rs/gpu/tests/render_oracle.rs` renders them through CPU and
 `skia-gpu` software replay, requiring exact RGBA8 equality and dimensions.
-`tests/golden/` holds their reviewed raw-pixel/PNG fixtures and manifest.
+`skia-rs/tests/golden/` holds their reviewed raw-pixel/PNG fixtures and manifest.
 
-Introduce `tests/golden/manifest.toml` only for explicitly accepted expected
+Introduce `skia-rs/tests/golden/manifest.toml` only for explicitly accepted expected
 images.  Each entry should include renderer version, scene ID, width/height,
 pixel format/color space, SHA-256 of raw RGBA and PNG, and an update reason.
 `scripts/regenerate_goldens.sh` refuses to overwrite without
