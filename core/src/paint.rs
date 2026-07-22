@@ -1048,7 +1048,7 @@ fn soft_light(source: u32, destination: u32) -> u32 {
         destination - mul_255(mul_255(255 - 2 * source, destination), 255 - destination)
     } else {
         let dark = if destination <= 63 {
-            ((16 * destination - 12 * 255) * destination + 4 * 255 * 255) * destination
+            (16 * destination * destination + 4 * 255 * 255 - 12 * 255 * destination) * destination
                 / (255 * 255)
         } else {
             integer_sqrt(destination * 255)
@@ -1275,6 +1275,10 @@ mod tests {
         assert_eq!(
             Color::rgb(100, 200, 50).composite(Color::rgb(200, 100, 250), BlendMode::Screen),
             Color::rgb(222, 222, 251)
+        );
+        assert_eq!(
+            Color::rgb(200, 100, 40).composite(Color::rgb(30, 80, 220), BlendMode::SoftLight),
+            Color::rgb(61, 68, 199)
         );
     }
 

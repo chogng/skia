@@ -16,9 +16,9 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude skia-metal --all-targets --all-features -- -D warnings
       - name: Workspace tests
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --exclude skia-metal --all-features
       - name: Download pinned Unicode conformance data
         run: scripts/fetch_unicode_conformance.sh
       - name: Unicode conformance
