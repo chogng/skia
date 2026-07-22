@@ -681,8 +681,7 @@ $env:SKIA_VULKAN_VALIDATION = "1"
 cargo test -p skia-vulkan -- --nocapture --test-threads=1
 ```
 
-从环境准备、基础轮、Validation Layer 轮到错误分类和结果回传的完整操作手册见
-`gpu/vulkan/WINDOWS_VALIDATION.md`。
+Vulkan 后端的范围和 Windows 验证说明见 `gpu/vulkan/README.md`。
 
 `skia-metal` 测试需要 macOS Metal device 和 Xcode command-line shader tools；没有默认 Metal
 device 时普通硬件用例会跳过；设置 `SKIA_REQUIRE_METAL_DEVICE=1` 后 device 不可用会令上述
