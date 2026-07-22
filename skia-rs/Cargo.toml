@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    ".",
     "codec",
     "core",
     "cpu",
     "error",
+    "facade",
     "geometry",
     "gpu",
     "gpu/metal",
@@ -22,21 +22,3 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-
-[package]
-name = "skia"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-publish = false
-
-[dependencies]
-skia-codec = { path = "codec" }
-skia-core = { path = "core" }
-skia-cpu = { path = "cpu" }
-skia-error = { path = "error" }
-skia-geometry = { path = "geometry" }
-skia-image = { path = "image" }
-skia-path = { path = "path" }
-skia-tessellation = { path = "tessellation" }
-skia-system-fonts = { path = "text/system" }

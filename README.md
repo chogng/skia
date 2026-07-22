@@ -28,7 +28,7 @@ flowchart LR
 
 ## Dependency rule
 
-- `skia-rs/` (`skia`) is the only public graphics API for consumers.
+- `skia-rs/facade` (`skia`) is the only public graphics API for consumers.
   `skia-rs/error`, `skia-rs/geometry`, `skia-rs/path`, `skia-rs/tessellation`, `skia-rs/text`,
   `skia-rs/core`, `skia-rs/image`, `skia-rs/codec`, and executor crates are implementation crates;
   consumers must not depend on them directly. Skia crates may depend on each
