@@ -10,10 +10,8 @@ use skia_core::{ClipOp, FillRule, Path, StrokeOptions, Transform};
 use skia_gpu::{GpuClipGeometry, GpuClipId, GpuCommandBuffer, GpuSurfaceDescriptor};
 use skia_tessellation::{DEFAULT_CURVE_STEPS, FlatteningLimits, PathFlattener, stroke_mesh};
 
-use crate::{
-    MetalError, MetalErrorCode,
-    clip_geometry::{ClipEdge, clip_edges, path_edges},
-};
+use super::clip_geometry::{ClipEdge, clip_edges, path_edges};
+use crate::{MetalError, MetalErrorCode};
 
 struct MaskInput<'a> {
     parent: &'a Texture,

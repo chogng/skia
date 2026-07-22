@@ -7,10 +7,10 @@ use image::{
 };
 use skia_image::{ColorSpace, Image};
 
+use super::apply_metadata;
 use crate::{
     AnimatedImageAsset, AnimationFrame, AnimationLimits, AnimationLoop, CodecError, CodecErrorCode,
     FrameDuration, ImageAsset, ImageMetadata, MetadataPolicy, WebPMode, WebPOptions,
-    apply_metadata,
 };
 
 pub(crate) fn encode<W: Write>(

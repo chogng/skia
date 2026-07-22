@@ -240,14 +240,15 @@ deterministic non-zero triangle-fill path.
 
 ## Path implementation layout
 
-The public `Path` and `PathBuilder` API is implemented in `skia-rs/path/src/lib.rs`.
+The public `Path` and `PathBuilder` API is implemented in `skia-rs/path/src/path.rs` and
+re-exported by the crate's thin `lib.rs` entry point.
 Algorithm families are split beneath it so construction contracts do not become
 coupled to geometry queries or contour processing:
 
-- `arc.rs` owns public ellipse-arc construction and continuation methods.
-- `bounds.rs` owns conservative and polynomial-Bézier extrema bounds helpers.
-- `reverse.rs` owns contour parsing and reverse traversal.
-- `math.rs` owns checked fixed-point scalar operations shared by path code.
+- `path/arc.rs` owns public ellipse-arc construction and continuation methods.
+- `path/bounds.rs` owns conservative and polynomial-Bézier extrema bounds helpers.
+- `path/reverse.rs` owns contour parsing and reverse traversal.
+- `path/math.rs` owns checked fixed-point scalar operations shared by path code.
 
 Backend consumers must not add their own Bézier flattening. The reusable
 `PathFlattener`, output ceilings, and flattened contour representation live in

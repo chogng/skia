@@ -149,7 +149,7 @@ tests from host system-font discovery.  Cover shaping/fallback/bidi/layout,
 language tags, dictionary boundaries, variable axes, and color/bitmap glyphs
 with known fonts; never make system-font glyph pixels a portable golden.
 
-For PNG/JPEG/WebP, keep the current `codec/src/png.rs` work untouched.  Add
+For PNG/JPEG/WebP, keep the current `codec/src/api/png.rs` work untouched.  Add
 decode limits, metadata, malformed/truncated input, and encode/decode
 properties at the public `ImageCodec` boundary.  A future media corpus belongs
 in a downloaded manifest and needs individual source licences; it must not be

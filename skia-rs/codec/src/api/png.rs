@@ -11,10 +11,11 @@ use image::{
 use png::{BitDepth, BlendOp, ColorType, DeflateCompression, DisposeOp, Encoder, Filter, Info};
 use skia_image::{ColorSpace, Image};
 
+use super::apply_metadata;
 use crate::{
     AnimatedImageAsset, AnimationBlend, AnimationDisposal, AnimationFrame, AnimationLimits,
     AnimationLoop, CodecError, CodecErrorCode, FrameDuration, ImageAsset, ImageMetadata,
-    MetadataPolicy, PngCompression, PngFilter, PngOptions, apply_metadata,
+    MetadataPolicy, PngCompression, PngFilter, PngOptions,
 };
 
 pub(crate) fn encode<W: Write>(
