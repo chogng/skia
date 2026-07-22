@@ -1,10 +1,12 @@
 # Vulkan backend bring-up
 
-`skia-vulkan` is a real offscreen Vulkan backend. The initial bring-up loads
-the system Vulkan loader dynamically, selects a graphics queue, allocates an
-optimal-tiled RGBA8 image, executes `GpuCommand::Clear`, copies through a
-host-visible staging buffer, and verifies exact RGBA8 readback. Unsupported
-draw commands return `UnsupportedCommand`; there is no CPU fallback.
+`skia-vulkan` is an offscreen Vulkan execution adapter. It loads the system
+Vulkan loader dynamically, selects a graphics queue, allocates an optimal-tiled
+RGBA8 image, executes target-wide clears natively, and supports the complete
+portable `GpuCommand` vocabulary through deterministic composition followed by
+a host-visible staging upload. The target remains device-owned, contents are
+preserved across submissions, and exact RGBA8 readback uses a separate Vulkan
+staging buffer.
 
 ## Windows verification
 
@@ -28,10 +30,10 @@ $env:SKIA_VULKAN_VALIDATION = "1"
 cargo test -p skia-vulkan -- --nocapture --test-threads=1
 ```
 
-Both runs must report two passing tests and print the selected device name.
+Both runs must report all Vulkan tests passing and print the selected device name.
 Forced runs fail rather than silently skipping unavailable loader, device, or
 validation-layer prerequisites.
 
 This phase intentionally does not create a window or swapchain. Presentation,
-shader pipelines, descriptor layouts, generic mesh drawing, and GPU complex
-clip masks are subsequent stages built on this device/surface foundation.
+swapchain integration, and fully native shader/descriptor pipelines remain
+separate work from this offscreen command adapter.

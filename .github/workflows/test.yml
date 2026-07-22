@@ -26,6 +26,29 @@ jobs:
           SKIA_UNICODE_CONFORMANCE_DIR: target/unicode-conformance
         run: cargo test -p skia-text --test unicode_conformance -- --ignored
 
+  vulkan-lavapipe:
+    name: Vulkan (Lavapipe + validation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install software Vulkan and validation layers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes mesa-vulkan-drivers vulkan-tools vulkan-validationlayers
+      - name: Select Lavapipe ICD
+        run: |
+          icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)"
+          test -n "$icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+      - name: Inspect Vulkan runtime
+        run: vulkaninfo --summary
+      - name: Vulkan tests
+        env:
+          SKIA_REQUIRE_VULKAN_DEVICE: "1"
+          SKIA_VULKAN_VALIDATION: "1"
+        run: cargo test -p skia-vulkan -- --nocapture --test-threads=1
+
   metal-optional:
     name: macOS Metal (device optional)
     runs-on: macos-latest

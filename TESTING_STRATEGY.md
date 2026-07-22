@@ -9,7 +9,7 @@ that can be dropped into this workspace unchanged.
 
 The current baseline is useful but predominantly behavioural: workspace Rust
 tests cover the public facade, CPU canvas, display lists, paths/path effects,
-the software GPU replay contract, Metal, Vulkan bring-up, codecs, and text.
+the software GPU replay contract, Metal, Vulkan offscreen execution, codecs, and text.
 `cargo test --workspace --all-features` is the portable regression gate.  The
 three full Unicode conformance tests are intentionally external, checksum
 pinned downloads; run `scripts/fetch_unicode_conformance.sh` followed by the
@@ -89,6 +89,12 @@ separate, protected required-hardware job must run on a known device and set
 emulated/absent-device runner.  The ordinary job protects compilation and
 device-less behaviour, while the protected job protects pixel execution.
 
+On Linux, the required `vulkan-lavapipe` job selects Mesa's software Vulkan ICD,
+enables `VK_LAYER_KHRONOS_validation`, and sets `SKIA_REQUIRE_VULKAN_DEVICE=1`.
+This makes loader, synchronization, staging upload/readback, and portable-command
+pixel tests mandatory on every change without relying on a hosted runner having
+a physical GPU.  Vendor hardware remains a separate main/nightly runner concern.
+
 ### Phase 1 — owned scenes and pixel oracle (initial implementation complete)
 
 `gpu/tests/support/render_cases.rs` now contains four repository-authored scenes that
@@ -119,6 +125,7 @@ CI lanes:
 | Lane | Trigger | Required work |
 | --- | --- | --- |
 | Linux portable | every change | fmt, Clippy, workspace tests, Unicode download/conformance |
+| Linux Vulkan Lavapipe | every change | forced software ICD, validation layer, Vulkan command/readback tests |
 | macOS device-optional | every change | workspace/Metal tests; absence is visible but allowed |
 | macOS Metal-required | protected runner, main/nightly and GPU changes | `SKIA_REQUIRE_METAL_DEVICE=1`, selected scene comparison, artifact upload on mismatch |
 | fuzz/property | nightly and changed boundary | bounded fuzz smoke plus deterministic property seeds |

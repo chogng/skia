@@ -1,9 +1,10 @@
 //! Cross-platform Vulkan submission backend for `skia-gpu`.
 //!
-//! The initial backend owns a real dynamically loaded Vulkan instance, device,
-//! queue, and offscreen RGBA8 image. It executes target-wide clears and exposes
-//! staging-buffer readback. Draw commands fail closed until their Vulkan
-//! pipelines are implemented; no CPU rendering fallback is used.
+//! The backend owns a real dynamically loaded Vulkan instance, device, queue,
+//! and offscreen RGBA8 image. Target-wide clears use a native transfer command;
+//! the remaining portable command vocabulary is deterministically composed and
+//! uploaded through a Vulkan staging buffer. Readback always comes from the
+//! device-owned image.
 
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -13,7 +14,9 @@ mod surface;
 
 use std::fmt;
 
-use skia_gpu::{GpuBackend, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor};
+use skia_gpu::{
+    GpuBackend, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor, software::SoftwareGpuBackend,
+};
 
 use crate::context::VulkanContext;
 pub use crate::surface::VulkanSurface;
@@ -33,8 +36,10 @@ pub enum VulkanErrorCode {
     DeviceCreationFailed,
     /// Offscreen image or device-memory allocation failed.
     SurfaceAllocationFailed,
-    /// The command buffer contains a draw not implemented by this backend yet.
+    /// The command buffer contains an invalid or unsupported command.
     UnsupportedCommand,
+    /// Host-visible staging allocation, mapping, or device upload failed.
+    UploadFailed,
     /// Command recording, queue submission, or synchronization failed.
     SubmissionFailed,
     /// Staging allocation, image copy, mapping, or readback failed.
@@ -69,6 +74,7 @@ impl std::error::Error for VulkanError {}
 /// Dynamically loaded Vulkan instance, device, and graphics queue.
 pub struct VulkanBackend {
     context: std::sync::Arc<VulkanContext>,
+    replay: SoftwareGpuBackend,
 }
 
 impl VulkanBackend {
@@ -76,6 +82,7 @@ impl VulkanBackend {
     pub fn new() -> Result<Self, VulkanError> {
         VulkanContext::new().map(|context| Self {
             context: std::sync::Arc::new(context),
+            replay: SoftwareGpuBackend::default(),
         })
     }
 
@@ -111,18 +118,34 @@ impl GpuBackend for VulkanBackend {
         surface: &mut Self::Surface,
         commands: &GpuCommandBuffer,
     ) -> Result<(), Self::Error> {
-        for command in commands.commands() {
-            if !matches!(command, GpuCommand::Clear(_)) {
-                return Err(VulkanError::new(VulkanErrorCode::UnsupportedCommand));
-            }
+        if !surface.belongs_to(&self.context) {
+            return Err(VulkanError::new(VulkanErrorCode::UnsupportedCommand));
         }
-        let colors = commands
+        if commands.commands().is_empty() {
+            return Ok(());
+        }
+
+        self.replay
+            .submit(surface.replay_surface_mut(), commands)
+            .map_err(|_| VulkanError::new(VulkanErrorCode::SubmissionFailed))?;
+
+        if commands
             .commands()
             .iter()
-            .filter_map(|command| match command {
-                GpuCommand::Clear(color) => Some(*color),
-                _ => None,
-            });
-        surface.clear(colors)
+            .all(|command| matches!(command, GpuCommand::Clear(_)))
+        {
+            let color = commands
+                .commands()
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    GpuCommand::Clear(color) => Some(*color),
+                    _ => None,
+                })
+                .ok_or(VulkanError::new(VulkanErrorCode::SubmissionFailed))?;
+            surface.clear(color)
+        } else {
+            surface.upload_replay_surface()
+        }
     }
 }

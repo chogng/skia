@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use ash::vk;
 use skia_core::Color;
+use skia_cpu::{Surface, SurfaceLimits};
 use skia_gpu::GpuSurfaceDescriptor;
 
 use crate::{VulkanError, VulkanErrorCode, context::VulkanContext};
@@ -12,6 +13,7 @@ pub struct VulkanSurface {
     image: vk::Image,
     memory: vk::DeviceMemory,
     descriptor: GpuSurfaceDescriptor,
+    replay_surface: Surface,
     initialized: bool,
 }
 
@@ -89,11 +91,27 @@ impl VulkanSurface {
             }
             return Err(VulkanError::new(VulkanErrorCode::SurfaceAllocationFailed));
         }
+        let replay_surface = match Surface::new(
+            descriptor.width(),
+            descriptor.height(),
+            SurfaceLimits::default(),
+        ) {
+            Ok(surface) => surface,
+            Err(_) => {
+                // SAFETY: neither handle is in use and both belong to the device.
+                unsafe {
+                    context.device().destroy_image(image, None);
+                    context.device().free_memory(memory, None);
+                }
+                return Err(VulkanError::new(VulkanErrorCode::SurfaceAllocationFailed));
+            }
+        };
         Ok(Self {
             context,
             image,
             memory,
             descriptor,
+            replay_surface,
             initialized: false,
         })
     }
@@ -188,10 +206,15 @@ impl VulkanSurface {
         output
     }
 
-    pub(crate) fn clear(&mut self, colors: impl Iterator<Item = Color>) -> Result<(), VulkanError> {
-        let Some(color) = colors.last() else {
-            return Ok(());
-        };
+    pub(crate) fn belongs_to(&self, context: &Arc<VulkanContext>) -> bool {
+        Arc::ptr_eq(&self.context, context)
+    }
+
+    pub(crate) fn replay_surface_mut(&mut self) -> &mut Surface {
+        &mut self.replay_surface
+    }
+
+    pub(crate) fn clear(&mut self, color: Color) -> Result<(), VulkanError> {
         let old_layout = if self.initialized {
             vk::ImageLayout::TRANSFER_DST_OPTIMAL
         } else {
@@ -250,6 +273,162 @@ impl VulkanSurface {
             VulkanErrorCode::SubmissionFailed,
         )?;
         self.initialized = true;
+        Ok(())
+    }
+
+    pub(crate) fn upload_replay_surface(&mut self) -> Result<(), VulkanError> {
+        let pixels = self.replay_surface.pixels();
+        let (buffer, memory, coherent) = self.create_upload_buffer(pixels.len())?;
+        let upload_result = self
+            .write_upload_memory(memory, pixels, coherent)
+            .and_then(|()| {
+                let old_layout = if self.initialized {
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL
+                } else {
+                    vk::ImageLayout::UNDEFINED
+                };
+                let old_access = if self.initialized {
+                    vk::AccessFlags::TRANSFER_WRITE
+                } else {
+                    vk::AccessFlags::empty()
+                };
+                let old_stage = if self.initialized {
+                    vk::PipelineStageFlags::TRANSFER
+                } else {
+                    vk::PipelineStageFlags::TOP_OF_PIPE
+                };
+                self.context.submit_commands(
+                    |command_buffer| {
+                        if !self.initialized {
+                            transition_image(
+                                self.context.device(),
+                                command_buffer,
+                                self.image,
+                                ImageTransition {
+                                    old_layout,
+                                    new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                    src_access: old_access,
+                                    dst_access: vk::AccessFlags::TRANSFER_WRITE,
+                                    src_stage: old_stage,
+                                    dst_stage: vk::PipelineStageFlags::TRANSFER,
+                                },
+                            );
+                        }
+                        let region = [vk::BufferImageCopy::default()
+                            .image_subresource(color_subresource())
+                            .image_extent(vk::Extent3D {
+                                width: self.descriptor.width(),
+                                height: self.descriptor.height(),
+                                depth: 1,
+                            })];
+                        // SAFETY: buffer contains a tightly packed RGBA8 image and
+                        // the destination has matching transfer usage and extent.
+                        unsafe {
+                            self.context.device().cmd_copy_buffer_to_image(
+                                command_buffer,
+                                buffer,
+                                self.image,
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                &region,
+                            )
+                        };
+                        Ok(())
+                    },
+                    VulkanErrorCode::UploadFailed,
+                )
+            });
+        // SAFETY: submit_commands waits for completion; on an earlier mapping
+        // failure the buffer was never submitted.
+        unsafe {
+            self.context.device().destroy_buffer(buffer, None);
+            self.context.device().free_memory(memory, None);
+        }
+        upload_result?;
+        self.initialized = true;
+        Ok(())
+    }
+
+    fn create_upload_buffer(
+        &self,
+        length: usize,
+    ) -> Result<(vk::Buffer, vk::DeviceMemory, bool), VulkanError> {
+        let size =
+            u64::try_from(length).map_err(|_| VulkanError::new(VulkanErrorCode::UploadFailed))?;
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        // SAFETY: buffer_info is complete and device is valid.
+        let buffer = unsafe { self.context.device().create_buffer(&buffer_info, None) }
+            .map_err(|_| VulkanError::new(VulkanErrorCode::UploadFailed))?;
+        // SAFETY: buffer belongs to context device.
+        let requirements = unsafe { self.context.device().get_buffer_memory_requirements(buffer) };
+        let Some((memory_type_index, flags)) = self.context.memory_type(
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+            vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_CACHED,
+        ) else {
+            // SAFETY: buffer is unbound and unused.
+            unsafe { self.context.device().destroy_buffer(buffer, None) };
+            return Err(VulkanError::new(VulkanErrorCode::UploadFailed));
+        };
+        let allocation = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type_index);
+        // SAFETY: allocation uses requirements queried from this buffer.
+        let memory = match unsafe { self.context.device().allocate_memory(&allocation, None) } {
+            Ok(memory) => memory,
+            Err(_) => {
+                // SAFETY: buffer is unused and belongs to this device.
+                unsafe { self.context.device().destroy_buffer(buffer, None) };
+                return Err(VulkanError::new(VulkanErrorCode::UploadFailed));
+            }
+        };
+        // SAFETY: memory satisfies this buffer's requirements at offset zero.
+        if unsafe { self.context.device().bind_buffer_memory(buffer, memory, 0) }.is_err() {
+            // SAFETY: neither handle is in use.
+            unsafe {
+                self.context.device().free_memory(memory, None);
+                self.context.device().destroy_buffer(buffer, None);
+            }
+            return Err(VulkanError::new(VulkanErrorCode::UploadFailed));
+        }
+        Ok((
+            buffer,
+            memory,
+            flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT),
+        ))
+    }
+
+    fn write_upload_memory(
+        &self,
+        memory: vk::DeviceMemory,
+        pixels: &[u8],
+        coherent: bool,
+    ) -> Result<(), VulkanError> {
+        // SAFETY: memory is HOST_VISIBLE and was allocated for at least pixels.len().
+        let mapped = unsafe {
+            self.context
+                .device()
+                .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+        }
+        .map_err(|_| VulkanError::new(VulkanErrorCode::UploadFailed))?;
+        // SAFETY: mapped covers the allocation, which is at least pixels.len().
+        unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), mapped.cast(), pixels.len()) };
+        if !coherent {
+            let range = [vk::MappedMemoryRange::default()
+                .memory(memory)
+                .offset(0)
+                .size(vk::WHOLE_SIZE)];
+            // SAFETY: range refers to the currently mapped allocation.
+            if unsafe { self.context.device().flush_mapped_memory_ranges(&range) }.is_err() {
+                // SAFETY: mapped is currently live.
+                unsafe { self.context.device().unmap_memory(memory) };
+                return Err(VulkanError::new(VulkanErrorCode::UploadFailed));
+            }
+        }
+        // SAFETY: mapped is currently live and all host writes are complete.
+        unsafe { self.context.device().unmap_memory(memory) };
         Ok(())
     }
 

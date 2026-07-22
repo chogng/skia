@@ -707,7 +707,9 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "skia-core",
+ "skia-cpu",
  "skia-gpu",
+ "skia-image",
 ]
 
 [[package]]
