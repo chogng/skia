@@ -28,14 +28,20 @@ flowchart LR
 
 ## Dependency rule
 
-- `skia-rs/` (`skia`) is the only public graphics API for consumers.
+- `skia-rs/` (`skia`) is the stable portable drawing facade for ordinary rendering code.
   `skia-rs/error`, `skia-rs/geometry`, `skia-rs/path`, `skia-rs/tessellation`, `skia-rs/text`,
-  `skia-rs/core`, `skia-rs/image`, `skia-rs/codec`, and executor crates are implementation crates;
-  consumers must not depend on them directly. Skia crates may depend on each
-  other, but never on a caller-specific document crate or semantic type.
+  `skia-rs/core`, `skia-rs/image`, and `skia-rs/codec` are implementation crates; ordinary
+  consumers must not depend on them directly. Skia crates may depend on each other, but never
+  on a caller-specific document crate or semantic type.
+- The application composition root may additionally depend on `skia-rs/gpu`,
+  `skia-rs/gpu/text`, and one selected platform executor such as `skia-rs/gpu/metal` or
+  `skia-rs/gpu/vulkan`. These crates form the public renderer-integration SPI: they own device
+  setup, resource lifetime, backend selection, and submission, but are not the drawing API used
+  by ordinary domain or rendering code.
 - The facade exports an explicit, stable set of canvas, geometry, paint, path,
-  image, text-outline, and error types. It does not expose display-list
-  resource IDs, command representations, or backend command encoders.
+  image, text-outline, and error types, together with the default CPU `Canvas` and `Surface`.
+  It does not expose display-list resource IDs, GPU command representations, platform devices,
+  or backend command encoders.
 - `skia-rs/error` contains shared failure types; `skia-rs/geometry` contains fixed
   point coordinates and affine transforms; `skia-rs/path` contains immutable
   paths and path construction. Their dependencies flow only downward.
@@ -66,11 +72,10 @@ flowchart LR
   encodes those resources as general-purpose image formats. It does not depend
   on rendering backends or caller-specific types, so both decode and encode
   remain in `skia-rs/codec`, not in the resource crate.
-- Every consumer calls Skia only through its public API. Each consumer owns its
-  source-domain adapter and reports its rendering
-  intent, target description, and source data to the Skia upper integration
-  layer. That layer owns resource lifetime and executor selection before
-  calling lower Skia components.
+- Ordinary rendering code calls Skia only through the `skia` facade. Each consumer owns its
+  source-domain adapter and reports rendering intent, target description, and source data to its
+  composition root. That integration layer may use the renderer SPI directly and owns resource
+  lifetime and executor selection before calling lower Skia components.
 - A Skia public type, method, error, or command must not mention caller-specific
   objects, operators, page state, or policy. Perform such translation in the
   caller's adapter.
