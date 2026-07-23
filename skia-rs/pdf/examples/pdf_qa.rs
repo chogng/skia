@@ -7,7 +7,8 @@ use skia_core::{
 };
 use skia_image::Image;
 use skia_pdf::{
-    PageSize, PageSpec, PdfDocument, PdfMetadata, PdfOptions, RasterFallback, UnsupportedBehavior,
+    PageSize, PageSpec, PdfDocument, PdfMetadata, PdfOptions, PdfStructureElement,
+    PdfStructureOutline, PdfStructureTag, RasterFallback, UnsupportedBehavior,
 };
 
 fn scalar(value: i32) -> Scalar {
@@ -40,6 +41,7 @@ fn main() {
             dpi: 144,
             ..RasterFallback::default()
         },
+        structure_outline: PdfStructureOutline::Headings,
         ..PdfOptions::default()
     };
     let writer = File::create(output).expect("create output PDF");
@@ -106,9 +108,26 @@ fn main() {
     page.restore().expect("restore layer");
     let page = page.finish();
     let first_size = PageSize::new(scalar(240), scalar(180)).expect("page size");
+    let heading = document
+        .add_structure_element(
+            PdfStructureElement::new(PdfStructureTag::Heading1)
+                .with_title("Vector transparency page".to_owned()),
+            None,
+        )
+        .expect("heading structure");
+    let figure = document
+        .add_structure_element(
+            PdfStructureElement::new(PdfStructureTag::Figure),
+            Some(heading),
+        )
+        .expect("figure structure");
     document
-        .add_page(PageSpec::new(first_size), &page)
-        .expect("native vector page");
+        .begin_page(PageSpec::new(first_size))
+        .expect("begin native vector page");
+    document
+        .add_structured_display_list(figure, &page)
+        .expect("tagged native vector content");
+    document.end_page().expect("end native vector page");
 
     let stops = [
         GradientStop::new(Scalar::ZERO, Color::rgba(245, 80, 90, 255)).expect("stop"),

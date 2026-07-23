@@ -13,8 +13,9 @@ mod pdf;
 
 pub use pdf::{
     PageSize, PageSpec, PdfColorPolicy, PdfConformance, PdfDateTime, PdfDocument, PdfEmbeddedFont,
-    PdfError, PdfErrorCode, PdfLimits, PdfLinkTarget, PdfMetadata, PdfOptions, PdfStructureTag,
-    PdfTextProvider, RasterFallback, UnsupportedBehavior,
+    PdfError, PdfErrorCode, PdfLimits, PdfLinkTarget, PdfMetadata, PdfOptions, PdfStructureElement,
+    PdfStructureElementId, PdfStructureOutline, PdfStructureTag, PdfTextProvider, RasterFallback,
+    UnsupportedBehavior,
 };
 
 #[cfg(test)]

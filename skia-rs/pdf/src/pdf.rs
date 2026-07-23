@@ -307,6 +307,64 @@ pub enum PdfStructureTag {
     TableData,
 }
 
+/// One document-global node in a tagged-PDF structure tree.
+///
+/// Create nodes with [`PdfDocument::add_structure_element`] and attach page
+/// content with [`PdfDocument::add_structured_display_list`]. A node may be a
+/// semantic container with children and no marked content of its own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PdfStructureElement {
+    tag: PdfStructureTag,
+    title: Option<String>,
+    language: Option<String>,
+}
+
+impl PdfStructureElement {
+    /// Creates an untitled structure element with the selected semantic role.
+    pub const fn new(tag: PdfStructureTag) -> Self {
+        Self {
+            tag,
+            title: None,
+            language: None,
+        }
+    }
+
+    /// Sets the optional human-readable title used by PDF viewers and, when
+    /// requested, generated document outlines.
+    pub fn with_title(mut self, title: String) -> Self {
+        self.title = Some(title);
+        self
+    }
+
+    /// Sets the optional BCP-47 language identifier for this element's
+    /// content, such as `en` or `zh-Hans`.
+    pub fn with_language(mut self, language: String) -> Self {
+        self.language = Some(language);
+        self
+    }
+
+    /// Returns the selected semantic role.
+    pub const fn tag(&self) -> PdfStructureTag {
+        self.tag
+    }
+}
+
+/// Opaque identifier for a [`PdfStructureElement`] owned by one document.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PdfStructureElementId(u32);
+
+/// Policy for document outlines derived from the tagged structure tree.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PdfStructureOutline {
+    /// Do not derive outline entries from tagged content.
+    #[default]
+    None,
+    /// Create entries for titled first- and second-level heading elements.
+    Headings,
+    /// Create entries for every titled structure element.
+    AllTitledElements,
+}
+
 /// One embedded TrueType font program selected for searchable PDF text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PdfEmbeddedFont {
@@ -352,6 +410,17 @@ pub trait PdfTextProvider {
 
     /// Returns the original non-empty Unicode source text for one glyph run.
     fn source_text(&self, run: &GlyphRun) -> Option<String>;
+
+    /// Returns the absolute UTF-8 byte offset represented by the start of
+    /// [`Self::source_text`] for `run`.
+    ///
+    /// Shaped glyph clusters are normally offsets into a larger source
+    /// paragraph. The default is suitable when the provider returns the exact
+    /// substring for the run. Override it when returning text from a larger
+    /// source buffer so the writer can create an exact `ToUnicode` map.
+    fn source_offset(&self, _run: &GlyphRun) -> u32 {
+        0
+    }
 }
 
 impl PdfStructureTag {
@@ -391,6 +460,8 @@ pub struct PdfLimits {
     pub max_bookmarks: usize,
     /// Maximum tagged display lists accepted by one page.
     pub max_structure_elements_per_page: usize,
+    /// Maximum document-global nodes in the tagged structure tree.
+    pub max_structure_elements: usize,
     /// Maximum serialized PDF bytes.
     pub max_output_bytes: u64,
 }
@@ -406,6 +477,7 @@ impl PdfLimits {
             || self.max_named_destinations == 0
             || self.max_bookmarks == 0
             || self.max_structure_elements_per_page == 0
+            || self.max_structure_elements == 0
             || self.max_output_bytes == 0
         {
             return Err(DocumentError::new(DocumentErrorCode::InvalidLimits));
@@ -425,6 +497,7 @@ impl Default for PdfLimits {
             max_named_destinations: 16_384,
             max_bookmarks: 16_384,
             max_structure_elements_per_page: 16_384,
+            max_structure_elements: 100_000,
             max_output_bytes: 512 * 1024 * 1024,
         }
     }
@@ -500,6 +573,8 @@ pub struct PdfOptions {
     pub color_policy: PdfColorPolicy,
     /// Whole-page fallback policy used when enabled.
     pub raster_fallback: RasterFallback,
+    /// Optional outline generation from titled structure-tree elements.
+    pub structure_outline: PdfStructureOutline,
 }
 
 impl Default for PdfOptions {
@@ -511,6 +586,7 @@ impl Default for PdfOptions {
             unsupported_behavior: UnsupportedBehavior::Error,
             color_policy: PdfColorPolicy::NativePdf,
             raster_fallback: RasterFallback::default(),
+            structure_outline: PdfStructureOutline::None,
         }
     }
 }
@@ -527,6 +603,7 @@ struct ActivePage {
 #[derive(Clone)]
 struct ActiveList {
     list: DisplayList,
+    structure_element: Option<PdfStructureElementId>,
     structure_tag: Option<PdfStructureTag>,
 }
 
@@ -562,10 +639,30 @@ struct PdfBookmark {
     destination: String,
 }
 
+#[derive(Clone)]
+struct PdfOutlineEntry {
+    title: String,
+    destination: PdfOutlineDestination,
+    children: Vec<usize>,
+}
+
+#[derive(Clone)]
+enum PdfOutlineDestination {
+    Named(String),
+    Page(usize),
+}
+
 #[derive(Clone, Copy)]
 struct PdfStructureEntry {
-    tag: PdfStructureTag,
+    element: PdfStructureElementId,
     mcid: usize,
+}
+
+#[derive(Clone)]
+struct PdfStructureNode {
+    element: PdfStructureElement,
+    parent: Option<PdfStructureElementId>,
+    children: Vec<PdfStructureElementId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -604,6 +701,9 @@ struct PdfForm {
 struct PdfFont {
     font: FontId,
     program: Vec<u8>,
+    glyphs: BTreeSet<u16>,
+    unicode: BTreeMap<u16, String>,
+    ambiguous_unicode: BTreeSet<u16>,
 }
 
 /// Stateful PDF 1.7 document writer over an arbitrary `std::io::Write`.
@@ -618,6 +718,7 @@ pub struct PdfDocument<W: Write> {
     active: Option<ActivePage>,
     resources: Resources,
     bookmarks: Vec<PdfBookmark>,
+    structure: Vec<PdfStructureNode>,
 }
 
 impl<W: Write> PdfDocument<W> {
@@ -637,6 +738,7 @@ impl<W: Write> PdfDocument<W> {
             active: None,
             resources: Resources::default(),
             bookmarks: Vec::new(),
+            structure: Vec::new(),
         })
     }
 
@@ -674,6 +776,7 @@ impl<W: Write> PdfDocument<W> {
         active.command_count = count;
         active.lists.push(ActiveList {
             list: list.clone(),
+            structure_element: None,
             structure_tag: None,
         });
         Ok(())
@@ -687,9 +790,89 @@ impl<W: Write> PdfDocument<W> {
         tag: PdfStructureTag,
         list: &DisplayList,
     ) -> Result<(), DocumentError> {
+        self.check_structured_display_list_capacity(list)?;
+        let element = self.add_structure_element(PdfStructureElement::new(tag), None)?;
+        self.add_structured_display_list(element, list)
+    }
+
+    /// Adds one document-global semantic node. `parent` must name an element
+    /// returned by this document; omitting it creates a root-level element.
+    ///
+    /// Create the complete hierarchy before or while adding pages, then attach
+    /// each marked display list with [`Self::add_structured_display_list`].
+    pub fn add_structure_element(
+        &mut self,
+        element: PdfStructureElement,
+        parent: Option<PdfStructureElementId>,
+    ) -> Result<PdfStructureElementId, DocumentError> {
+        if element.title.as_deref().is_some_and(str::is_empty)
+            || element.language.as_deref().is_some_and(str::is_empty)
+            || self.structure.len() >= self.options.limits.max_structure_elements
+        {
+            return Err(DocumentError::new(DocumentErrorCode::ResourceLimit));
+        }
+        if let Some(parent) = parent
+            && usize::try_from(parent.0)
+                .ok()
+                .is_none_or(|index| index >= self.structure.len())
+        {
+            return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
+        }
+        let id = PdfStructureElementId(
+            u32::try_from(self.structure.len())
+                .map_err(|_| DocumentError::new(DocumentErrorCode::ResourceLimit))?,
+        );
+        self.structure.push(PdfStructureNode {
+            element,
+            parent,
+            children: Vec::new(),
+        });
+        if let Some(parent) = parent {
+            let index = usize::try_from(parent.0)
+                .map_err(|_| DocumentError::new(DocumentErrorCode::InvalidResource))?;
+            self.structure[index].children.push(id);
+        }
+        Ok(id)
+    }
+
+    /// Appends one display list as marked content owned by an existing
+    /// structure-tree element. Tagged content is always compiled natively; it
+    /// is never silently replaced with a page bitmap.
+    pub fn add_structured_display_list(
+        &mut self,
+        element: PdfStructureElementId,
+        list: &DisplayList,
+    ) -> Result<(), DocumentError> {
+        let element_index = usize::try_from(element.0)
+            .ok()
+            .filter(|index| *index < self.structure.len())
+            .ok_or(DocumentError::new(DocumentErrorCode::InvalidResource))?;
+        let tag = self.structure[element_index].element.tag;
+        self.check_structured_display_list_capacity(list)?;
         let active = self
             .active
             .as_mut()
+            .ok_or(DocumentError::new(DocumentErrorCode::InvalidState))?;
+        let count = active
+            .command_count
+            .checked_add(list.commands().len())
+            .ok_or(DocumentError::new(DocumentErrorCode::ResourceLimit))?;
+        active.command_count = count;
+        active.lists.push(ActiveList {
+            list: list.clone(),
+            structure_element: Some(element),
+            structure_tag: Some(tag),
+        });
+        Ok(())
+    }
+
+    fn check_structured_display_list_capacity(
+        &self,
+        list: &DisplayList,
+    ) -> Result<(), DocumentError> {
+        let active = self
+            .active
+            .as_ref()
             .ok_or(DocumentError::new(DocumentErrorCode::InvalidState))?;
         let count = active
             .command_count
@@ -699,17 +882,12 @@ impl<W: Write> PdfDocument<W> {
             || active
                 .lists
                 .iter()
-                .filter(|entry| entry.structure_tag.is_some())
+                .filter(|entry| entry.structure_element.is_some())
                 .count()
                 >= self.options.limits.max_structure_elements_per_page
         {
             return Err(DocumentError::new(DocumentErrorCode::ResourceLimit));
         }
-        active.command_count = count;
-        active.lists.push(ActiveList {
-            list: list.clone(),
-            structure_tag: Some(tag),
-        });
         Ok(())
     }
 
@@ -904,6 +1082,8 @@ impl<W: Write> PdfDocument<W> {
             self.options.conformance,
             self.options.limits,
             &self.bookmarks,
+            &self.structure,
+            self.options.structure_outline,
         )
     }
 
@@ -1005,13 +1185,13 @@ fn compile_native_page(
     for (list_index, entry) in active.lists.iter().enumerate() {
         let list = &entry.list;
         push_text(&mut content, "q\n");
-        if let Some(tag) = entry.structure_tag {
+        if let (Some(element), Some(tag)) = (entry.structure_element, entry.structure_tag) {
             let mcid = structure.len();
             push_text(
                 &mut content,
                 &format!("/{} << /MCID {mcid} >> BDC\n", tag.pdf_name()),
             );
-            structure.push(PdfStructureEntry { tag, mcid });
+            structure.push(PdfStructureEntry { element, mcid });
         }
         compile_list(
             list,
@@ -1028,7 +1208,7 @@ fn compile_native_page(
             &mut used_fonts,
             limits,
         )?;
-        if entry.structure_tag.is_some() {
+        if entry.structure_element.is_some() {
             push_text(&mut content, "EMC\n");
         }
         push_text(&mut content, "Q\n");
@@ -1634,7 +1814,16 @@ fn emit_embedded_glyph_run(
     {
         return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
     }
-    let font = intern_font(resources, embedded, limits)?;
+    let glyph_ids = run
+        .glyphs()
+        .iter()
+        .map(|glyph| {
+            u16::try_from(glyph.glyph().value())
+                .map_err(|_| DocumentError::new(DocumentErrorCode::UnsupportedText))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let unicode = glyph_to_unicode_map(run, &source, text.source_offset(run));
+    let font = intern_font(resources, embedded, glyph_ids, unicode, limits)?;
     push_unique(used_fonts, font);
     emit_paint(output, paint, false, resources, used_gstates, limits)?;
     push_text(output, "q\n");
@@ -1974,6 +2163,8 @@ fn intern_form(
 fn intern_font(
     resources: &mut Resources,
     font: PdfEmbeddedFont,
+    glyphs: BTreeSet<u16>,
+    unicode: BTreeMap<u16, String>,
     limits: DocumentLimits,
 ) -> Result<usize, DocumentError> {
     if let Some(index) = resources
@@ -1984,14 +2175,427 @@ fn intern_font(
         if resources.fonts[index].program != font.program {
             return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
         }
+        merge_font_usage(&mut resources.fonts[index], glyphs, unicode);
         return Ok(index);
     }
     ensure_resource_capacity(resources, limits)?;
-    resources.fonts.push(PdfFont {
+    let mut resource = PdfFont {
         font: font.font,
         program: font.program,
-    });
+        glyphs: BTreeSet::new(),
+        unicode: BTreeMap::new(),
+        ambiguous_unicode: BTreeSet::new(),
+    };
+    merge_font_usage(&mut resource, glyphs, unicode);
+    resources.fonts.push(resource);
     Ok(resources.fonts.len() - 1)
+}
+
+fn merge_font_usage(font: &mut PdfFont, glyphs: BTreeSet<u16>, unicode: BTreeMap<u16, String>) {
+    font.glyphs.extend(glyphs);
+    for (glyph, text) in unicode {
+        if font.ambiguous_unicode.contains(&glyph) {
+            continue;
+        }
+        match font.unicode.get(&glyph) {
+            None => {
+                font.unicode.insert(glyph, text);
+            }
+            Some(existing) if *existing == text => {}
+            Some(_) => {
+                font.unicode.remove(&glyph);
+                font.ambiguous_unicode.insert(glyph);
+            }
+        }
+    }
+}
+
+fn glyph_to_unicode_map(run: &GlyphRun, source: &str, source_offset: u32) -> BTreeMap<u16, String> {
+    let source_len = match u32::try_from(source.len()) {
+        Ok(length) => length,
+        Err(_) => return BTreeMap::new(),
+    };
+    let Some(source_end) = source_offset.checked_add(source_len) else {
+        return BTreeMap::new();
+    };
+    let mut clusters = run
+        .glyphs()
+        .iter()
+        .map(|glyph| glyph.cluster())
+        .collect::<Vec<_>>();
+    clusters.sort_unstable();
+    clusters.dedup();
+    if clusters.is_empty()
+        || clusters.iter().any(|cluster| {
+            *cluster < source_offset
+                || *cluster >= source_end
+                || !source.is_char_boundary(
+                    usize::try_from(*cluster - source_offset).unwrap_or(usize::MAX),
+                )
+        })
+    {
+        return BTreeMap::new();
+    }
+    let mut glyphs_per_cluster = BTreeMap::<u32, usize>::new();
+    for glyph in run.glyphs() {
+        *glyphs_per_cluster.entry(glyph.cluster()).or_default() += 1;
+    }
+    let mut mappings = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for glyph in run.glyphs() {
+        if glyphs_per_cluster[&glyph.cluster()] != 1 {
+            continue;
+        }
+        let position = clusters
+            .binary_search(&glyph.cluster())
+            .expect("glyph cluster collected from run");
+        let start = usize::try_from(glyph.cluster() - source_offset).expect("validated cluster");
+        let end = usize::try_from(
+            clusters.get(position + 1).copied().unwrap_or(source_end) - source_offset,
+        )
+        .expect("validated cluster");
+        if start >= end || end > source.len() || !source.is_char_boundary(end) {
+            return BTreeMap::new();
+        }
+        let Ok(glyph_id) = u16::try_from(glyph.glyph().value()) else {
+            return BTreeMap::new();
+        };
+        let text = source[start..end].to_owned();
+        if ambiguous.contains(&glyph_id) {
+            continue;
+        }
+        match mappings.get(&glyph_id) {
+            None => {
+                mappings.insert(glyph_id, text);
+            }
+            Some(existing) if *existing == text => {}
+            Some(_) => {
+                mappings.remove(&glyph_id);
+                ambiguous.insert(glyph_id);
+            }
+        }
+    }
+    mappings
+}
+
+fn to_unicode_cmap(mappings: &BTreeMap<u16, String>) -> String {
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    for entries in mappings.iter().collect::<Vec<_>>().chunks(100) {
+        cmap.push_str(&format!("{} beginbfchar\n", entries.len()));
+        for (glyph, text) in entries {
+            cmap.push_str(&format!("<{glyph:04X}> <{}>\n", utf16be_hex(text)));
+        }
+        cmap.push_str("endbfchar\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    cmap
+}
+
+fn utf16be_hex(value: &str) -> String {
+    let mut hex = String::with_capacity(value.len() * 4);
+    for unit in value.encode_utf16() {
+        hex.push_str(&format!("{unit:04X}"));
+    }
+    hex
+}
+
+struct SfntTable<'a> {
+    tag: [u8; 4],
+    data: &'a [u8],
+}
+
+pub(crate) fn subset_truetype_font(
+    program: &[u8],
+    requested_glyphs: &BTreeSet<u16>,
+) -> Result<Option<Vec<u8>>, DocumentError> {
+    if !matches!(program.get(..4), Some(b"\0\x01\0\0" | b"true" | b"typ1")) {
+        return Ok(None);
+    }
+    let Some(tables) = sfnt_tables(program) else {
+        return Ok(None);
+    };
+    let Some(head) = sfnt_table(&tables, *b"head") else {
+        return Ok(None);
+    };
+    let Some(maxp) = sfnt_table(&tables, *b"maxp") else {
+        return Ok(None);
+    };
+    let Some(loca) = sfnt_table(&tables, *b"loca") else {
+        return Ok(None);
+    };
+    let Some(glyf) = sfnt_table(&tables, *b"glyf") else {
+        return Ok(None);
+    };
+    let Some(num_glyphs) = sfnt_u16(maxp, 4).map(usize::from) else {
+        return Ok(None);
+    };
+    let Some(index_to_loca_format) = sfnt_i16(head, 50) else {
+        return Ok(None);
+    };
+    if index_to_loca_format != 0 && index_to_loca_format != 1 {
+        return Ok(None);
+    }
+    let Some(offsets) = sfnt_loca_offsets(loca, num_glyphs, index_to_loca_format) else {
+        return Ok(None);
+    };
+    if offsets.last().copied().is_none_or(|offset| {
+        usize::try_from(offset)
+            .ok()
+            .is_none_or(|offset| offset > glyf.len())
+    }) {
+        return Ok(None);
+    }
+    let mut glyphs = BTreeSet::from([0_u16]);
+    for glyph in requested_glyphs {
+        if usize::from(*glyph) >= num_glyphs {
+            return Err(DocumentError::new(DocumentErrorCode::UnsupportedText));
+        }
+        glyphs.insert(*glyph);
+    }
+    let mut pending = glyphs.iter().copied().collect::<Vec<_>>();
+    while let Some(glyph) = pending.pop() {
+        let Some(data) = sfnt_glyph_data(glyf, &offsets, usize::from(glyph)) else {
+            return Ok(None);
+        };
+        let Some(components) = sfnt_composite_components(data) else {
+            return Ok(None);
+        };
+        for component in components {
+            if usize::from(component) >= num_glyphs {
+                return Ok(None);
+            }
+            if glyphs.insert(component) {
+                pending.push(component);
+            }
+        }
+    }
+    let mut subset_glyf = Vec::new();
+    let mut subset_loca = Vec::with_capacity((num_glyphs + 1) * 4);
+    for glyph in 0..num_glyphs {
+        let offset = u32::try_from(subset_glyf.len()).ok();
+        let Some(offset) = offset else {
+            return Ok(None);
+        };
+        subset_loca.extend_from_slice(&offset.to_be_bytes());
+        if glyphs.contains(&u16::try_from(glyph).expect("glyph count bounded by u16")) {
+            let Some(data) = sfnt_glyph_data(glyf, &offsets, glyph) else {
+                return Ok(None);
+            };
+            subset_glyf.extend_from_slice(data);
+            if !subset_glyf.len().is_multiple_of(2) {
+                subset_glyf.push(0);
+            }
+        }
+    }
+    let Some(final_offset) = u32::try_from(subset_glyf.len()).ok() else {
+        return Ok(None);
+    };
+    subset_loca.extend_from_slice(&final_offset.to_be_bytes());
+    let mut output_tables = Vec::with_capacity(tables.len());
+    for table in tables {
+        let mut data = if table.tag == *b"glyf" {
+            subset_glyf.clone()
+        } else if table.tag == *b"loca" {
+            subset_loca.clone()
+        } else {
+            table.data.to_vec()
+        };
+        if table.tag == *b"head" {
+            if data.len() < 54 {
+                return Ok(None);
+            }
+            data[8..12].fill(0);
+            data[50..52].copy_from_slice(&1_i16.to_be_bytes());
+        }
+        output_tables.push((table.tag, data));
+    }
+    Ok(rebuild_sfnt(
+        program[..4].try_into().expect("validated font header"),
+        output_tables,
+    ))
+}
+
+fn sfnt_tables(program: &[u8]) -> Option<Vec<SfntTable<'_>>> {
+    let count = usize::from(sfnt_u16(program, 4)?);
+    let directory_end = 12_usize.checked_add(count.checked_mul(16)?)?;
+    if directory_end > program.len() {
+        return None;
+    }
+    let mut tables = Vec::with_capacity(count);
+    for index in 0..count {
+        let offset = 12 + index * 16;
+        let tag = program.get(offset..offset + 4)?.try_into().ok()?;
+        let table_offset = usize::try_from(sfnt_u32(program, offset + 8)?).ok()?;
+        let length = usize::try_from(sfnt_u32(program, offset + 12)?).ok()?;
+        let end = table_offset.checked_add(length)?;
+        tables.push(SfntTable {
+            tag,
+            data: program.get(table_offset..end)?,
+        });
+    }
+    Some(tables)
+}
+
+fn sfnt_table<'a>(tables: &'a [SfntTable<'a>], tag: [u8; 4]) -> Option<&'a [u8]> {
+    tables
+        .iter()
+        .find(|table| table.tag == tag)
+        .map(|table| table.data)
+}
+
+fn sfnt_loca_offsets(loca: &[u8], glyphs: usize, format: i16) -> Option<Vec<u32>> {
+    let count = glyphs.checked_add(1)?;
+    let stride = if format == 0 { 2 } else { 4 };
+    if loca.len() < count.checked_mul(stride)? {
+        return None;
+    }
+    let mut offsets = Vec::with_capacity(count);
+    for index in 0..count {
+        let offset = if format == 0 {
+            u32::from(sfnt_u16(loca, index * 2)?).checked_mul(2)?
+        } else {
+            sfnt_u32(loca, index * 4)?
+        };
+        if offsets.last().is_some_and(|previous| *previous > offset) {
+            return None;
+        }
+        offsets.push(offset);
+    }
+    Some(offsets)
+}
+
+fn sfnt_glyph_data<'a>(glyf: &'a [u8], offsets: &[u32], glyph: usize) -> Option<&'a [u8]> {
+    let start = usize::try_from(*offsets.get(glyph)?).ok()?;
+    let end = usize::try_from(*offsets.get(glyph + 1)?).ok()?;
+    glyf.get(start..end)
+}
+
+fn sfnt_composite_components(data: &[u8]) -> Option<Vec<u16>> {
+    if data.is_empty() {
+        return Some(Vec::new());
+    }
+    if data.len() < 10 || sfnt_i16(data, 0)? >= 0 {
+        return Some(Vec::new());
+    }
+    const ARGUMENTS_ARE_WORDS: u16 = 0x0001;
+    const MORE_COMPONENTS: u16 = 0x0020;
+    const WE_HAVE_A_SCALE: u16 = 0x0008;
+    const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
+    const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+    let mut offset = 10_usize;
+    let mut components = Vec::new();
+    loop {
+        let flags = sfnt_u16(data, offset)?;
+        let glyph = sfnt_u16(data, offset + 2)?;
+        components.push(glyph);
+        offset = offset.checked_add(4)?;
+        offset = offset.checked_add(if flags & ARGUMENTS_ARE_WORDS != 0 {
+            4
+        } else {
+            2
+        })?;
+        offset = offset.checked_add(if flags & WE_HAVE_A_SCALE != 0 {
+            2
+        } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+            4
+        } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
+            8
+        } else {
+            0
+        })?;
+        if offset > data.len() || flags & MORE_COMPONENTS == 0 {
+            break;
+        }
+    }
+    Some(components)
+}
+
+fn sfnt_u16(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(
+        data.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+fn sfnt_i16(data: &[u8], offset: usize) -> Option<i16> {
+    Some(i16::from_be_bytes(
+        data.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+fn sfnt_u32(data: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        data.get(offset..offset + 4)?.try_into().ok()?,
+    ))
+}
+
+fn rebuild_sfnt(version: [u8; 4], mut tables: Vec<([u8; 4], Vec<u8>)>) -> Option<Vec<u8>> {
+    tables.sort_unstable_by_key(|(tag, _)| *tag);
+    let count = u16::try_from(tables.len()).ok()?;
+    let mut largest_power = 1_u16;
+    let mut entry_selector = 0_u16;
+    while largest_power.checked_mul(2)? <= count {
+        largest_power *= 2;
+        entry_selector += 1;
+    }
+    let search_range = largest_power.checked_mul(16)?;
+    let range_shift = count.checked_mul(16)?.checked_sub(search_range)?;
+    let directory_length = 12_usize.checked_add(usize::from(count).checked_mul(16)?)?;
+    let mut output = vec![0; directory_length];
+    output[..4].copy_from_slice(&version);
+    output[4..6].copy_from_slice(&count.to_be_bytes());
+    output[6..8].copy_from_slice(&search_range.to_be_bytes());
+    output[8..10].copy_from_slice(&entry_selector.to_be_bytes());
+    output[10..12].copy_from_slice(&range_shift.to_be_bytes());
+    let mut head_offset = None;
+    for (index, (tag, data)) in tables.iter().enumerate() {
+        while !output.len().is_multiple_of(4) {
+            output.push(0);
+        }
+        let offset = u32::try_from(output.len()).ok()?;
+        let length = u32::try_from(data.len()).ok()?;
+        let record = 12 + index * 16;
+        output[record..record + 4].copy_from_slice(tag);
+        output[record + 4..record + 8].copy_from_slice(&sfnt_checksum(data).to_be_bytes());
+        output[record + 8..record + 12].copy_from_slice(&offset.to_be_bytes());
+        output[record + 12..record + 16].copy_from_slice(&length.to_be_bytes());
+        if *tag == *b"head" {
+            head_offset = usize::try_from(offset).ok()?.checked_add(8);
+        }
+        output.extend_from_slice(data);
+    }
+    while !output.len().is_multiple_of(4) {
+        output.push(0);
+    }
+    let adjustment_offset = head_offset?;
+    if adjustment_offset.checked_add(4)? > output.len() {
+        return None;
+    }
+    let adjustment = 0xB1B0_AFBA_u32.wrapping_sub(sfnt_checksum(&output));
+    output[adjustment_offset..adjustment_offset + 4].copy_from_slice(&adjustment.to_be_bytes());
+    Some(output)
+}
+
+fn sfnt_checksum(data: &[u8]) -> u32 {
+    data.chunks(4).fold(0_u32, |sum, chunk| {
+        let mut word = [0_u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum.wrapping_add(u32::from_be_bytes(word))
+    })
+}
+
+fn pdf_font_name(font: FontId, subset: bool) -> String {
+    if !subset {
+        return format!("SkiaFont{}", font.value());
+    }
+    let mut value = font.value();
+    let mut tag = [b'A'; 6];
+    for character in tag.iter_mut().rev() {
+        *character = b'A' + u8::try_from(value % 26).expect("base-26 digit");
+        value /= 26;
+    }
+    format!("{}+SkiaFont{}", String::from_utf8_lossy(&tag), font.value())
 }
 
 fn push_unique(values: &mut Vec<usize>, value: usize) {
@@ -2010,7 +2614,7 @@ fn compile_raster_page(
     if active
         .lists
         .iter()
-        .any(|entry| entry.structure_tag.is_some())
+        .any(|entry| entry.structure_element.is_some())
     {
         return Err(DocumentError::new(DocumentErrorCode::Unsupported));
     }
@@ -2281,6 +2885,178 @@ fn annotation_dictionary(spec: PageSpec, annotation: &LinkAnnotation) -> String 
     )
 }
 
+fn collect_outline_entries(
+    pages: &[PageData],
+    bookmarks: &[PdfBookmark],
+    structure: &[PdfStructureNode],
+    policy: PdfStructureOutline,
+) -> Vec<PdfOutlineEntry> {
+    let mut entries = bookmarks
+        .iter()
+        .map(|bookmark| PdfOutlineEntry {
+            title: bookmark.title.clone(),
+            destination: PdfOutlineDestination::Named(bookmark.destination.clone()),
+            children: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    if policy == PdfStructureOutline::None {
+        return entries;
+    }
+    for (index, node) in structure.iter().enumerate() {
+        if node.parent.is_none() {
+            append_structure_outlines(index, None, pages, structure, policy, &mut entries);
+        }
+    }
+    entries
+}
+
+fn append_structure_outlines(
+    index: usize,
+    parent: Option<usize>,
+    pages: &[PageData],
+    structure: &[PdfStructureNode],
+    policy: PdfStructureOutline,
+    entries: &mut Vec<PdfOutlineEntry>,
+) {
+    let node = &structure[index];
+    let selected = match policy {
+        PdfStructureOutline::None => false,
+        PdfStructureOutline::Headings => {
+            matches!(
+                node.element.tag,
+                PdfStructureTag::Heading1 | PdfStructureTag::Heading2
+            )
+        }
+        PdfStructureOutline::AllTitledElements => true,
+    } && node.element.title.is_some();
+    let parent = if selected {
+        let Some(page) = first_structure_page(index, pages, structure) else {
+            return;
+        };
+        let entry = entries.len();
+        entries.push(PdfOutlineEntry {
+            title: node.element.title.clone().expect("selected title"),
+            destination: PdfOutlineDestination::Page(page),
+            children: Vec::new(),
+        });
+        if let Some(parent) = parent {
+            entries[parent].children.push(entry);
+        }
+        Some(entry)
+    } else {
+        parent
+    };
+    for child in &node.children {
+        append_structure_outlines(
+            usize::try_from(child.0).expect("validated structure id"),
+            parent,
+            pages,
+            structure,
+            policy,
+            entries,
+        );
+    }
+}
+
+fn first_structure_page(
+    index: usize,
+    pages: &[PageData],
+    structure: &[PdfStructureNode],
+) -> Option<usize> {
+    let mut first = pages.iter().enumerate().find_map(|(page, data)| {
+        data.structure
+            .iter()
+            .any(|mark| usize::try_from(mark.element.0).ok() == Some(index))
+            .then_some(page)
+    });
+    for child in &structure[index].children {
+        if let Some(page) = first_structure_page(
+            usize::try_from(child.0).expect("validated structure id"),
+            pages,
+            structure,
+        ) {
+            first = Some(first.map_or(page, |current| current.min(page)));
+        }
+    }
+    first
+}
+
+fn emit_outline_objects(
+    bodies: &mut [Vec<u8>],
+    root: usize,
+    objects: &[usize],
+    entries: &[PdfOutlineEntry],
+    page_start: usize,
+) {
+    let mut parents = vec![None; entries.len()];
+    for (parent, entry) in entries.iter().enumerate() {
+        for child in &entry.children {
+            parents[*child] = Some(parent);
+        }
+    }
+    let roots = parents
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parent)| parent.is_none().then_some(index))
+        .collect::<Vec<_>>();
+    let first = roots
+        .first()
+        .map(|index| objects[*index])
+        .expect("non-empty outline");
+    let last = roots
+        .last()
+        .map(|index| objects[*index])
+        .expect("non-empty outline");
+    bodies[root] = format!(
+        "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {} >>",
+        entries.len()
+    )
+    .into_bytes();
+    for (index, entry) in entries.iter().enumerate() {
+        let siblings = parents[index].map_or(&roots, |parent| &entries[parent].children);
+        let position = siblings
+            .iter()
+            .position(|sibling| *sibling == index)
+            .expect("outline sibling");
+        let previous =
+            (position > 0).then(|| format!(" /Prev {} 0 R", objects[siblings[position - 1]]));
+        let next = (position + 1 < siblings.len())
+            .then(|| format!(" /Next {} 0 R", objects[siblings[position + 1]]));
+        let parent = parents[index].map_or(root, |parent| objects[parent]);
+        let destination = match &entry.destination {
+            PdfOutlineDestination::Named(name) => pdf_string(name),
+            PdfOutlineDestination::Page(page) => format!("[{} 0 R /Fit]", page_start + page),
+        };
+        let child_links = if entry.children.is_empty() {
+            String::new()
+        } else {
+            let first = objects[entry.children[0]];
+            let last = objects[entry.children[entry.children.len() - 1]];
+            format!(
+                " /First {first} 0 R /Last {last} 0 R /Count {}",
+                outline_descendant_count(index, entries)
+            )
+        };
+        bodies[objects[index]] = format!(
+            "<< /Title {} /Parent {parent} 0 R /Dest {destination}{}{}{} >>",
+            pdf_string(&entry.title),
+            previous.unwrap_or_default(),
+            next.unwrap_or_default(),
+            child_links,
+        )
+        .into_bytes();
+    }
+}
+
+fn outline_descendant_count(index: usize, entries: &[PdfOutlineEntry]) -> usize {
+    entries[index]
+        .children
+        .iter()
+        .map(|child| 1 + outline_descendant_count(*child, entries))
+        .sum()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn serialize_pdf<W: Write>(
     writer: W,
     pages: &[PageData],
@@ -2289,6 +3065,8 @@ fn serialize_pdf<W: Write>(
     conformance: PdfConformance,
     limits: DocumentLimits,
     bookmarks: &[PdfBookmark],
+    structure: &[PdfStructureNode],
+    structure_outline: PdfStructureOutline,
 ) -> Result<W, DocumentError> {
     let mut next_object = 4_usize;
     let conformance_objects = if conformance == PdfConformance::PdfA2b {
@@ -2319,7 +3097,7 @@ fn serialize_pdf<W: Write>(
     let font_object_count = resources
         .fonts
         .len()
-        .checked_mul(4)
+        .checked_mul(5)
         .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
     let image_start = font_start
         .checked_add(font_object_count)
@@ -2327,7 +3105,7 @@ fn serialize_pdf<W: Write>(
     let mut font_objects = Vec::with_capacity(resources.fonts.len());
     for index in 0..resources.fonts.len() {
         let type0 = font_start
-            .checked_add(index * 4)
+            .checked_add(index * 5)
             .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
         let cid = type0
             .checked_add(1)
@@ -2338,7 +3116,10 @@ fn serialize_pdf<W: Write>(
         let program = descriptor
             .checked_add(1)
             .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
-        font_objects.push((type0, cid, descriptor, program));
+        let to_unicode = program
+            .checked_add(1)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+        font_objects.push((type0, cid, descriptor, program, to_unicode));
     }
     let mut image_objects = Vec::with_capacity(resources.images.len());
     next_object = image_start;
@@ -2369,15 +3150,16 @@ fn serialize_pdf<W: Write>(
         }
         annotation_objects.push(objects);
     }
-    let outline_objects = if bookmarks.is_empty() {
+    let outline_entries = collect_outline_entries(pages, bookmarks, structure, structure_outline);
+    let outline_objects = if outline_entries.is_empty() {
         None
     } else {
         let root = next_object;
         next_object = next_object
             .checked_add(1)
             .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
-        let mut items = Vec::with_capacity(bookmarks.len());
-        for _ in bookmarks {
+        let mut items = Vec::with_capacity(outline_entries.len());
+        for _ in &outline_entries {
             items.push(next_object);
             next_object = next_object
                 .checked_add(1)
@@ -2395,16 +3177,12 @@ fn serialize_pdf<W: Write>(
         next_object = parent_tree
             .checked_add(1)
             .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
-        let mut entries = Vec::with_capacity(pages.len());
-        for page in pages {
-            let mut page_entries = Vec::with_capacity(page.structure.len());
-            for _ in &page.structure {
-                page_entries.push(next_object);
-                next_object = next_object
-                    .checked_add(1)
-                    .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
-            }
-            entries.push(page_entries);
+        let mut entries = Vec::with_capacity(structure.len());
+        for _ in structure {
+            entries.push(next_object);
+            next_object = next_object
+                .checked_add(1)
+                .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
         }
         Some((root, parent_tree, entries))
     };
@@ -2540,10 +3318,12 @@ fn serialize_pdf<W: Write>(
         bodies[form_start + index] = stream_object(&dictionary, &form.content);
     }
     for (index, font) in resources.fonts.iter().enumerate() {
-        let (type0, cid, descriptor, program) = font_objects[index];
-        let name = format!("SkiaFont{}", font.font.value());
+        let (type0, cid, descriptor, program, to_unicode) = font_objects[index];
+        let subset = subset_truetype_font(&font.program, &font.glyphs)?;
+        let program_data = subset.as_deref().unwrap_or(&font.program);
+        let name = pdf_font_name(font.font, subset.is_some());
         bodies[type0] = format!(
-            "<< /Type /Font /Subtype /Type0 /BaseFont /{name} /Encoding /Identity-H /DescendantFonts [{cid} 0 R] >>"
+            "<< /Type /Font /Subtype /Type0 /BaseFont /{name} /Encoding /Identity-H /DescendantFonts [{cid} 0 R] /ToUnicode {to_unicode} 0 R >>"
         )
         .into_bytes();
         bodies[cid] = format!(
@@ -2554,11 +3334,12 @@ fn serialize_pdf<W: Write>(
             "<< /Type /FontDescriptor /FontName /{name} /Flags 4 /FontBBox [0 -200 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 {program} 0 R >>"
         )
         .into_bytes();
-        let compressed = zlib_compress(&font.program)?;
+        let compressed = zlib_compress(program_data)?;
         bodies[program] = stream_object(
-            &format!("/Length1 {} /Filter /FlateDecode", font.program.len()),
+            &format!("/Length1 {} /Filter /FlateDecode", program_data.len()),
             &compressed,
         );
+        bodies[to_unicode] = stream_object("", to_unicode_cmap(&font.unicode).as_bytes());
     }
     for (index, resource) in resources.images.iter().enumerate() {
         let image = &resource.image;
@@ -2595,59 +3376,81 @@ fn serialize_pdf<W: Write>(
         }
     }
     if let Some((outline_root, outline_items)) = outline_objects {
-        let first = outline_items[0];
-        let last = outline_items[outline_items.len() - 1];
-        bodies[outline_root] = format!(
-            "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {} >>",
-            outline_items.len()
-        )
-        .into_bytes();
-        for (index, (bookmark, object)) in bookmarks.iter().zip(outline_items).enumerate() {
-            let previous = (index > 0).then(|| format!(" /Prev {} 0 R", object - 1));
-            let next = (index + 1 < bookmarks.len()).then(|| format!(" /Next {} 0 R", object + 1));
-            bodies[object] = format!(
-                "<< /Title {} /Parent {outline_root} 0 R /Dest {}{}{} >>",
-                pdf_string(&bookmark.title),
-                pdf_string(&bookmark.destination),
-                previous.unwrap_or_default(),
-                next.unwrap_or_default(),
-            )
-            .into_bytes();
-        }
+        emit_outline_objects(
+            &mut bodies,
+            outline_root,
+            &outline_items,
+            &outline_entries,
+            page_start,
+        );
     }
     if let Some((structure_root, parent_tree, structure_entries)) = structure_objects {
-        let children = structure_entries
+        let children = structure
             .iter()
-            .flatten()
-            .map(|object| format!("{object} 0 R"))
+            .enumerate()
+            .filter(|(_, node)| node.parent.is_none())
+            .map(|(index, _)| format!("{} 0 R", structure_entries[index]))
             .collect::<Vec<_>>()
             .join(" ");
         bodies[structure_root] =
             format!("<< /Type /StructTreeRoot /K [{children}] /ParentTree {parent_tree} 0 R >>")
                 .into_bytes();
         let mut parent_tree_numbers = String::new();
-        for (page_index, entries) in structure_entries.iter().enumerate() {
-            if entries.is_empty() {
+        for (page_index, page) in pages.iter().enumerate() {
+            if page.structure.is_empty() {
                 continue;
             }
-            let values = entries
+            let values = page
+                .structure
                 .iter()
-                .map(|object| format!("{object} 0 R"))
+                .map(|entry| {
+                    let index = usize::try_from(entry.element.0).expect("validated structure id");
+                    format!("{} 0 R", structure_entries[index])
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             parent_tree_numbers.push_str(&format!(" {page_index} [{values}]"));
         }
         bodies[parent_tree] = format!("<< /Nums [{parent_tree_numbers} ] >>").into_bytes();
-        for (page_index, (page, entries)) in pages.iter().zip(structure_entries).enumerate() {
-            for (entry, object) in page.structure.iter().zip(entries) {
-                bodies[object] = format!(
-                    "<< /Type /StructElem /S /{} /P {structure_root} 0 R /Pg {} 0 R /K {} >>",
-                    entry.tag.pdf_name(),
-                    page_start + page_index,
-                    entry.mcid,
-                )
-                .into_bytes();
+        for (index, node) in structure.iter().enumerate() {
+            let object = structure_entries[index];
+            let parent = node.parent.map_or(structure_root, |parent| {
+                structure_entries[usize::try_from(parent.0).expect("validated structure id")]
+            });
+            let mut kids = Vec::new();
+            for (page_index, page) in pages.iter().enumerate() {
+                for mark in page.structure.iter().filter(|mark| {
+                    usize::try_from(mark.element.0).expect("validated structure id") == index
+                }) {
+                    kids.push(format!(
+                        "<< /Type /MCR /Pg {} 0 R /MCID {} >>",
+                        page_start + page_index,
+                        mark.mcid
+                    ));
+                }
             }
+            kids.extend(node.children.iter().map(|child| {
+                let index = usize::try_from(child.0).expect("validated structure id");
+                format!("{} 0 R", structure_entries[index])
+            }));
+            let title = node
+                .element
+                .title
+                .as_deref()
+                .map(|value| format!(" /T {}", pdf_string(value)))
+                .unwrap_or_default();
+            let language = node
+                .element
+                .language
+                .as_deref()
+                .map(|value| format!(" /Lang {}", pdf_string(value)))
+                .unwrap_or_default();
+            bodies[object] = format!(
+                "<< /Type /StructElem /S /{} /P {parent} 0 R /K [{}]{title}{language} >>",
+                node.element.tag.pdf_name(),
+                kids.join(" "),
+            )
+            .into_bytes();
         }
     }
 
@@ -2697,7 +3500,7 @@ fn resource_dictionary(
     gstate_start: usize,
     gradient_start: usize,
     form_start: usize,
-    font_objects: &[(usize, usize, usize, usize)],
+    font_objects: &[(usize, usize, usize, usize, usize)],
     image_objects: &[(usize, Option<usize>)],
 ) -> String {
     let mut dictionary = String::from("<<");

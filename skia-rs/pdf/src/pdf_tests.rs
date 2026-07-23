@@ -1,4 +1,7 @@
-use std::io::{self, Write};
+use std::{
+    collections::BTreeSet,
+    io::{self, Write},
+};
 
 use skia_core::{
     BlendMode, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, FontFace, FontId, GlyphId,
@@ -9,6 +12,7 @@ use skia_core::{
 use skia_image::Image;
 
 use super::*;
+use crate::pdf::subset_truetype_font;
 use crate::{
     PdfErrorCode as DocumentErrorCode, PdfLimits as DocumentLimits, PdfMetadata as DocumentMetadata,
 };
@@ -449,6 +453,45 @@ fn tagged_display_lists_write_marked_content_and_structure_tree() {
 }
 
 #[test]
+fn nested_structure_tree_generates_heading_outline() {
+    let options = PdfOptions {
+        structure_outline: PdfStructureOutline::Headings,
+        ..PdfOptions::default()
+    };
+    let mut document = PdfDocument::new(Vec::new(), options).expect("document");
+    let heading = document
+        .add_structure_element(
+            PdfStructureElement::new(PdfStructureTag::Heading1)
+                .with_title("Introduction".to_owned()),
+            None,
+        )
+        .expect("heading node");
+    let paragraph = document
+        .add_structure_element(
+            PdfStructureElement::new(PdfStructureTag::Paragraph),
+            Some(heading),
+        )
+        .expect("paragraph node");
+    document
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("page");
+    document
+        .add_structured_display_list(paragraph, &vector_list())
+        .expect("marked content");
+    document.end_page().expect("end page");
+    let bytes = document.finish().expect("finish");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("/Type /StructTreeRoot /K ["));
+    assert!(text.contains("/S /H1"));
+    assert!(text.contains("/T (Introduction)"));
+    assert!(text.contains("/S /P /P "));
+    assert!(text.contains("/Type /MCR /Pg 4 0 R /MCID 0"));
+    assert!(text.contains("/Title (Introduction)"));
+    assert!(text.contains("/Dest [4 0 R /Fit]"));
+    validate_xref(&bytes);
+}
+
+#[test]
 fn save_layers_emit_native_isolated_transparency_groups() {
     let mut builder = DisplayListBuilder::new(4).expect("builder");
     builder.clear(Color::WHITE).expect("clear");
@@ -715,10 +758,22 @@ fn embedded_true_type_text_is_searchable_and_uses_actual_text() {
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("/Subtype /Type0"));
     assert!(text.contains("/FontFile2"));
+    assert!(text.contains("/ToUnicode"));
     assert!(text.contains("/ActualText (A)"));
     assert!(text.contains("/F0 12 Tf"));
     assert!(text.contains("<0001> Tj"));
+    assert!(text.contains("<0001> <0041>"));
     validate_xref(&bytes);
+}
+
+#[test]
+fn true_type_glyf_subsetter_preserves_requested_glyph_ids() {
+    let program = test_font::toy_localized_font(&['A']);
+    let subset = subset_truetype_font(&program, &BTreeSet::from([1_u16]))
+        .expect("subset result")
+        .expect("glyf subset");
+    assert!(subset.len() < program.len());
+    FontFace::from_bytes(FontId::new(91), subset).expect("valid subset font");
 }
 
 #[test]

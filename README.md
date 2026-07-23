@@ -215,7 +215,7 @@ rectangle. The current mapping policy is:
 | SaveLayer without an image filter and with a standard PDF blend mode | Native isolated transparency-group Form XObject; restore opacity/blend remain native |
 | Gradient with transparency, repeat/mirror tiling, a non-`SourceOver` blend, gradient stroke; runtime shader, color filter, filtered SaveLayer, difference clip, non-center stroke, path effect, non-PDF Porter-Duff mode, rational conic | Configurable whole-page CPU fallback, otherwise `Unsupported` |
 | ICC-tagged image | `UnsupportedColorProfile`; profiles are never silently treated as sRGB |
-| Glyph-run command | `end_page`/`add_page` return `UnsupportedText`; outline APIs turn a supplied `GlyphOutlineProvider` into native paths; embedded-text APIs write single-face TrueType CID text with `ActualText` |
+| Glyph-run command | `end_page`/`add_page` return `UnsupportedText`; outline APIs turn a supplied `GlyphOutlineProvider` into native paths; embedded-text APIs write single-face TrueType CID text with `ActualText`, `ToUnicode`, and a `glyf` subset when possible |
 
 Whole-page fallback has explicit DPI, pixel, and RGBA working-memory ceilings.
 It renders into transparent straight-alpha RGBA8 through `skia-cpu`, embeds the
@@ -228,9 +228,13 @@ search and copy, `end_page_with_embedded_text` and
 `add_page_with_embedded_text` require a `PdfTextProvider`: it supplies a
 single-face TrueType program and the exact source text for every glyph run. The
 writer embeds that program as `FontFile2`, paints CID glyph IDs, and supplies
-the source as `ActualText`; it never guesses Unicode from glyph indices. Font
-subsetting, CFF/OpenType programs, collections, vertical writing, and a
-generated `ToUnicode` map remain explicit future work.
+the source as `ActualText`; it never guesses Unicode from glyph indices. When
+cluster offsets and source text identify an unambiguous glyph-to-Unicode
+mapping, it also emits `ToUnicode`. For `glyf` TrueType fonts, the writer
+retains only used glyph data (including composite dependencies) while
+preserving original glyph IDs. CFF/OpenType programs, collections, CID
+remapping, vertical writing, and more aggressive table subsetting remain
+explicit future work.
 
 `PdfConformance::PdfA2b` adds fixed XMP identification metadata, an embedded
 standard-sRGB output intent, explicit UTC creation/modification dates, and a
@@ -239,12 +243,15 @@ the crate rejects unsupported drawing rather than silently claiming a different
 result, but external archival validation remains the caller's release check.
 `add_link` adds URI or named-destination link annotations; `add_named_destination`
 defines document-global destinations in the same top-left page coordinate space;
-`add_bookmark` exposes them as PDF outline entries. `add_tagged_display_list`
-adds one marked-content sequence and a flat, standards-defined structure-tree
-entry for a complete display list. Tagged lists intentionally fail instead of
-being silently rasterized: a bitmap cannot retain the list's declared semantic
-role. These document-level APIs deliberately stay separate from the reusable
-`DisplayList`.
+`add_bookmark` exposes them as PDF outline entries. For accessibility,
+`add_structure_element` builds a document-global nested semantic tree and
+`add_structured_display_list` attaches marked page content to any node.
+`PdfStructureOutline` can derive a viewer outline from titled heading or other
+titled structure elements. `add_tagged_display_list` remains the compatibility
+shortcut for a root-level tagged list. Tagged lists intentionally fail instead
+of being silently rasterized: a bitmap cannot retain the list's declared
+semantic role. These document-level APIs deliberately stay separate from the
+reusable `DisplayList`.
 
 Encryption and digital signatures are not current features: both need a
 reviewed cryptographic implementation plus caller-owned password/key and CMS
