@@ -1,9 +1,12 @@
-use std::{env, fs::File};
+use std::{
+    env,
+    fs::{self, File},
+};
 
 use skia_core::{
-    BlendMode, ClipOp, Color, DisplayListBuilder, FillRule, Gradient, GradientStop, Paint,
-    PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar, StrokeCap, StrokeJoin,
-    StrokeOptions, TileMode, Transform,
+    BlendMode, ClipOp, Color, DisplayListBuilder, FillRule, FontFace, FontId, Gradient,
+    GradientStop, Paint, PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar,
+    StrokeCap, StrokeJoin, StrokeOptions, TileMode, Transform,
 };
 use skia_image::Image;
 use skia_pdf::{
@@ -25,7 +28,11 @@ fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
 }
 
 fn main() {
-    let output = env::args().nth(1).expect("usage: pdf_qa <output.pdf>");
+    let mut arguments = env::args().skip(1);
+    let output = arguments
+        .next()
+        .expect("usage: pdf_qa <output.pdf> [font.ttf]");
+    let text_font = arguments.next();
     let options = PdfOptions {
         metadata: PdfMetadata {
             title: Some("skia-pdf QA".to_owned()),
@@ -168,6 +175,31 @@ fn main() {
     document
         .add_page(PageSpec::new(third_size), &native_gradient.finish())
         .expect("native gradient page");
+
+    if let Some(font_path) = text_font {
+        let face = FontFace::from_bytes(
+            FontId::new(9_001),
+            fs::read(font_path).expect("read QA font"),
+        )
+        .expect("load QA font");
+        let run = face
+            .shape("Searchable PDF text", 24 << 16)
+            .expect("shape text");
+        let offsets = vec![0; run.glyphs().len()];
+        let mut text = DisplayListBuilder::new(4).expect("text display list");
+        let run = text.add_glyph_run(run).expect("text run");
+        text.draw_positioned_glyph_run(
+            run,
+            point(24, 52),
+            offsets,
+            Paint::new(Color::rgba(20, 40, 60, 255)),
+        )
+        .expect("draw text");
+        let text_size = PageSize::new(scalar(320), scalar(96)).expect("text page size");
+        document
+            .add_page_with_embedded_text(PageSpec::new(text_size), &text.finish(), &face)
+            .expect("text page");
+    }
 
     document.finish().expect("write PDF");
 }

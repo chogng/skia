@@ -7,10 +7,10 @@ use std::{
 use flate2::{Compression, write::ZlibEncoder};
 use sha2::{Digest, Sha256};
 use skia_core::{
-    BlendMode, ClipOp, DisplayList, DrawCommand, FillRule, FontFace, FontId, GlyphId, GlyphOutline,
-    GlyphOutlineProvider, GlyphRun, Gradient, GradientGeometry, Paint, Path, PathVerb, Point, Rect,
-    Scalar, SkiaError, StrokeAlign, StrokeCap, StrokeJoin, TextError, TextUnit, TileMode,
-    Transform, glyph_outline_path,
+    BlendMode, ClipOp, DisplayList, DrawCommand, FillRule, FontCollection, FontFace, FontId,
+    FontProgramFormat, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, Gradient,
+    GradientGeometry, Paint, Path, PathVerb, Point, Rect, Scalar, SkiaError, StrokeAlign,
+    StrokeCap, StrokeJoin, TextError, TextUnit, TileMode, Transform, glyph_outline_path,
 };
 use skia_cpu::{ClipRect, Surface, SurfaceLimits};
 use skia_image::{ColorSpace, Image};
@@ -370,6 +370,7 @@ pub enum PdfStructureOutline {
 pub struct PdfEmbeddedFont {
     font: FontId,
     program: Vec<u8>,
+    subsetting_allowed: bool,
 }
 
 impl PdfEmbeddedFont {
@@ -383,15 +384,30 @@ impl PdfEmbeddedFont {
         if program.is_empty() || program.len() > MAX_PROGRAM_BYTES || !supported {
             return Err(DocumentError::new(DocumentErrorCode::UnsupportedText));
         }
-        Ok(Self { font, program })
+        Ok(Self {
+            font,
+            program,
+            subsetting_allowed: true,
+        })
     }
 
     /// Copies a single-face TrueType program from a portable [`FontFace`].
     pub fn from_font_face(face: &FontFace) -> Result<Self, DocumentError> {
-        if face.face_index() != 0 {
+        let program = face
+            .portable_program()
+            .map_err(|_| DocumentError::new(DocumentErrorCode::UnsupportedText))?;
+        if program.format() != FontProgramFormat::TrueType
+            || !program
+                .embedding_rights()
+                .permission()
+                .allows_outline_embedding()
+            || !face.variation_axes().is_empty()
+        {
             return Err(DocumentError::new(DocumentErrorCode::UnsupportedText));
         }
-        Self::new(face.id(), face.encoded_bytes().to_vec())
+        let mut embedded = Self::new(face.id(), program.bytes().to_vec())?;
+        embedded.subsetting_allowed = program.embedding_rights().subsetting_allowed();
+        Ok(embedded)
     }
 
     /// Returns the stable font identity selected by this program.
@@ -400,16 +416,21 @@ impl PdfEmbeddedFont {
     }
 }
 
-/// Supplies an embedded TrueType program and source text for PDF glyph runs.
+/// Supplies searchable text data and optional outline fallback for PDF glyph
+/// runs.
 ///
 /// The exact source text becomes an `ActualText` replacement, preserving
 /// search and copy semantics without guessing Unicode values from glyph IDs.
+/// Implementations can rely on the default source methods when runs were
+/// shaped by `skia-text`.
 pub trait PdfTextProvider {
     /// Returns the embeddable program selected by a glyph run's font ID.
     fn embedded_font(&self, font: FontId) -> Option<PdfEmbeddedFont>;
 
     /// Returns the original non-empty Unicode source text for one glyph run.
-    fn source_text(&self, run: &GlyphRun) -> Option<String>;
+    fn source_text(&self, run: &GlyphRun) -> Option<String> {
+        run.source().map(|source| source.text().to_owned())
+    }
 
     /// Returns the absolute UTF-8 byte offset represented by the start of
     /// [`Self::source_text`] for `run`.
@@ -418,8 +439,51 @@ pub trait PdfTextProvider {
     /// paragraph. The default is suitable when the provider returns the exact
     /// substring for the run. Override it when returning text from a larger
     /// source buffer so the writer can create an exact `ToUnicode` map.
-    fn source_offset(&self, _run: &GlyphRun) -> u32 {
-        0
+    fn source_offset(&self, run: &GlyphRun) -> u32 {
+        run.source().map_or(0, |source| source.offset())
+    }
+
+    /// Resolves an outline when this provider cannot supply an embeddable PDF
+    /// font. The default has no fallback outline.
+    fn glyph_outline(
+        &self,
+        _font: FontId,
+        _glyph: GlyphId,
+    ) -> Result<Option<GlyphOutline>, TextError> {
+        Ok(None)
+    }
+}
+
+impl PdfTextProvider for FontFace {
+    fn embedded_font(&self, font: FontId) -> Option<PdfEmbeddedFont> {
+        (font == self.id())
+            .then(|| PdfEmbeddedFont::from_font_face(self).ok())
+            .flatten()
+    }
+
+    fn glyph_outline(
+        &self,
+        font: FontId,
+        glyph: GlyphId,
+    ) -> Result<Option<GlyphOutline>, TextError> {
+        GlyphOutlineProvider::glyph_outline(self, font, glyph)
+    }
+}
+
+impl PdfTextProvider for FontCollection {
+    fn embedded_font(&self, font: FontId) -> Option<PdfEmbeddedFont> {
+        self.face(font)
+            .and_then(|face| PdfEmbeddedFont::from_font_face(face).ok())
+    }
+
+    fn glyph_outline(
+        &self,
+        font: FontId,
+        glyph: GlyphId,
+    ) -> Result<Option<GlyphOutline>, TextError> {
+        self.face(font).map_or(Ok(None), |face| {
+            GlyphOutlineProvider::glyph_outline(face, font, glyph)
+        })
     }
 }
 
@@ -701,6 +765,7 @@ struct PdfForm {
 struct PdfFont {
     font: FontId,
     program: Vec<u8>,
+    subsetting_allowed: bool,
     glyphs: BTreeSet<u16>,
     unicode: BTreeMap<u16, String>,
     ambiguous_unicode: BTreeSet<u16>,
@@ -983,6 +1048,10 @@ impl<W: Write> PdfDocument<W> {
             .active
             .as_ref()
             .ok_or(DocumentError::new(DocumentErrorCode::InvalidState))?;
+        let text_outlines = text.map(PdfTextOutlineProviderRef);
+        let fallback_glyphs = glyphs.or(text_outlines
+            .as_ref()
+            .map(|provider| provider as &dyn GlyphOutlineProvider));
         let mut resources = self.resources.clone();
         let native = if self.options.color_policy == PdfColorPolicy::LinearMatch
             && page_requires_linear_match_fallback(active)?
@@ -999,7 +1068,7 @@ impl<W: Write> PdfDocument<W> {
             {
                 compile_raster_page(
                     active,
-                    glyphs,
+                    fallback_glyphs,
                     &mut resources,
                     self.options.raster_fallback,
                     self.options.limits,
@@ -1096,6 +1165,18 @@ impl<W: Write> PdfDocument<W> {
 struct OutlineProviderRef<'a>(&'a dyn GlyphOutlineProvider);
 
 impl GlyphOutlineProvider for OutlineProviderRef<'_> {
+    fn glyph_outline(
+        &self,
+        font: FontId,
+        glyph: GlyphId,
+    ) -> Result<Option<GlyphOutline>, TextError> {
+        self.0.glyph_outline(font, glyph)
+    }
+}
+
+struct PdfTextOutlineProviderRef<'a>(&'a dyn PdfTextProvider);
+
+impl GlyphOutlineProvider for PdfTextOutlineProviderRef<'_> {
     fn glyph_outline(
         &self,
         font: FontId,
@@ -1799,12 +1880,6 @@ fn emit_embedded_glyph_run(
     used_fonts: &mut Vec<usize>,
     limits: DocumentLimits,
 ) -> Result<(), DocumentError> {
-    let embedded = text
-        .embedded_font(run.font())
-        .ok_or(DocumentError::new(DocumentErrorCode::UnsupportedText))?;
-    if embedded.font() != run.font() {
-        return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
-    }
     let source = text
         .source_text(run)
         .filter(|source| !source.is_empty())
@@ -1812,6 +1887,23 @@ fn emit_embedded_glyph_run(
     if let Some(offsets) = offsets_x_bits
         && offsets.len() != run.glyphs().len()
     {
+        return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
+    }
+    let Some(embedded) = text.embedded_font(run.font()) else {
+        return emit_accessible_outline_glyph_run(
+            output,
+            run,
+            origin,
+            offsets_x_bits,
+            &source,
+            text,
+            paint,
+            resources,
+            used_gstates,
+            limits,
+        );
+    };
+    if embedded.font() != run.font() {
         return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
     }
     let glyph_ids = run
@@ -1855,6 +1947,37 @@ fn emit_embedded_glyph_run(
         );
     }
     push_text(output, "ET\nEMC\nQ\n");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_accessible_outline_glyph_run(
+    output: &mut Vec<u8>,
+    run: &GlyphRun,
+    origin: Point,
+    offsets_x_bits: Option<&[i32]>,
+    source: &str,
+    text: &dyn PdfTextProvider,
+    paint: &Paint,
+    resources: &mut Resources,
+    used_gstates: &mut Vec<usize>,
+    limits: DocumentLimits,
+) -> Result<(), DocumentError> {
+    let outlines = PdfTextOutlineProviderRef(text);
+    push_text(output, "q\n");
+    emit_paint(output, paint, false, resources, used_gstates, limits)?;
+    push_text(
+        output,
+        &format!("/Span << /ActualText {} >> BDC\n", pdf_string(source)),
+    );
+    if let Some(offsets_x_bits) = offsets_x_bits {
+        emit_positioned_glyph_paths(output, run, origin, offsets_x_bits, &outlines)?;
+    } else {
+        for glyph in run.glyphs() {
+            emit_glyph_path(output, run, *glyph, &outlines)?;
+        }
+    }
+    push_text(output, "EMC\nQ\n");
     Ok(())
 }
 
@@ -1907,7 +2030,28 @@ fn emit_positioned_glyph_run(
     push_text(output, "q\n");
     emit_transform(output, Transform::translate(origin.x(), origin.y()));
     emit_paint(output, paint, false, resources, used_gstates, limits)?;
+    emit_positioned_glyph_paths(
+        output,
+        run,
+        Point::new(Scalar::ZERO, Scalar::ZERO),
+        offsets_x_bits,
+        glyphs,
+    )?;
+    push_text(output, "Q\n");
+    Ok(())
+}
+
+fn emit_positioned_glyph_paths(
+    output: &mut Vec<u8>,
+    run: &GlyphRun,
+    origin: Point,
+    offsets_x_bits: &[i32],
+    glyphs: &dyn GlyphOutlineProvider,
+) -> Result<(), DocumentError> {
     let mut applied_offset_bits = 0_i32;
+    if origin != Point::new(Scalar::ZERO, Scalar::ZERO) {
+        emit_transform(output, Transform::translate(origin.x(), origin.y()));
+    }
     for (glyph, offset_bits) in run.glyphs().iter().zip(offsets_x_bits) {
         let delta_bits = offset_bits
             .checked_sub(applied_offset_bits)
@@ -1921,7 +2065,6 @@ fn emit_positioned_glyph_run(
         }
         emit_glyph_path(output, run, *glyph, glyphs)?;
     }
-    push_text(output, "Q\n");
     Ok(())
 }
 
@@ -2172,7 +2315,9 @@ fn intern_font(
         .iter()
         .position(|candidate| candidate.font == font.font)
     {
-        if resources.fonts[index].program != font.program {
+        if resources.fonts[index].program != font.program
+            || resources.fonts[index].subsetting_allowed != font.subsetting_allowed
+        {
             return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
         }
         merge_font_usage(&mut resources.fonts[index], glyphs, unicode);
@@ -2182,6 +2327,7 @@ fn intern_font(
     let mut resource = PdfFont {
         font: font.font,
         program: font.program,
+        subsetting_allowed: font.subsetting_allowed,
         glyphs: BTreeSet::new(),
         unicode: BTreeMap::new(),
         ambiguous_unicode: BTreeSet::new(),
@@ -2237,12 +2383,15 @@ fn glyph_to_unicode_map(run: &GlyphRun, source: &str, source_offset: u32) -> BTr
         return BTreeMap::new();
     }
     let mut glyphs_per_cluster = BTreeMap::<u32, usize>::new();
+    let uses_run_source = run.source().is_some_and(|run_source| {
+        run_source.text() == source && run_source.offset() == source_offset
+    });
     for glyph in run.glyphs() {
         *glyphs_per_cluster.entry(glyph.cluster()).or_default() += 1;
     }
     let mut mappings = BTreeMap::new();
     let mut ambiguous = BTreeSet::new();
-    for glyph in run.glyphs() {
+    for (glyph_index, glyph) in run.glyphs().iter().enumerate() {
         if glyphs_per_cluster[&glyph.cluster()] != 1 {
             continue;
         }
@@ -2260,7 +2409,14 @@ fn glyph_to_unicode_map(run: &GlyphRun, source: &str, source_offset: u32) -> BTr
         let Ok(glyph_id) = u16::try_from(glyph.glyph().value()) else {
             return BTreeMap::new();
         };
-        let text = source[start..end].to_owned();
+        let text = if uses_run_source {
+            let Some(text) = run.source_text_for_glyph(glyph_index) else {
+                return BTreeMap::new();
+            };
+            text.to_owned()
+        } else {
+            source[start..end].to_owned()
+        };
         if ambiguous.contains(&glyph_id) {
             continue;
         }
@@ -3319,7 +3475,11 @@ fn serialize_pdf<W: Write>(
     }
     for (index, font) in resources.fonts.iter().enumerate() {
         let (type0, cid, descriptor, program, to_unicode) = font_objects[index];
-        let subset = subset_truetype_font(&font.program, &font.glyphs)?;
+        let subset = if font.subsetting_allowed {
+            subset_truetype_font(&font.program, &font.glyphs)?
+        } else {
+            None
+        };
         let program_data = subset.as_deref().unwrap_or(&font.program);
         let name = pdf_font_name(font.font, subset.is_some());
         bodies[type0] = format!(

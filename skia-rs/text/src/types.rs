@@ -76,6 +76,43 @@ pub struct PositionedGlyph {
     advance_y: TextUnit,
 }
 
+/// Exact UTF-8 source range that produced a shaped [`GlyphRun`].
+///
+/// Glyph cluster values are absolute byte offsets into the logical paragraph.
+/// `text` is the corresponding non-empty substring, while `offset` identifies
+/// its first byte in that paragraph. Render backends can use this information
+/// for copy/search semantics without attempting to reverse glyph IDs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlyphRunSource {
+    text: String,
+    offset: u32,
+}
+
+impl GlyphRunSource {
+    /// Creates one non-empty source substring at an absolute UTF-8 byte offset.
+    pub fn new(text: String, offset: u32) -> Result<Self, TextError> {
+        if text.is_empty()
+            || u32::try_from(text.len())
+                .ok()
+                .and_then(|length| offset.checked_add(length))
+                .is_none()
+        {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        Ok(Self { text, offset })
+    }
+
+    /// Borrows the exact non-empty UTF-8 substring.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Returns the substring's absolute UTF-8 byte offset.
+    pub const fn offset(&self) -> u32 {
+        self.offset
+    }
+}
+
 impl PositionedGlyph {
     /// Creates one positioned glyph and its pen advance.
     pub const fn new(
@@ -153,6 +190,7 @@ pub struct GlyphRun {
     units_per_em: u16,
     glyphs: Vec<PositionedGlyph>,
     ligature_carets: Vec<LigatureCaret>,
+    source: Option<GlyphRunSource>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,6 +223,23 @@ impl GlyphRun {
             units_per_em,
             glyphs,
             ligature_carets: Vec::new(),
+            source: None,
+        })
+    }
+
+    /// Creates one shaped glyph run with its exact logical UTF-8 source range.
+    pub fn new_with_source(
+        font: FontId,
+        font_size_bits: i32,
+        units_per_em: u16,
+        glyphs: Vec<PositionedGlyph>,
+        source: GlyphRunSource,
+    ) -> Result<Self, TextError> {
+        let run = Self::new(font, font_size_bits, units_per_em, glyphs)?;
+        validate_glyph_source(&run.glyphs, &source)?;
+        Ok(Self {
+            source: Some(source),
+            ..run
         })
     }
 
@@ -194,6 +249,7 @@ impl GlyphRun {
         units_per_em: u16,
         glyphs: Vec<PositionedGlyph>,
         ligature_carets: Vec<LigatureCaret>,
+        source: Option<GlyphRunSource>,
     ) -> Result<Self, TextError> {
         let run = Self::new(font, font_size_bits, units_per_em, glyphs)?;
         if ligature_carets
@@ -202,8 +258,12 @@ impl GlyphRun {
         {
             return Err(TextError::new(TextErrorCode::InvalidLayout));
         }
+        if let Some(source) = &source {
+            validate_glyph_source(&run.glyphs, source)?;
+        }
         Ok(Self {
             ligature_carets,
+            source,
             ..run
         })
     }
@@ -228,7 +288,61 @@ impl GlyphRun {
         &self.glyphs
     }
 
+    /// Returns the original UTF-8 source range when the run came from this
+    /// crate's shaper or was constructed with [`Self::new_with_source`].
+    pub fn source(&self) -> Option<&GlyphRunSource> {
+        self.source.as_ref()
+    }
+
+    /// Returns the exact logical UTF-8 cluster represented by one glyph.
+    ///
+    /// The result uses logical cluster order rather than visual glyph order,
+    /// so it remains correct for right-to-left runs. Multiple glyphs may
+    /// return the same string when shaping maps one source cluster to several
+    /// glyphs; document backends can preserve the whole run with an
+    /// accessibility replacement in that case.
+    pub fn source_text_for_glyph(&self, glyph_index: usize) -> Option<&str> {
+        let source = self.source.as_ref()?;
+        let cluster = self.glyphs.get(glyph_index)?.cluster;
+        let source_end = source
+            .offset
+            .checked_add(u32::try_from(source.text.len()).ok()?)?;
+        let end_cluster = self
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.cluster)
+            .filter(|candidate| *candidate > cluster)
+            .min()
+            .unwrap_or(source_end);
+        let start = usize::try_from(cluster.checked_sub(source.offset)?).ok()?;
+        let end = usize::try_from(end_cluster.checked_sub(source.offset)?).ok()?;
+        source.text.get(start..end)
+    }
+
     pub(crate) fn ligature_carets(&self) -> &[LigatureCaret] {
         &self.ligature_carets
     }
+}
+
+fn validate_glyph_source(
+    glyphs: &[PositionedGlyph],
+    source: &GlyphRunSource,
+) -> Result<(), TextError> {
+    let length = u32::try_from(source.text.len())
+        .map_err(|_| TextError::new(TextErrorCode::NumericOverflow))?;
+    let end = source
+        .offset
+        .checked_add(length)
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    for glyph in glyphs {
+        if glyph.cluster < source.offset || glyph.cluster >= end {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+        let relative = usize::try_from(glyph.cluster - source.offset)
+            .map_err(|_| TextError::new(TextErrorCode::NumericOverflow))?;
+        if !source.text.is_char_boundary(relative) {
+            return Err(TextError::new(TextErrorCode::InvalidLayout));
+        }
+    }
+    Ok(())
 }

@@ -48,10 +48,11 @@ pub use skia_path::{
 };
 #[cfg(feature = "text")]
 pub use skia_text::{
-    BuiltinTextBreakProvider, FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId,
-    FontLimits, FontMetrics, FontSlant, FontStyle, FontStyleMatch, FontTag, FontVariation,
-    FontVariationAxis, FontWidth, GlyphBitmap, GlyphBitmapFormat, GlyphId, GlyphOutline,
-    GlyphOutlineProvider, GlyphRun, OutlinePoint, OutlineSegment, PositionedGlyph, ShapedLine,
+    BuiltinTextBreakProvider, FontCollection, FontCollectionLimits, FontEmbeddingPermission,
+    FontEmbeddingRights, FontFace, FontFeature, FontId, FontLimits, FontMetrics, FontProgramFormat,
+    FontSlant, FontStyle, FontStyleMatch, FontTag, FontVariation, FontVariationAxis, FontWidth,
+    GlyphBitmap, GlyphBitmapFormat, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun,
+    GlyphRunSource, OutlinePoint, OutlineSegment, PortableFontProgram, PositionedGlyph, ShapedLine,
     ShapedParagraph, ShapedRun, TextAffinity, TextAlignment, TextBreakProvider, TextCaret,
     TextDecoration, TextDecorationMetrics, TextDecorationRect, TextDecorationSegment,
     TextDecorationStyle, TextDirection, TextError, TextErrorCode, TextHitResult, TextJustification,

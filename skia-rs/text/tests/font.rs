@@ -1,8 +1,9 @@
 use skia_text::{
-    FontCollection, FontCollectionLimits, FontFace, FontFeature, FontId, FontLimits, FontSlant,
-    FontStyle, FontTag, FontVariation, FontWidth, GlyphBitmapFormat, GlyphId, GlyphOutlineProvider,
-    TextAffinity, TextAlignment, TextDecoration, TextDirection, TextErrorCode, TextJustification,
-    TextLayoutOptions, TextOverflow, TextPosition, TextStyleSpan, TextWordBreak, TextWordBreakKind,
+    FontCollection, FontCollectionLimits, FontEmbeddingPermission, FontFace, FontFeature, FontId,
+    FontLimits, FontProgramFormat, FontSlant, FontStyle, FontTag, FontVariation, FontWidth,
+    GlyphBitmapFormat, GlyphId, GlyphOutlineProvider, TextAffinity, TextAlignment, TextDecoration,
+    TextDirection, TextErrorCode, TextJustification, TextLayoutOptions, TextOverflow, TextPosition,
+    TextStyleSpan, TextWordBreak, TextWordBreakKind,
 };
 
 #[path = "../../test-support/font.rs"]
@@ -42,6 +43,79 @@ fn font_face_rasterizes_hinted_alpha_glyphs_without_native_font_libraries() {
         bitmap.width() as usize * bitmap.height() as usize
     );
     assert!(bitmap.pixels().iter().any(|coverage| *coverage != 0));
+}
+
+#[test]
+fn shaping_retains_the_exact_source_range_for_document_backends() {
+    let face = FontFace::from_bytes(FontId::new(9), toy_font('A')).expect("load toy font");
+    let run = face.shape("A", 12 << 16).expect("shape text");
+    let source = run.source().expect("shaper source");
+    assert_eq!(source.text(), "A");
+    assert_eq!(source.offset(), 0);
+    assert_eq!(run.glyphs()[0].cluster(), 0);
+}
+
+#[test]
+fn portable_program_extracts_one_ttc_face_and_honors_embedding_rights() {
+    let collection = toy_font_collection(&[toy_font('A'), toy_font('B')]);
+    let face =
+        FontFace::from_bytes_with_limits(FontId::new(10), collection, 1, FontLimits::default())
+            .expect("load second collection face");
+
+    let program = face.portable_program().expect("extract standalone face");
+    assert_eq!(program.format(), FontProgramFormat::TrueType);
+    assert_eq!(
+        program.embedding_rights().permission(),
+        FontEmbeddingPermission::Installable
+    );
+    assert!(program.embedding_rights().subsetting_allowed());
+    assert_eq!(sfnt_checksum(program.bytes()), 0xB1B0_AFBA);
+    let standalone =
+        FontFace::from_bytes(FontId::new(11), program.bytes().to_vec()).expect("load program");
+    assert!(standalone.supports_character('B').expect("B coverage"));
+    assert!(!standalone.supports_character('A').expect("A coverage"));
+}
+
+#[test]
+fn portable_program_reports_os2_embedding_and_subsetting_restrictions() {
+    let mut font = toy_font_with_decorations('A');
+    set_os2_fs_type(&mut font, 0x0002 | 0x0100);
+    let face = FontFace::from_bytes(FontId::new(12), font).expect("load restricted font");
+
+    let rights = face
+        .portable_program()
+        .expect("extract program")
+        .embedding_rights();
+    assert_eq!(rights.permission(), FontEmbeddingPermission::Restricted);
+    assert!(!rights.subsetting_allowed());
+    assert!(!rights.permission().allows_outline_embedding());
+}
+
+fn set_os2_fs_type(font: &mut [u8], fs_type: u16) {
+    let table_count = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    for table_index in 0..table_count {
+        let record = 12 + table_index * 16;
+        if font[record..record + 4] == *b"OS/2" {
+            let offset = u32::from_be_bytes([
+                font[record + 8],
+                font[record + 9],
+                font[record + 10],
+                font[record + 11],
+            ]);
+            let offset = usize::try_from(offset).expect("small OS/2 offset");
+            font[offset + 8..offset + 10].copy_from_slice(&fs_type.to_be_bytes());
+            return;
+        }
+    }
+    panic!("toy decoration font contains OS/2");
+}
+
+fn sfnt_checksum(bytes: &[u8]) -> u32 {
+    bytes.chunks(4).fold(0_u32, |sum, chunk| {
+        let mut word = [0_u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum.wrapping_add(u32::from_be_bytes(word))
+    })
 }
 
 #[test]

@@ -8,8 +8,9 @@ use swash::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, LigatureCaret, OutlinePoint,
-    OutlineSegment, PositionedGlyph, TextDirection, TextError, TextErrorCode, TextUnit,
+    FontId, GlyphId, GlyphOutline, GlyphOutlineProvider, GlyphRun, GlyphRunSource, LigatureCaret,
+    OutlinePoint, OutlineSegment, PositionedGlyph, TextDirection, TextError, TextErrorCode,
+    TextUnit,
 };
 
 /// Standard OpenType width class used during family matching.
@@ -580,6 +581,87 @@ impl Default for FontLimits {
     }
 }
 
+/// Outline-program format available for document backends.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FontProgramFormat {
+    /// A `glyf` TrueType outline program.
+    TrueType,
+    /// A CFF outline program stored in an OpenType wrapper.
+    Cff,
+    /// A CFF2 variable outline program stored in an OpenType wrapper.
+    Cff2,
+}
+
+/// Permission declared by an OpenType OS/2 `fsType` field.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FontEmbeddingPermission {
+    /// The font does not restrict document embedding.
+    Installable,
+    /// The font forbids document embedding.
+    Restricted,
+    /// The font permits preview-and-print document embedding.
+    PreviewAndPrint,
+    /// The font permits editable document embedding.
+    Editable,
+    /// The font permits only bitmap embedding, not outline-program embedding.
+    BitmapOnly,
+}
+
+impl FontEmbeddingPermission {
+    /// Returns whether an outline-program document backend may embed the font.
+    pub const fn allows_outline_embedding(self) -> bool {
+        !matches!(self, Self::Restricted | Self::BitmapOnly)
+    }
+}
+
+/// Declared document-embedding rights for one face.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FontEmbeddingRights {
+    permission: FontEmbeddingPermission,
+    subsetting_allowed: bool,
+}
+
+impl FontEmbeddingRights {
+    /// Returns the face's declared embedding permission.
+    pub const fn permission(self) -> FontEmbeddingPermission {
+        self.permission
+    }
+
+    /// Returns whether the OS/2 `fsType` field permits font subsetting.
+    pub const fn subsetting_allowed(self) -> bool {
+        self.subsetting_allowed
+    }
+}
+
+/// One standalone face program reconstructed from a `FontFace`.
+///
+/// The output never contains sibling faces from a TTC/OTC. Backends must still
+/// honor [`Self::embedding_rights`] and decide whether their target format can
+/// represent [`Self::format`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortableFontProgram {
+    format: FontProgramFormat,
+    bytes: Vec<u8>,
+    embedding_rights: FontEmbeddingRights,
+}
+
+impl PortableFontProgram {
+    /// Returns the standalone face's outline-program format.
+    pub const fn format(&self) -> FontProgramFormat {
+        self.format
+    }
+
+    /// Borrows the standalone OpenType/TrueType program bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Returns the face's declared document-embedding rights.
+    pub const fn embedding_rights(&self) -> FontEmbeddingRights {
+        self.embedding_rights
+    }
+}
+
 /// Owned OpenType/TrueType face that shapes UTF-8 and resolves vector outlines.
 ///
 /// The face owns immutable font bytes, so shaped runs and display lists never
@@ -723,6 +805,61 @@ impl FontFace {
     /// bytes contain more than one face.
     pub fn encoded_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Reconstructs this face as a standalone program suitable for a document
+    /// backend. In particular, indexed TTC/OTC faces are not returned as an
+    /// entire collection. This preserves OpenType variation tables; it does
+    /// not freeze [`Self::variations`] into a static instance, so a backend
+    /// that cannot represent variable fonts must use glyph outlines or perform
+    /// its own instancing.
+    pub fn portable_program(&self) -> Result<PortableFontProgram, TextError> {
+        let face = self.parser_face()?;
+        let raw = face.raw_face();
+        let mut tables = Vec::new();
+        tables
+            .try_reserve_exact(usize::from(raw.table_records.len()))
+            .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        let mut has_glyf = false;
+        let mut has_cff = false;
+        let mut has_cff2 = false;
+        let mut os2 = None;
+        for record in raw.table_records {
+            let tag = record.tag.to_bytes();
+            let data = raw
+                .table(record.tag)
+                .ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+            if tag == *b"glyf" {
+                has_glyf = true;
+            } else if tag == *b"CFF " {
+                has_cff = true;
+            } else if tag == *b"CFF2" {
+                has_cff2 = true;
+            } else if tag == *b"OS/2" {
+                if data.len() < 10 {
+                    return Err(TextError::new(TextErrorCode::InvalidFontData));
+                }
+                os2 = Some(data);
+            }
+            let mut copied = Vec::new();
+            copied
+                .try_reserve_exact(data.len())
+                .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+            copied.extend_from_slice(data);
+            tables.push((tag, copied));
+        }
+        let format = match (has_glyf, has_cff, has_cff2) {
+            (true, false, false) => FontProgramFormat::TrueType,
+            (false, true, false) => FontProgramFormat::Cff,
+            (false, false, true) => FontProgramFormat::Cff2,
+            _ => return Err(TextError::new(TextErrorCode::InvalidFontData)),
+        };
+        let bytes = rebuild_standalone_sfnt(format, tables, self.limits.max_font_bytes)?;
+        Ok(PortableFontProgram {
+            format,
+            bytes,
+            embedding_rights: embedding_rights(os2),
+        })
     }
 
     /// Returns the face design-unit scale.
@@ -1175,6 +1312,7 @@ impl FontFace {
             self.units_per_em,
             glyphs,
             ligature_carets,
+            Some(GlyphRunSource::new(text.to_owned(), cluster_offset)?),
         )
     }
 
@@ -1190,6 +1328,138 @@ impl FontFace {
         }
         Ok(face)
     }
+}
+
+fn embedding_rights(os2: Option<&[u8]>) -> FontEmbeddingRights {
+    let fs_type = os2
+        .and_then(|table| table.get(8..10))
+        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+        .unwrap_or(0);
+    let permission = if fs_type & 0x0200 != 0 {
+        FontEmbeddingPermission::BitmapOnly
+    } else if fs_type & 0x0002 != 0 {
+        FontEmbeddingPermission::Restricted
+    } else if fs_type & 0x0004 != 0 {
+        FontEmbeddingPermission::PreviewAndPrint
+    } else if fs_type & 0x0008 != 0 {
+        FontEmbeddingPermission::Editable
+    } else {
+        FontEmbeddingPermission::Installable
+    };
+    FontEmbeddingRights {
+        permission,
+        subsetting_allowed: fs_type & 0x0100 == 0,
+    }
+}
+
+fn rebuild_standalone_sfnt(
+    format: FontProgramFormat,
+    mut tables: Vec<([u8; 4], Vec<u8>)>,
+    max_font_bytes: usize,
+) -> Result<Vec<u8>, TextError> {
+    if tables.is_empty() {
+        return Err(TextError::new(TextErrorCode::InvalidFontData));
+    }
+    tables.sort_unstable_by_key(|(tag, _)| *tag);
+    if tables.windows(2).any(|tables| tables[0].0 == tables[1].0) {
+        return Err(TextError::new(TextErrorCode::InvalidFontData));
+    }
+    let table_count =
+        u16::try_from(tables.len()).map_err(|_| TextError::new(TextErrorCode::ResourceLimit))?;
+    if table_count > 4_095 {
+        return Err(TextError::new(TextErrorCode::ResourceLimit));
+    }
+    let directory_len = 12_usize
+        .checked_add(
+            tables
+                .len()
+                .checked_mul(16)
+                .ok_or(TextError::new(TextErrorCode::NumericOverflow))?,
+        )
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    let mut total_len = directory_len;
+    let mut head_index = None;
+    for (index, (tag, data)) in tables.iter_mut().enumerate() {
+        if *tag == *b"head" {
+            if data.len() < 12 {
+                return Err(TextError::new(TextErrorCode::InvalidFontData));
+            }
+            data[8..12].fill(0);
+            head_index = Some(index);
+        }
+        total_len = total_len
+            .checked_add(align4(data.len())?)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+    }
+    if head_index.is_none() {
+        return Err(TextError::new(TextErrorCode::InvalidFontData));
+    }
+    if total_len > max_font_bytes || u32::try_from(total_len).is_err() {
+        return Err(TextError::new(TextErrorCode::ResourceLimit));
+    }
+
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(total_len)
+        .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+    let flavor = match format {
+        FontProgramFormat::TrueType => *b"\0\x01\0\0",
+        FontProgramFormat::Cff | FontProgramFormat::Cff2 => *b"OTTO",
+    };
+    bytes.extend_from_slice(&flavor);
+    bytes.extend_from_slice(&table_count.to_be_bytes());
+    let power = 1_u16 << table_count.ilog2();
+    bytes.extend_from_slice(&(power * 16).to_be_bytes());
+    let entry_selector = power.ilog2() as u16;
+    bytes.extend_from_slice(&entry_selector.to_be_bytes());
+    bytes.extend_from_slice(&((table_count - power) * 16).to_be_bytes());
+    bytes.resize(directory_len, 0);
+
+    let mut offset = directory_len;
+    let mut head_offset = None;
+    for (index, (tag, data)) in tables.iter().enumerate() {
+        let record_offset = 12 + index * 16;
+        bytes[record_offset..record_offset + 4].copy_from_slice(tag);
+        bytes[record_offset + 4..record_offset + 8]
+            .copy_from_slice(&sfnt_checksum(data).to_be_bytes());
+        bytes[record_offset + 8..record_offset + 12].copy_from_slice(
+            &u32::try_from(offset)
+                .map_err(|_| TextError::new(TextErrorCode::NumericOverflow))?
+                .to_be_bytes(),
+        );
+        bytes[record_offset + 12..record_offset + 16].copy_from_slice(
+            &u32::try_from(data.len())
+                .map_err(|_| TextError::new(TextErrorCode::NumericOverflow))?
+                .to_be_bytes(),
+        );
+        if *tag == *b"head" {
+            head_offset = Some(offset);
+        }
+        bytes.extend_from_slice(data);
+        offset = offset
+            .checked_add(align4(data.len())?)
+            .ok_or(TextError::new(TextErrorCode::NumericOverflow))?;
+        bytes.resize(offset, 0);
+    }
+    let head_offset = head_offset.ok_or(TextError::new(TextErrorCode::InvalidFontData))?;
+    let adjustment = 0xB1B0_AFBA_u32.wrapping_sub(sfnt_checksum(&bytes));
+    bytes[head_offset + 8..head_offset + 12].copy_from_slice(&adjustment.to_be_bytes());
+    Ok(bytes)
+}
+
+fn align4(length: usize) -> Result<usize, TextError> {
+    length
+        .checked_add(3)
+        .map(|length| length & !3)
+        .ok_or(TextError::new(TextErrorCode::NumericOverflow))
+}
+
+fn sfnt_checksum(bytes: &[u8]) -> u32 {
+    bytes.chunks(4).fold(0_u32, |sum, chunk| {
+        let mut word = [0_u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum.wrapping_add(u32::from_be_bytes(word))
+    })
 }
 
 fn collect_ligature_carets(

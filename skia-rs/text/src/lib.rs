@@ -26,8 +26,9 @@ pub use collection::{
 pub use decoration::{TextDecorationRect, TextDecorationStyle, text_decoration_rects};
 pub use error::{TextError, TextErrorCode};
 pub use font::{
-    FontFace, FontFeature, FontLimits, FontMetrics, FontSlant, FontStyle, FontStyleMatch, FontTag,
-    FontVariation, FontVariationAxis, FontWidth, GlyphBitmap, GlyphBitmapFormat,
+    FontEmbeddingPermission, FontEmbeddingRights, FontFace, FontFeature, FontLimits, FontMetrics,
+    FontProgramFormat, FontSlant, FontStyle, FontStyleMatch, FontTag, FontVariation,
+    FontVariationAxis, FontWidth, GlyphBitmap, GlyphBitmapFormat, PortableFontProgram,
     TextDecorationMetrics,
 };
 pub use layout::{
@@ -37,7 +38,7 @@ pub use layout::{
 };
 pub use outline::{GlyphOutline, GlyphOutlineProvider, OutlinePoint, OutlineSegment};
 pub(crate) use types::LigatureCaret;
-pub use types::{FontId, GlyphId, GlyphRun, PositionedGlyph, TextUnit};
+pub use types::{FontId, GlyphId, GlyphRun, GlyphRunSource, PositionedGlyph, TextUnit};
 
 pub(crate) fn valid_language_tag(language: &str) -> bool {
     !language.is_empty()

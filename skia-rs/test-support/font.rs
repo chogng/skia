@@ -20,6 +20,44 @@ pub(crate) fn toy_font(character: char) -> Vec<u8> {
     toy_font_for(&[character])
 }
 
+pub(crate) fn toy_font_collection(faces: &[Vec<u8>]) -> Vec<u8> {
+    assert!(!faces.is_empty());
+    let directory_len = 12 + faces.len() * 4;
+    let mut collection = vec![0; directory_len];
+    collection[..4].copy_from_slice(b"ttcf");
+    put_u32(&mut collection, 4, 0x0001_0000);
+    put_u32(
+        &mut collection,
+        8,
+        u32::try_from(faces.len()).expect("small collection"),
+    );
+    for (index, face) in faces.iter().enumerate() {
+        while !collection.len().is_multiple_of(4) {
+            collection.push(0);
+        }
+        let face_offset = collection.len();
+        let mut face = face.clone();
+        let table_count = usize::from(read_u16(&face, 4));
+        for table_index in 0..table_count {
+            let record = 12 + table_index * 16;
+            let table_offset =
+                usize::try_from(read_u32(&face, record + 8)).expect("small table offset");
+            put_u32(
+                &mut face,
+                record + 8,
+                u32::try_from(face_offset + table_offset).expect("small collection"),
+            );
+        }
+        put_u32(
+            &mut collection,
+            12 + index * 4,
+            u32::try_from(face_offset).expect("small collection"),
+        );
+        collection.extend_from_slice(&face);
+    }
+    collection
+}
+
 pub(crate) fn toy_font_with_decorations(character: char) -> Vec<u8> {
     build_font_from_tables(vec![
         (*b"cmap", cmap_table(&[character])),
@@ -524,4 +562,17 @@ fn put_i16(bytes: &mut [u8], offset: usize, value: i16) {
 
 fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
 }

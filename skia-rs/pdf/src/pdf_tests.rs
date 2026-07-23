@@ -4,10 +4,11 @@ use std::{
 };
 
 use skia_core::{
-    BlendMode, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, FontFace, FontId, GlyphId,
-    GlyphOutline, GlyphOutlineProvider, GlyphRun, Gradient, GradientStop, OutlinePoint,
-    OutlineSegment, Paint, PathBuilder, Point, PositionedGlyph, Rect, SaveLayerOptions, Scalar,
-    TextError, TextUnit, TileMode, Transform,
+    BlendMode, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, FontCollection,
+    FontCollectionLimits, FontFace, FontId, FontLimits, GlyphId, GlyphOutline,
+    GlyphOutlineProvider, GlyphRun, Gradient, GradientStop, OutlinePoint, OutlineSegment, Paint,
+    PathBuilder, Point, PositionedGlyph, Rect, SaveLayerOptions, Scalar, TextError, TextUnit,
+    TileMode, Transform,
 };
 use skia_image::Image;
 
@@ -37,21 +38,6 @@ fn size(width: i32, height: i32) -> PageSize {
 }
 
 struct SingleGlyphProvider(GlyphOutline);
-
-struct EmbeddedTextProvider {
-    font: PdfEmbeddedFont,
-    source: String,
-}
-
-impl PdfTextProvider for EmbeddedTextProvider {
-    fn embedded_font(&self, font: FontId) -> Option<PdfEmbeddedFont> {
-        (self.font.font() == font).then(|| self.font.clone())
-    }
-
-    fn source_text(&self, _run: &GlyphRun) -> Option<String> {
-        Some(self.source.clone())
-    }
-}
 
 impl GlyphOutlineProvider for SingleGlyphProvider {
     fn glyph_outline(
@@ -97,22 +83,6 @@ fn glyph_outline() -> GlyphOutline {
         ],
     )
     .expect("valid closed square")
-}
-
-fn searchable_text_run() -> GlyphRun {
-    GlyphRun::new(
-        FontId::new(23),
-        12 << 16,
-        1_000,
-        vec![PositionedGlyph::new(
-            GlyphId::new(1),
-            TextUnit::ZERO,
-            TextUnit::ZERO,
-            TextUnit::ZERO,
-            TextUnit::ZERO,
-        )],
-    )
-    .expect("valid run")
 }
 
 fn empty_list() -> DisplayList {
@@ -738,32 +708,134 @@ fn glyph_outlines_are_emitted_as_vector_paths() {
 }
 
 #[test]
-fn embedded_true_type_text_is_searchable_and_uses_actual_text() {
-    let face = FontFace::from_bytes(FontId::new(23), test_font::toy_font('A')).expect("face");
-    let provider = EmbeddedTextProvider {
-        font: PdfEmbeddedFont::from_font_face(&face).expect("embedded font"),
-        source: "A".to_owned(),
-    };
+fn font_face_directly_provides_searchable_ttc_text() {
+    let face = FontFace::from_bytes_with_limits(
+        FontId::new(23),
+        test_font::toy_font_collection(&[test_font::toy_font('A'), test_font::toy_font('B')]),
+        1,
+        FontLimits::default(),
+    )
+    .expect("second collection face");
     let mut builder = DisplayListBuilder::new(2).expect("builder");
-    let run = builder.add_glyph_run(searchable_text_run()).expect("run");
+    let run = builder
+        .add_glyph_run(face.shape("B", 12 << 16).expect("shape B"))
+        .expect("run");
     builder
         .draw_glyph_run(run, Paint::new(Color::rgba(20, 40, 60, 255)))
         .expect("draw text");
     let list = builder.finish();
     let mut document = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
     document
-        .add_page_with_embedded_text(PageSpec::new(size(100, 80)), &list, &provider)
+        .add_page_with_embedded_text(PageSpec::new(size(100, 80)), &list, &face)
         .expect("embedded text page");
     let bytes = document.finish().expect("finish");
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("/Subtype /Type0"));
     assert!(text.contains("/FontFile2"));
     assert!(text.contains("/ToUnicode"));
-    assert!(text.contains("/ActualText (A)"));
+    assert!(text.contains("/ActualText (B)"));
     assert!(text.contains("/F0 12 Tf"));
     assert!(text.contains("<0001> Tj"));
-    assert!(text.contains("<0001> <0041>"));
+    assert!(text.contains("<0001> <0042>"));
     validate_xref(&bytes);
+}
+
+#[test]
+fn font_collection_provides_searchable_fallback_glyph_runs() {
+    let first = FontFace::from_bytes(FontId::new(26), test_font::toy_font('A')).expect("A face");
+    let second = FontFace::from_bytes(FontId::new(27), test_font::toy_font('B')).expect("B face");
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    fonts.add_face(first.clone()).expect("add A face");
+    fonts.add_face(second.clone()).expect("add B face");
+    let mut builder = DisplayListBuilder::new(4).expect("builder");
+    let first_run = builder
+        .add_glyph_run(first.shape("A", 12 << 16).expect("shape A"))
+        .expect("A run");
+    let second_run = builder
+        .add_glyph_run(second.shape("B", 12 << 16).expect("shape B"))
+        .expect("B run");
+    builder
+        .draw_glyph_run(first_run, Paint::new(Color::BLACK))
+        .expect("draw A");
+    builder
+        .draw_glyph_run(second_run, Paint::new(Color::BLACK))
+        .expect("draw B");
+
+    let mut document = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    document
+        .add_page_with_embedded_text(PageSpec::new(size(100, 80)), &builder.finish(), &fonts)
+        .expect("fallback text page");
+    let text = String::from_utf8_lossy(&document.finish().expect("finish")).into_owned();
+    assert!(text.contains("/ActualText (A)"));
+    assert!(text.contains("/ActualText (B)"));
+    assert_eq!(text.matches("/FontFile2").count(), 2);
+}
+
+#[test]
+fn font_face_uses_accessible_outlines_when_embedding_is_restricted() {
+    let mut program = test_font::toy_font_with_decorations('A');
+    set_os2_fs_type(&mut program, 0x0002);
+    let face = FontFace::from_bytes(FontId::new(24), program).expect("restricted face");
+    let mut builder = DisplayListBuilder::new(2).expect("builder");
+    let run = builder
+        .add_glyph_run(face.shape("A", 12 << 16).expect("shape A"))
+        .expect("run");
+    builder
+        .draw_glyph_run(run, Paint::new(Color::BLACK))
+        .expect("draw text");
+
+    let mut document = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    document
+        .add_page_with_embedded_text(PageSpec::new(size(100, 80)), &builder.finish(), &face)
+        .expect("outline fallback page");
+    let bytes = document.finish().expect("finish");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("/ActualText (A)"));
+    assert!(!text.contains("/Subtype /Type0"));
+    assert!(!text.contains("/FontFile2"));
+    assert!(text.contains("\nf\n"));
+    validate_xref(&bytes);
+}
+
+#[test]
+fn font_face_honors_os2_no_subsetting_permission() {
+    let mut program = test_font::toy_font_with_decorations('A');
+    set_os2_fs_type(&mut program, 0x0100);
+    let face = FontFace::from_bytes(FontId::new(25), program).expect("non-subsettable face");
+    let mut builder = DisplayListBuilder::new(2).expect("builder");
+    let run = builder
+        .add_glyph_run(face.shape("A", 12 << 16).expect("shape A"))
+        .expect("run");
+    builder
+        .draw_glyph_run(run, Paint::new(Color::BLACK))
+        .expect("draw text");
+
+    let mut document = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    document
+        .add_page_with_embedded_text(PageSpec::new(size(100, 80)), &builder.finish(), &face)
+        .expect("full-program page");
+    let text = String::from_utf8_lossy(&document.finish().expect("finish")).into_owned();
+    assert!(text.contains("/BaseFont /SkiaFont25"));
+    assert!(!text.contains("+SkiaFont25"));
+}
+
+fn set_os2_fs_type(font: &mut [u8], fs_type: u16) {
+    let table_count = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    for table_index in 0..table_count {
+        let record = 12 + table_index * 16;
+        if font[record..record + 4] == *b"OS/2" {
+            let offset = u32::from_be_bytes([
+                font[record + 8],
+                font[record + 9],
+                font[record + 10],
+                font[record + 11],
+            ]);
+            let offset = usize::try_from(offset).expect("small OS/2 offset");
+            font[offset + 8..offset + 10].copy_from_slice(&fs_type.to_be_bytes());
+            return;
+        }
+    }
+    panic!("toy decoration font contains OS/2");
 }
 
 #[test]
