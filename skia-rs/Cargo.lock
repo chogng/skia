@@ -702,21 +702,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
-name = "skia"
-version = "0.1.0"
-dependencies = [
- "skia-codec",
- "skia-core",
- "skia-cpu",
- "skia-error",
- "skia-geometry",
- "skia-image",
- "skia-path",
- "skia-system-fonts",
- "skia-tessellation",
-]
-
-[[package]]
 name = "skia-codec"
 version = "0.1.0"
 dependencies = [
@@ -742,7 +727,10 @@ name = "skia-cpu"
 version = "0.1.0"
 dependencies = [
  "skia-core",
+ "skia-error",
+ "skia-geometry",
  "skia-image",
+ "skia-path",
  "skia-tessellation",
 ]
 

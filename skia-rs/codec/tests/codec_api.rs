@@ -1,8 +1,9 @@
-use skia::{
-    CodecErrorCode, ColorSpace, EncodeFormat, EncodeLimits, EncodeOptions, EncodedFormat, Image,
-    ImageAsset, ImageCodec, ImageMetadata, JpegAlphaHandling, JpegOptimization, JpegOptions,
-    JpegScan, JpegSubsampling, MetadataPolicy, PngCompression, PngFilter, PngOptions, WebPOptions,
+use skia_codec::{
+    CodecErrorCode, EncodeFormat, EncodeLimits, EncodeOptions, EncodedFormat, ImageAsset,
+    ImageCodec, ImageMetadata, JpegAlphaHandling, JpegOptimization, JpegOptions, JpegScan,
+    JpegSubsampling, MetadataPolicy, PngCompression, PngFilter, PngOptions, WebPOptions,
 };
+use skia_image::{ColorSpace, Image};
 
 fn opaque_asset() -> ImageAsset {
     let width = 17;
@@ -44,7 +45,7 @@ fn jpeg_frame(bytes: &[u8]) -> (u8, u8) {
 }
 
 #[test]
-fn public_codec_profiles_round_trip_through_the_facade() {
+fn public_codec_profiles_round_trip() {
     let asset = opaque_asset();
     let profiles = [
         (

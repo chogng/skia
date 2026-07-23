@@ -18,7 +18,7 @@ when analyzing or running Rust test targets.
 
 ```mermaid
 flowchart LR
-  adapter["Upstream adapter"] --> api["Skia public API\nskia facade"]
+  adapter["Upstream adapter"] --> api["Selected public crate APIs"]
   other["Other library adapters"] --> api
   api --> geometry["Geometry"]
   api --> path["Path"]
@@ -46,7 +46,7 @@ availability; there is no separate `portable` platform, crate, or feature.
 
 | Capability | Windows | Linux | macOS |
 | --- | --- | --- | --- |
-| Facade, CPU, text, codecs, and shared GPU contracts | Yes | Yes | Yes |
+| Portable crates, CPU, text, codecs, and shared GPU contracts | Yes | Yes | Yes |
 | Vulkan backend | Yes | Yes | No |
 | Metal backend | No | No | Yes |
 
@@ -57,20 +57,19 @@ at the application composition boundary; Bazel expresses the same boundary with
 
 ## Dependency rule
 
-- `skia-rs/` (`skia`) is the stable portable drawing facade for ordinary rendering code.
-  `skia-rs/error`, `skia-rs/geometry`, `skia-rs/path`, `skia-rs/tessellation`, `skia-rs/text`,
-  `skia-rs/core`, `skia-rs/image`, and `skia-rs/codec` are implementation crates; ordinary
-  consumers must not depend on them directly. Skia crates may depend on each other, but never
-  on a caller-specific document crate or semantic type.
+- `skia-rs/Cargo.toml` is a virtual workspace manifest, not a package. There is
+  no root facade crate: consumers depend directly on the public responsibility
+  crates they use, such as `skia-core`, `skia-cpu`, `skia-codec`, or `skia-gpu`.
+  Skia crates may depend on each other, but never on a caller-specific document
+  crate or semantic type.
 - The application composition root may additionally depend on `skia-rs/gpu`,
   `skia-rs/gpu/text`, and one selected platform executor such as `skia-rs/gpu/metal` or
   `skia-rs/gpu/vulkan`. These crates form the public renderer-integration SPI: they own device
   setup, resource lifetime, backend selection, and submission, but are not the drawing API used
   by ordinary domain or rendering code.
-- The facade exports an explicit, stable set of canvas, geometry, paint, path,
-  image, text-outline, and error types, together with the default CPU `Canvas` and `Surface`.
-  It does not expose display-list resource IDs, GPU command representations, platform devices,
-  or backend command encoders.
+- Each crate exposes only the contracts owned by its responsibility. Shared
+  display-list semantics live in `skia-core`; CPU `Canvas` and `Surface` live
+  in `skia-cpu`; GPU commands and platform devices remain in their GPU crates.
 - `skia-rs/error` contains shared failure types; `skia-rs/geometry` contains fixed
   point coordinates and affine transforms; `skia-rs/path` contains immutable
   paths and path construction. Their dependencies flow only downward.
@@ -104,10 +103,10 @@ at the application composition boundary; Bazel expresses the same boundary with
   encodes those resources as general-purpose image formats. It does not depend
   on rendering backends or caller-specific types, so both decode and encode
   remain in `skia-rs/codec`, not in the resource crate.
-- Ordinary rendering code calls Skia only through the `skia` facade. Each consumer owns its
-  source-domain adapter and reports rendering intent, target description, and source data to its
-  composition root. That integration layer may use the renderer SPI directly and owns resource
-  lifetime and executor selection before calling lower Skia components.
+- Each consumer owns its source-domain adapter and depends on only the Skia
+  responsibility crates required by that adapter. Its composition root owns
+  resource lifetime and executor selection and may use the renderer SPI
+  directly.
 - A Skia public type, method, error, or command must not mention caller-specific
   objects, operators, page state, or policy. Perform such translation in the
   caller's adapter.
@@ -273,7 +272,7 @@ All implement the extensible `PathEffect` contract and can run left-to-right
 through `compose_path_effects` or nest through `ComposePathEffect`; parallel
 results can be concatenated with `SumPathEffect`. Input transforms are never
 reapplied between stages.
-`stroke_to_path` is also available through the facade and produces a
+`skia-tessellation::stroke_to_path` produces a
 deterministic non-zero triangle-fill path.
 
 ## Path implementation layout
@@ -295,8 +294,8 @@ consumers without exposing backend command or buffer types.
 
 ## GPU implementation layout
 
-`skia-rs/gpu` is the public renderer-integration SPI, not the ordinary drawing
-facade. Its thin `src/lib.rs` router re-exports contracts grouped by responsibility:
+`skia-rs/gpu` is the public renderer-integration SPI, not a high-level drawing
+API. Its thin `src/lib.rs` router re-exports contracts grouped by responsibility:
 
 - `backend.rs` owns the backend trait and operational error boundary.
 - `surface.rs` owns portable target descriptors and formats.

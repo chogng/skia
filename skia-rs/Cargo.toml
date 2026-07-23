@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    ".",
     "codec",
     "core",
     "cpu",
@@ -55,21 +54,3 @@ swash = "0.2.10"
 unicode-bidi = "0.3.18"
 unicode-linebreak = "0.1.5"
 unicode-segmentation = "1.13.3"
-
-[package]
-name = "skia"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-publish = false
-
-[dependencies]
-skia-codec = { workspace = true }
-skia-core = { workspace = true, features = ["text"] }
-skia-cpu = { workspace = true }
-skia-error = { workspace = true }
-skia-geometry = { workspace = true }
-skia-image = { workspace = true }
-skia-path = { workspace = true }
-skia-system-fonts = { workspace = true }
-skia-tessellation = { workspace = true }

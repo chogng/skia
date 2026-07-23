@@ -1,9 +1,13 @@
-use skia::{
-    BlendMode, ClipRect, Color, ColorFilter, ColorMatrix, ConicWeight, FillRule, Gradient,
-    GradientStop, Image, ImageErrorCode, ImageFilter, Paint, PathBuilder, Point, Rect,
-    SamplingOptions, SaveLayerOptions, Scalar, SkiaErrorCode, StrokeCap, StrokeOptions, Surface,
-    SurfaceLimits, TileMode, Transform, stroke_to_path,
+use skia_core::{
+    BlendMode, Color, ColorFilter, ColorMatrix, Gradient, GradientStop, ImageFilter, Paint,
+    SamplingOptions, SaveLayerOptions, StrokeCap, StrokeOptions, TileMode,
 };
+use skia_cpu::{ClipRect, Surface, SurfaceLimits};
+use skia_error::SkiaErrorCode;
+use skia_geometry::{Point, Rect, Scalar, Transform};
+use skia_image::{Image, ImageErrorCode};
+use skia_path::{ConicWeight, FillRule, PathBuilder};
+use skia_tessellation::stroke_to_path;
 
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).unwrap()

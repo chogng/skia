@@ -1,7 +1,9 @@
-use skia::{
-    Color, FillRule, Paint, Path, PathBooleanLimits, PathBooleanOp, PathBuilder, Rect, Scalar,
-    SkiaErrorCode, Surface, SurfaceLimits, Transform, path_boolean,
-};
+use skia_core::{Color, Paint};
+use skia_cpu::{Surface, SurfaceLimits};
+use skia_error::SkiaErrorCode;
+use skia_geometry::{Rect, Scalar, Transform};
+use skia_path::{FillRule, Path, PathBuilder};
+use skia_tessellation::{PathBooleanLimits, PathBooleanOp, path_boolean};
 
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).expect("scalar")

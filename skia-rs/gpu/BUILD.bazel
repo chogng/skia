@@ -4,5 +4,10 @@ skia_rust_crate(
     name = "gpu",
     crate_features = ["software"],
     crate_name = "skia_gpu",
-    test_data_extra = ["//skia-rs:golden-files"],
+    test_data_extra = [":golden-files"],
+)
+
+filegroup(
+    name = "golden-files",
+    srcs = glob(["tests/golden/**"]),
 )

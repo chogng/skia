@@ -2,8 +2,8 @@
 //!
 //! This crate owns portable paint and display-list semantics.
 //! CPU and GPU executors depend on it; it never depends on either executor.
-//! The `skia` facade selects the API available to consumers. See
-//! `skia/README.md` for the subsystem boundary.
+//! Consumers depend on this crate directly when they need these contracts. See
+//! the workspace `README.md` for the subsystem boundary.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

@@ -1,8 +1,10 @@
-use skia::{
-    ComposePathEffect, CornerPathEffect, DashPathEffect, DiscretePathEffect, PathBuilder,
-    PathEffect, PathEffectLimits, PathVerb, Point, Rect, Scalar, SkiaErrorCode, SumPathEffect,
-    Transform, TrimPathEffect, apply_path_effect, compose_path_effects, corner_path, dash_path,
-    discrete_path, trim_path,
+use skia_error::{SkiaError, SkiaErrorCode};
+use skia_geometry::{Point, Rect, Scalar, Transform};
+use skia_path::{Path, PathBuilder, PathVerb};
+use skia_tessellation::{
+    ComposePathEffect, CornerPathEffect, DashPathEffect, DiscretePathEffect, PathEffect,
+    PathEffectLimits, SumPathEffect, TrimPathEffect, apply_path_effect, compose_path_effects,
+    corner_path, dash_path, discrete_path, trim_path,
 };
 
 fn scalar(value: i32) -> Scalar {
@@ -21,14 +23,14 @@ fn bit_point(x: i32, y: i32) -> Point {
     Point::new(Scalar::from_bits(x), Scalar::from_bits(y))
 }
 
-fn line() -> skia::Path {
+fn line() -> Path {
     let mut builder = PathBuilder::new(2).expect("builder");
     builder.move_to(point(0, 0)).expect("move");
     builder.line_to(point(8, 0)).expect("line");
     builder.finish().expect("path")
 }
 
-fn right_angle() -> skia::Path {
+fn right_angle() -> Path {
     let mut builder = PathBuilder::new(3).expect("builder");
     builder.move_to(point(0, 0)).expect("move");
     builder.line_to(point(4, 0)).expect("first line");
@@ -373,10 +375,10 @@ fn path_effect_boundary_enforces_limits_ignored_by_an_implementation() {
     impl PathEffect for UnboundedEffect {
         fn apply(
             &self,
-            path: &skia::Path,
+            path: &Path,
             transform: Transform,
             _limits: PathEffectLimits,
-        ) -> Result<Option<skia::Path>, skia::SkiaError> {
+        ) -> Result<Option<Path>, SkiaError> {
             path.transformed(transform).map(Some)
         }
     }

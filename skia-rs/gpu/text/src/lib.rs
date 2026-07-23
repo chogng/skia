@@ -1,8 +1,8 @@
 //! Pure text-to-GPU data adaptation for atlas-backed glyph rendering.
 //!
 //! This crate is part of the renderer-integration SPI. Application composition
-//! roots use it when preparing text for a selected GPU executor; ordinary
-//! rendering code remains on the top-level `skia` facade.
+//! roots use it when preparing text for a selected GPU executor; higher-level
+//! rendering adapters remain on the portable responsibility crates.
 //!
 //! This crate converts [`skia_core::TextLayout`] output into a generic
 //! [`skia_gpu::GpuGlyphAtlas`] with positioned [`skia_gpu::GpuGlyphQuad`]

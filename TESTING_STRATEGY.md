@@ -8,7 +8,7 @@ golden-image keys are therefore *evidence and input sources*, not an oracle
 that can be dropped into this workspace unchanged.
 
 The current baseline is useful but predominantly behavioural: workspace Rust
-tests cover the public facade, CPU canvas, display lists, paths/path effects,
+tests cover the responsibility-crate APIs, CPU canvas, display lists, paths/path effects,
 the software GPU replay contract, Metal, Vulkan offscreen execution, codecs, and text.
 Run Rust commands from `skia-rs/`; `cargo test --workspace --exclude skia-metal --exclude skia-vulkan
 --all-features` is the portable regression gate; platform executors run in
@@ -105,9 +105,9 @@ a physical GPU.  Vendor hardware remains a separate main/nightly runner concern.
 exercise clips/alpha, even-odd paths/transforms, layers/gradients, and linear
 image sampling.  `skia-rs/gpu/tests/render_oracle.rs` renders them through CPU and
 `skia-gpu` software replay, requiring exact RGBA8 equality and dimensions.
-`skia-rs/tests/golden/` holds their reviewed raw-pixel/PNG fixtures and manifest.
+`skia-rs/gpu/tests/golden/` holds their reviewed raw-pixel/PNG fixtures and manifest.
 
-Introduce `skia-rs/tests/golden/manifest.toml` only for explicitly accepted expected
+Introduce `skia-rs/gpu/tests/golden/manifest.toml` only for explicitly accepted expected
 images.  Each entry should include renderer version, scene ID, width/height,
 pixel format/color space, SHA-256 of raw RGBA and PNG, and an update reason.
 `scripts/regenerate_goldens.sh` refuses to overwrite without

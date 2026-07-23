@@ -9,3 +9,8 @@ publish = false
 skia-core = { workspace = true, features = ["text"] }
 skia-image = { workspace = true }
 skia-tessellation = { workspace = true }
+
+[dev-dependencies]
+skia-error = { workspace = true }
+skia-geometry = { workspace = true }
+skia-path = { workspace = true }

@@ -1,17 +1,3 @@
-load("//:defs.bzl", "skia_rust_crate")
-
-skia_rust_crate(
-    name = "skia",
-    crate_name = "skia",
-    test_data_extra = ["src/lib.rs"],
-)
-
-filegroup(
-    name = "golden-files",
-    srcs = glob(["tests/golden/**"]),
-    visibility = ["//visibility:public"],
-)
-
 exports_files([
     "Cargo.lock",
     "Cargo.toml",
