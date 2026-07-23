@@ -104,6 +104,30 @@ pub enum GpuCommand {
     },
 }
 
+impl GpuCommand {
+    /// Returns whether this command needs hardware lowering for a runtime shader.
+    ///
+    /// Image draws deliberately return `false`: their paint uses alpha, color
+    /// filtering, and blending, but does not sample the paint source shader.
+    pub fn requires_runtime_shader_lowering(&self) -> bool {
+        let paint = match self {
+            Self::FillRect { paint, .. }
+            | Self::FillPath { paint, .. }
+            | Self::StrokePath { paint, .. }
+            | Self::DrawGlyphs { paint, .. } => Some(paint),
+            Self::Clear(_)
+            | Self::SaveLayer { .. }
+            | Self::RestoreLayer
+            | Self::DrawImage { .. } => None,
+        };
+        paint.is_some_and(|paint| {
+            paint
+                .shader_handle()
+                .is_some_and(|shader| shader.as_shader().runtime().is_some())
+        })
+    }
+}
+
 /// Immutable, ordered GPU command buffer with locally owned resources.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpuCommandBuffer {

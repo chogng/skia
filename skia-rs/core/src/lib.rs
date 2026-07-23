@@ -18,6 +18,9 @@ mod path_effect;
 #[cfg(test)]
 #[path = "path_effect_tests.rs"]
 mod path_effect_tests;
+#[cfg(test)]
+#[path = "runtime_shader_tests.rs"]
+mod runtime_shader_tests;
 mod sampling;
 #[cfg(feature = "text")]
 mod text_geometry;
@@ -30,8 +33,8 @@ pub use display_list::GlyphRunId;
 pub use display_list::{DisplayList, DisplayListBuilder, DrawCommand, ImageId, PathId};
 pub use paint::{
     BlendMode, Color, ColorFilter, ColorFilterHandle, ColorMatrix, Gradient, GradientGeometry,
-    GradientStop, ImageFilter, ImageFilterHandle, Paint, SaveLayerOptions, Shader, ShaderHandle,
-    TileMode,
+    GradientStop, ImageFilter, ImageFilterHandle, Paint, RuntimeShader, RuntimeShaderInstruction,
+    RuntimeShaderLimits, RuntimeShaderProgram, SaveLayerOptions, Shader, ShaderHandle, TileMode,
 };
 pub use path_effect::{
     PathEffect, PathEffectHandle, PathEffectLimits, apply_path_effect, compose_path_effects,

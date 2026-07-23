@@ -367,6 +367,13 @@ impl GpuBackend for MetalBackend {
         surface: &mut Self::Surface,
         commands: &GpuCommandBuffer,
     ) -> Result<(), Self::Error> {
+        if commands
+            .commands()
+            .iter()
+            .any(GpuCommand::requires_runtime_shader_lowering)
+        {
+            return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
+        }
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(_) => {}

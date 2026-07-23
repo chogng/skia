@@ -67,3 +67,36 @@ pub mod shaders {
         ShaderHandle::from_gradient(gradient)
     }
 }
+
+/// Factories for bounded runtime color-expression shaders.
+pub mod runtime_shaders {
+    use skia_core::{
+        Color, RuntimeShader, RuntimeShaderInstruction, RuntimeShaderLimits, RuntimeShaderProgram,
+        ShaderHandle, SkiaError,
+    };
+
+    /// Validates one bounded local-space runtime shader program.
+    pub fn program(
+        instructions: &[RuntimeShaderInstruction],
+        uniform_count: u8,
+        limits: RuntimeShaderLimits,
+    ) -> Result<RuntimeShaderProgram, SkiaError> {
+        RuntimeShaderProgram::new(instructions, uniform_count, limits)
+    }
+
+    /// Binds immutable color uniforms to a validated runtime shader program.
+    pub fn bind(
+        program: RuntimeShaderProgram,
+        uniforms: &[Color],
+    ) -> Result<RuntimeShader, SkiaError> {
+        RuntimeShader::new(program, uniforms)
+    }
+
+    /// Binds a runtime program and wraps it for shared paint ownership.
+    pub fn handle(
+        program: RuntimeShaderProgram,
+        uniforms: &[Color],
+    ) -> Result<ShaderHandle, SkiaError> {
+        bind(program, uniforms).map(ShaderHandle::from_runtime)
+    }
+}

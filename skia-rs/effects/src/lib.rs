@@ -12,13 +12,14 @@
 mod factories;
 mod path_effect;
 
-pub use factories::{color_filters, image_filters, shaders};
+pub use factories::{color_filters, image_filters, runtime_shaders, shaders};
 pub use path_effect::{
     ComposePathEffect, CornerPathEffect, DashPathEffect, DiscretePathEffect, SumPathEffect,
     TrimPathEffect, corner_path, dash_path, discrete_path, trim_path,
 };
 pub use skia_core::{
     ColorFilter, ColorFilterHandle, ColorMatrix, Gradient, GradientGeometry, GradientStop,
-    ImageFilter, ImageFilterHandle, PathEffect, PathEffectHandle, PathEffectLimits, Shader,
-    ShaderHandle, TileMode, apply_path_effect, compose_path_effects,
+    ImageFilter, ImageFilterHandle, PathEffect, PathEffectHandle, PathEffectLimits, RuntimeShader,
+    RuntimeShaderInstruction, RuntimeShaderLimits, RuntimeShaderProgram, Shader, ShaderHandle,
+    TileMode, apply_path_effect, compose_path_effects,
 };

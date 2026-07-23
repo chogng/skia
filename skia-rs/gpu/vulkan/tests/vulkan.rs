@@ -1,7 +1,8 @@
 use skia_core::{
     BlendMode, ClipOp, Color, ColorFilter, ColorMatrix, FillRule, Gradient, GradientStop,
-    ImageFilter, Paint, PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar,
-    StrokeCap, StrokeOptions, TileMode, Transform,
+    ImageFilter, Paint, PathBuilder, Point, Rect, RuntimeShader, RuntimeShaderInstruction,
+    RuntimeShaderLimits, RuntimeShaderProgram, SamplingOptions, SaveLayerOptions, Scalar,
+    ShaderHandle, StrokeCap, StrokeOptions, TileMode, Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphQuad, GpuSurfaceDescriptor,
@@ -63,6 +64,43 @@ fn vulkan_backend_clears_and_reads_an_offscreen_surface() {
     {
         assert_eq!(pixel, replacement.channels());
     }
+}
+
+#[test]
+fn vulkan_rejects_runtime_shaders_until_native_lowering_exists() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let program = RuntimeShaderProgram::new(
+        &[
+            RuntimeShaderInstruction::ConstantColor {
+                destination: 0,
+                color: Color::RED,
+            },
+            RuntimeShaderInstruction::Return { source: 0 },
+        ],
+        0,
+        RuntimeShaderLimits::default(),
+    )
+    .expect("program");
+    let paint = Paint::new(Color::WHITE).with_shader(ShaderHandle::from_runtime(
+        RuntimeShader::new(program, &[]).expect("runtime shader"),
+    ));
+    let mut encoder = GpuCommandEncoder::new(1).expect("encoder");
+    encoder
+        .fill_rect(rect(0, 0, 1, 1), paint)
+        .expect("runtime fill");
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(1, 1).expect("surface descriptor"))
+        .expect("surface");
+
+    assert_eq!(
+        backend
+            .submit(&mut surface, &encoder.finish())
+            .expect_err("runtime shader requires lowering")
+            .code(),
+        VulkanErrorCode::UnsupportedCommand
+    );
 }
 
 #[test]

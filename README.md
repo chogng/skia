@@ -297,6 +297,12 @@ same model for existing value-backed color filters, and `ImageFilterHandle` lets
 deliberately lower back to established value effects at execution, so CPU,
 Metal, and Vulkan keep their current implementations while the ownership
 boundary is ready for future dynamic effect types.
+The first runtime-shader tier adds a bounded typed IR with color uniforms,
+local X/Y parameters, add/multiply/mix/clamp, and no loops, source text, host
+callbacks, or texture access. `skia-core` validates the IR before a handle can
+retain it; CPU Canvas and the software GPU evaluate it deterministically. Until
+native lowering and pipeline caching land, Metal and Vulkan reject a source draw
+that carries this runtime shader instead of silently substituting a solid paint.
 `skia-tessellation::stroke_to_path` produces a
 deterministic non-zero triangle-fill path.
 

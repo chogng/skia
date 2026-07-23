@@ -1,7 +1,8 @@
 use skia_core::{
     BlendMode, Color, ColorFilter, ColorMatrix, DisplayListBuilder, FontCollection,
     FontCollectionLimits, Gradient, GradientStop, ImageFilter, Paint, PathEffectHandle,
-    SamplingOptions, SaveLayerOptions, StrokeCap, StrokeOptions, TileMode,
+    RuntimeShader, RuntimeShaderInstruction, RuntimeShaderLimits, RuntimeShaderProgram,
+    SamplingOptions, SaveLayerOptions, ShaderHandle, StrokeCap, StrokeOptions, TileMode,
 };
 use skia_cpu::{ClipRect, Surface, SurfaceLimits};
 use skia_effects::DashPathEffect;
@@ -395,6 +396,53 @@ fn display_list_replays_a_path_effect_held_by_paint() {
     for x in [2, 3, 6, 7] {
         assert_eq!(pixel(&surface, x, 2), Color::TRANSPARENT.channels());
     }
+}
+
+#[test]
+fn display_list_replays_a_runtime_shader_held_by_paint() {
+    let program = RuntimeShaderProgram::new(
+        &[
+            RuntimeShaderInstruction::UniformColor {
+                destination: 0,
+                uniform: 0,
+            },
+            RuntimeShaderInstruction::UniformColor {
+                destination: 1,
+                uniform: 1,
+            },
+            RuntimeShaderInstruction::LocalX {
+                destination: 2,
+                start: scalar(0),
+                end: scalar(4),
+            },
+            RuntimeShaderInstruction::Mix {
+                destination: 3,
+                first: 0,
+                second: 1,
+                factor: 2,
+            },
+            RuntimeShaderInstruction::Return { source: 3 },
+        ],
+        2,
+        RuntimeShaderLimits::default(),
+    )
+    .expect("program");
+    let runtime = RuntimeShader::new(program, &[Color::RED, Color::BLUE]).expect("runtime");
+    let paint = Paint::new(Color::WHITE).with_shader(ShaderHandle::from_runtime(runtime));
+    let mut builder = DisplayListBuilder::new(1).expect("display list");
+    builder
+        .fill_rect(rect(0, 0, 4, 1), paint)
+        .expect("fill command");
+    let mut surface = Surface::new(4, 1, SurfaceLimits::default()).expect("surface");
+    surface
+        .execute_display_list(
+            &builder.finish(),
+            &FontCollection::new(FontCollectionLimits::default()),
+        )
+        .expect("replay");
+
+    assert_eq!(pixel(&surface, 0, 0), [223, 0, 32, 255]);
+    assert_eq!(pixel(&surface, 3, 0), [32, 0, 223, 255]);
 }
 
 #[test]

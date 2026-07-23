@@ -2,8 +2,9 @@ use std::fmt;
 
 use skia_core::{
     BlendMode, ClipOp, Color, ColorFilter, ColorMatrix, FillRule, Gradient, GradientStop, Paint,
-    PathBuilder, PathEffectHandle, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar,
-    StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, TileMode, Transform,
+    PathBuilder, PathEffectHandle, Point, Rect, RuntimeShader, RuntimeShaderInstruction,
+    RuntimeShaderLimits, RuntimeShaderProgram, SamplingOptions, SaveLayerOptions, Scalar,
+    ShaderHandle, StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, TileMode, Transform,
 };
 use skia_effects::DashPathEffect;
 use skia_gpu::{
@@ -557,6 +558,49 @@ fn gpu_stroke_commands_preserve_options_and_replay_dashes() {
     for x in [6, 7, 8, 9, 14, 15, 16, 17] {
         assert_eq!(pixel(&surface, x, 5), Color::TRANSPARENT.channels());
     }
+}
+
+#[test]
+fn software_replay_evaluates_runtime_shaders_in_local_space() {
+    let program = RuntimeShaderProgram::new(
+        &[
+            RuntimeShaderInstruction::UniformColor {
+                destination: 0,
+                uniform: 0,
+            },
+            RuntimeShaderInstruction::UniformColor {
+                destination: 1,
+                uniform: 1,
+            },
+            RuntimeShaderInstruction::LocalX {
+                destination: 2,
+                start: scalar(0),
+                end: scalar(4),
+            },
+            RuntimeShaderInstruction::Mix {
+                destination: 3,
+                first: 0,
+                second: 1,
+                factor: 2,
+            },
+            RuntimeShaderInstruction::Return { source: 3 },
+        ],
+        2,
+        RuntimeShaderLimits::default(),
+    )
+    .unwrap();
+    let runtime = RuntimeShader::new(program, &[Color::RED, Color::BLUE]).unwrap();
+    let paint = Paint::new(Color::WHITE).with_shader(ShaderHandle::from_runtime(runtime));
+    let mut encoder = GpuCommandEncoder::new(1).unwrap();
+    encoder.fill_rect(rect(0, 0, 4, 1), paint).unwrap();
+
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &encoder.finish()).unwrap();
+    assert_eq!(pixel(&surface, 0, 0), [223, 0, 32, 255]);
+    assert_eq!(pixel(&surface, 3, 0), [32, 0, 223, 255]);
 }
 
 #[test]
