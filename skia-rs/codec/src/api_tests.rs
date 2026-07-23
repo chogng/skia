@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::{borrow::Cow, io::Cursor};
 
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use skia_image::{ColorSpace, Image};
@@ -82,6 +82,26 @@ fn decoder_rejects_unknown_and_over_budget_input() {
             .unwrap_err()
             .code(),
         CodecErrorCode::InputTooLarge
+    );
+}
+
+#[test]
+fn decoder_reports_unsupported_embedded_profile() {
+    let mut info = png::Info::with_size(1, 1);
+    info.color_type = png::ColorType::Rgba;
+    info.bit_depth = png::BitDepth::Eight;
+    info.icc_profile = Some(Cow::Owned(vec![1, 2, 3]));
+    let mut bytes = Vec::new();
+    let mut writer = png::Encoder::with_info(&mut bytes, info)
+        .unwrap()
+        .write_header()
+        .unwrap();
+    writer.write_image_data(&[0, 0, 0, 255]).unwrap();
+    writer.finish().unwrap();
+
+    assert_eq!(
+        ImageCodec::decode(&bytes).unwrap_err().code(),
+        CodecErrorCode::UnsupportedColorProfile
     );
 }
 
@@ -183,11 +203,12 @@ fn jpeg_optimization_profiles_honor_requested_scan_mode() {
 
 #[test]
 fn preserves_valid_exif_and_icc_when_requested() {
+    let profile = moxcms::ColorProfile::new_display_p3().encode().unwrap();
     let image = Image::from_rgba8_with_color_space(
         1,
         1,
         vec![0, 0, 0, 255],
-        ColorSpace::from_icc_profile(vec![1, 2, 3]).unwrap(),
+        ColorSpace::from_icc_profile(profile.clone()).unwrap(),
     )
     .unwrap();
     let metadata = ImageMetadata::new()
@@ -205,7 +226,7 @@ fn preserves_valid_exif_and_icc_when_requested() {
             ImageCodec::decode(ImageCodec::encode(&asset, &options).unwrap().bytes()).unwrap();
         assert_eq!(
             decoded.image().color_space().icc_profile(),
-            Some(&[1, 2, 3][..])
+            Some(profile.as_slice())
         );
         assert_eq!(
             decoded.metadata().exif_tiff(),

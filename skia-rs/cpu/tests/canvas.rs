@@ -8,7 +8,7 @@ use skia_cpu::{ClipRect, Surface, SurfaceLimits};
 use skia_effects::DashPathEffect;
 use skia_error::SkiaErrorCode;
 use skia_geometry::{Point, Rect, Scalar, Transform};
-use skia_image::{Image, ImageErrorCode};
+use skia_image::{ColorSpace, Image, ImageErrorCode};
 use skia_path::{ConicWeight, FillRule, PathBuilder};
 use skia_tessellation::stroke_to_path;
 
@@ -50,6 +50,24 @@ fn clipped_source_over_rect_is_exact_and_save_restore_is_isolated() {
     assert_eq!(pixel(&surface, 1, 1), [255, 127, 127, 255]);
     assert_eq!(pixel(&surface, 2, 2), [255, 127, 127, 255]);
     assert_eq!(pixel(&surface, 3, 2), [255, 255, 255, 255]);
+}
+
+#[test]
+fn direct_image_draw_converts_linear_srgb_before_sampling() {
+    let image =
+        Image::from_rgba8_with_color_space(1, 1, vec![128, 128, 128, 255], ColorSpace::LinearSrgb)
+            .unwrap();
+    let mut surface = Surface::new(1, 1, SurfaceLimits::default()).unwrap();
+    surface
+        .canvas()
+        .draw_image(&image, rect(0, 0, 1, 1), 255, BlendMode::Source)
+        .unwrap();
+
+    let actual = pixel(&surface, 0, 0);
+    assert!((i16::from(actual[0]) - 188).abs() <= 1, "{actual:?}");
+    assert_eq!(actual[0], actual[1]);
+    assert_eq!(actual[1], actual[2]);
+    assert_eq!(actual[3], 255);
 }
 
 #[test]

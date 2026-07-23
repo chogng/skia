@@ -8,7 +8,7 @@ use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphQuad, GpuSurfaceDescriptor,
     software::SoftwareGpuBackend,
 };
-use skia_image::Image;
+use skia_image::{ColorSpace, Image};
 use skia_vulkan::{VulkanBackend, VulkanErrorCode};
 
 #[test]
@@ -64,6 +64,34 @@ fn vulkan_backend_clears_and_reads_an_offscreen_surface() {
     {
         assert_eq!(pixel, replacement.channels());
     }
+}
+
+#[test]
+fn vulkan_upload_uses_color_managed_rendering_pixels() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let image =
+        Image::from_rgba8_with_color_space(1, 1, vec![128, 128, 128, 255], ColorSpace::LinearSrgb)
+            .expect("linear image");
+    let mut commands = GpuCommandEncoder::new(2).expect("encoder");
+    let image = commands.add_image(image).expect("normalized image");
+    commands.clear(Color::BLACK).expect("clear");
+    commands
+        .draw_image(image, rect(0, 0, 1, 1), u8::MAX, BlendMode::Source)
+        .expect("image draw");
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(1, 1).expect("descriptor"))
+        .expect("surface");
+    backend
+        .submit(&mut surface, &commands.finish())
+        .expect("submit");
+
+    let actual: [u8; 4] = surface.read_rgba8().unwrap().try_into().unwrap();
+    assert!((i16::from(actual[0]) - 188).abs() <= 1, "{actual:?}");
+    assert_eq!(actual[0], actual[1]);
+    assert_eq!(actual[1], actual[2]);
+    assert_eq!(actual[3], 255);
 }
 
 #[test]

@@ -18,7 +18,7 @@ use std::{
 use image::{
     DynamicImage, ImageDecoder, ImageEncoder, ImageError, ImageFormat, ImageReader, Limits,
 };
-use skia_image::{ColorSpace, Image};
+use skia_image::{ColorSpace, Image, ImageErrorCode};
 
 /// Stable machine-readable image codec failure code.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -35,6 +35,8 @@ pub enum CodecErrorCode {
     NotAnimated,
     /// A supported encoded image could not be decoded.
     DecodeFailed,
+    /// An embedded color profile is malformed or outside the supported RGB matrix/TRC subset.
+    UnsupportedColorProfile,
     /// Animation dimensions, timing, frame count, or frame placement are invalid.
     InvalidAnimation,
     /// The decoded animation exceeds its configured frame or aggregate byte ceiling.
@@ -902,8 +904,9 @@ impl ImageCodec {
         }
 
         let color_space = match icc_profile {
-            Some(profile) => ColorSpace::from_icc_profile(profile)
-                .map_err(|_| CodecError::new(CodecErrorCode::DecodeFailed))?,
+            Some(profile) => {
+                ColorSpace::from_icc_profile(profile).map_err(map_color_profile_error)?
+            }
             None => ColorSpace::Srgb,
         };
         let image = Image::from_rgba8_with_color_space(
@@ -1012,20 +1015,38 @@ fn map_decode_error(error: ImageError) -> CodecError {
     }
 }
 
+fn map_color_profile_error(error: skia_image::ImageError) -> CodecError {
+    match error.code() {
+        ImageErrorCode::UnsupportedColorProfile => {
+            CodecError::new(CodecErrorCode::UnsupportedColorProfile)
+        }
+        _ => CodecError::new(CodecErrorCode::DecodeFailed),
+    }
+}
+
 fn encode_jpeg<W: Write>(
     writer: W,
     asset: &ImageAsset,
     metadata: MetadataPolicy,
     options: JpegOptions,
 ) -> Result<(), CodecError> {
-    let rgb8 = rgba8_to_rgb8(asset.image.pixels(), options.alpha)?;
+    let rgba8 = asset
+        .image
+        .to_straight_rgba8()
+        .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
+    let rgb8 = rgba8_to_rgb8(rgba8.pixels(), options.alpha)?;
+    let icc_profile = asset
+        .image
+        .color_space()
+        .encoded_icc_profile()
+        .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
     jpeg::encode(
         writer,
         &rgb8,
         asset.image.width(),
         asset.image.height(),
         options,
-        asset.image.color_space().icc_profile(),
+        icc_profile.as_deref(),
         if metadata == MetadataPolicy::Preserve {
             asset.metadata.exif_tiff()
         } else {
@@ -1039,9 +1060,14 @@ fn apply_metadata<E: ImageEncoder>(
     asset: &ImageAsset,
     metadata: MetadataPolicy,
 ) -> Result<(), CodecError> {
-    if let Some(icc_profile) = asset.image.color_space().icc_profile() {
+    if let Some(icc_profile) = asset
+        .image
+        .color_space()
+        .encoded_icc_profile()
+        .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?
+    {
         encoder
-            .set_icc_profile(icc_profile.to_vec())
+            .set_icc_profile(icc_profile)
             .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
     }
     if metadata == MetadataPolicy::Preserve

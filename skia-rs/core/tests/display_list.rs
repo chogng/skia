@@ -5,7 +5,7 @@ use skia_core::{
 };
 #[cfg(feature = "text")]
 use skia_core::{FontId, GlyphId, GlyphRun, PositionedGlyph, TextUnit};
-use skia_image::Image;
+use skia_image::{ColorSpace, Image};
 
 #[cfg(feature = "text")]
 fn glyph_run() -> GlyphRun {
@@ -192,6 +192,22 @@ fn display_list_records_explicit_image_sampling() {
             paint,
         }]
     );
+}
+
+#[test]
+fn display_list_normalizes_image_resources_to_rendering_srgb() {
+    let source =
+        Image::from_rgba8_with_color_space(1, 1, vec![128, 128, 128, 73], ColorSpace::LinearSrgb)
+            .expect("linear image");
+    let mut builder = DisplayListBuilder::new(1).expect("builder");
+    let image = builder.add_image(source).expect("color conversion");
+    let list = builder.finish();
+
+    let stored = list.image(image).expect("stored image");
+    assert_eq!(stored.color_space(), &ColorSpace::Srgb);
+    let pixel = stored.pixel_at(0, 0).expect("pixel");
+    assert!((i16::from(pixel[0]) - 188).abs() <= 1, "{pixel:?}");
+    assert_eq!(pixel[3], 73);
 }
 
 #[test]

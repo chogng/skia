@@ -3,7 +3,7 @@ use skia_codec::{
     ImageCodec, ImageMetadata, JpegAlphaHandling, JpegOptimization, JpegOptions, JpegScan,
     JpegSubsampling, MetadataPolicy, PngCompression, PngFilter, PngOptions, WebPOptions,
 };
-use skia_image::{ColorSpace, Image};
+use skia_image::{AlphaType, ColorSpace, Image, ImageInfo, PixelFormat};
 
 fn opaque_asset() -> ImageAsset {
     let width = 17;
@@ -115,11 +115,12 @@ fn public_jpeg_options_control_the_encoded_file_structure() {
 
 #[test]
 fn public_metadata_policy_round_trips_exif_and_icc() {
+    let profile = moxcms::ColorProfile::new_display_p3().encode().unwrap();
     let image = Image::from_rgba8_with_color_space(
         1,
         1,
         vec![0, 0, 0, 255],
-        ColorSpace::from_icc_profile(vec![1, 2, 3]).unwrap(),
+        ColorSpace::from_icc_profile(profile.clone()).unwrap(),
     )
     .unwrap();
     let exif = [b'I', b'I', 42, 0, 8, 0, 0, 0];
@@ -137,10 +138,60 @@ fn public_metadata_policy_round_trips_exif_and_icc() {
         let decoded = ImageCodec::decode(encoded.bytes()).unwrap();
         assert_eq!(
             decoded.image().color_space().icc_profile(),
-            Some(&[1, 2, 3][..])
+            Some(profile.as_slice())
         );
         assert_eq!(decoded.metadata().exif_tiff(), Some(&exif[..]));
     }
+}
+
+#[test]
+fn decoded_icc_changes_rendering_pixels() {
+    let profile = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+    let source = Image::from_rgba8_with_color_space(
+        1,
+        1,
+        vec![128, 200, 100, 177],
+        ColorSpace::from_icc_profile(profile).unwrap(),
+    )
+    .unwrap();
+    let encoded = ImageCodec::encode(
+        &ImageAsset::new(source),
+        &EncodeOptions::new(EncodeFormat::Png(PngOptions::balanced_v1())),
+    )
+    .unwrap();
+
+    let decoded = ImageCodec::decode(encoded.bytes()).unwrap();
+    assert!(decoded.image().color_space().icc_profile().is_some());
+    let rendered = decoded.image().to_rendering_image().unwrap();
+    assert_ne!(rendered.pixel_at(0, 0), Some([128, 200, 100, 177]));
+    assert_eq!(rendered.color_space(), &ColorSpace::Srgb);
+    assert_eq!(rendered.pixel_at(0, 0).unwrap()[3], 177);
+}
+
+#[test]
+fn codec_canonicalizes_bgra_premultiplied_storage_once() {
+    let info = ImageInfo::new(
+        1,
+        1,
+        PixelFormat::Bgra8888,
+        AlphaType::Premultiplied,
+        ColorSpace::Srgb,
+    )
+    .unwrap();
+    let image = Image::from_pixels(info, 4, vec![25, 50, 100, 128]).unwrap();
+    let encoded = ImageCodec::encode(
+        &ImageAsset::new(image),
+        &EncodeOptions::new(EncodeFormat::Png(PngOptions::balanced_v1())),
+    )
+    .unwrap();
+
+    let decoded = ImageCodec::decode(encoded.bytes()).unwrap();
+    let pixel = decoded.image().pixel_at(0, 0).unwrap();
+    assert!((i16::from(pixel[0]) - 200).abs() <= 1, "{pixel:?}");
+    assert!((i16::from(pixel[1]) - 100).abs() <= 1, "{pixel:?}");
+    assert!((i16::from(pixel[2]) - 50).abs() <= 1, "{pixel:?}");
+    assert_eq!(pixel[3], 128);
+    assert_eq!(decoded.image().info().alpha_type(), AlphaType::Straight);
 }
 
 #[test]

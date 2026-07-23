@@ -1,4 +1,4 @@
-//! Immutable, owned RGBA8 image resources.
+//! Backend-neutral immutable pixel storage and bounded color conversion.
 //!
 //! This crate has no dependency on the drawing core or a rendering backend, so
 //! image decoding and storage remain usable independently of display lists.
@@ -8,4 +8,4 @@
 
 mod image;
 
-pub use image::{ColorSpace, Image, ImageError, ImageErrorCode};
+pub use image::{AlphaType, ColorSpace, Image, ImageError, ImageErrorCode, ImageInfo, PixelFormat};

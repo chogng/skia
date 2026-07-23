@@ -12,7 +12,7 @@ use skia_gpu::{
     GpuCommandErrorCode, GpuCommandLimits, GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad,
     GpuSurfaceDescriptor, software::SoftwareGpuBackend,
 };
-use skia_image::Image;
+use skia_image::{AlphaType, ColorSpace, Image, ImageInfo, PixelFormat};
 
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).unwrap()
@@ -116,6 +116,30 @@ fn gpu_commands_own_resources_and_preserve_submission_order() {
         panic!("expected path command");
     };
     assert_eq!(transform.map_point(point(1, 1)).unwrap(), point(2, 3));
+}
+
+#[test]
+fn gpu_resource_boundary_normalizes_color_and_alpha_storage() {
+    let info = ImageInfo::new(
+        1,
+        1,
+        PixelFormat::Bgra8888,
+        AlphaType::Premultiplied,
+        ColorSpace::LinearSrgb,
+    )
+    .unwrap();
+    let image = Image::from_pixels(info, 4, vec![16, 32, 64, 128]).unwrap();
+    let mut encoder = GpuCommandEncoder::new(1).unwrap();
+    let id = encoder.add_image(image).unwrap();
+    let commands = encoder.finish();
+
+    let uploaded = commands.image(id).expect("normalized image");
+    assert_eq!(uploaded.color_space(), &ColorSpace::Srgb);
+    assert_eq!(uploaded.info().pixel_format(), PixelFormat::Rgba8888);
+    assert_eq!(uploaded.info().alpha_type(), AlphaType::Straight);
+    let pixel = uploaded.pixel_at(0, 0).unwrap();
+    assert!((i16::from(pixel[0]) - 188).abs() <= 1, "{pixel:?}");
+    assert_eq!(pixel[3], 128);
 }
 
 #[test]

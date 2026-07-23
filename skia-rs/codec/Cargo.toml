@@ -13,3 +13,6 @@ image = { workspace = true, features = ["jpeg", "png", "webp"] }
 mozjpeg-rs = { workspace = true }
 png = { workspace = true }
 skia-image = { workspace = true }
+
+[dev-dependencies]
+moxcms = { workspace = true }

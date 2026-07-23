@@ -706,6 +706,7 @@ name = "skia-codec"
 version = "0.1.0"
 dependencies = [
  "image",
+ "moxcms",
  "mozjpeg-rs",
  "png",
  "skia-image",
@@ -780,6 +781,9 @@ dependencies = [
 [[package]]
 name = "skia-image"
 version = "0.1.0"
+dependencies = [
+ "moxcms",
+]
 
 [[package]]
 name = "skia-metal"

@@ -24,11 +24,15 @@ pub(crate) fn encode<W: Write>(
     }
     let mut encoder = WebPEncoder::new_lossless(writer);
     apply_metadata(&mut encoder, asset, metadata)?;
+    let image = asset
+        .image
+        .to_straight_rgba8()
+        .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
     encoder
         .write_image(
-            asset.image.pixels(),
-            asset.image.width(),
-            asset.image.height(),
+            image.pixels(),
+            image.width(),
+            image.height(),
             ExtendedColorType::Rgba8,
         )
         .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))
@@ -62,7 +66,7 @@ pub(crate) fn decode_animated(
         .map_err(|_| CodecError::new(CodecErrorCode::DecodeFailed))?
     {
         Some(profile) => ColorSpace::from_icc_profile(profile)
-            .map_err(|_| CodecError::new(CodecErrorCode::DecodeFailed))?,
+            .map_err(|_| CodecError::new(CodecErrorCode::UnsupportedColorProfile))?,
         None => ColorSpace::Srgb,
     };
     let exif_tiff = decoder

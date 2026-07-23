@@ -44,11 +44,15 @@ pub(crate) fn encode<W: Write>(
     };
     let mut encoder = PngEncoder::new_with_quality(writer, compression, filter);
     apply_metadata(&mut encoder, asset, metadata)?;
+    let image = asset
+        .image
+        .to_straight_rgba8()
+        .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
     encoder
         .write_image(
-            asset.image.pixels(),
-            asset.image.width(),
-            asset.image.height(),
+            image.pixels(),
+            image.width(),
+            image.height(),
             ExtendedColorType::Rgba8,
         )
         .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))
@@ -83,7 +87,7 @@ pub(crate) fn decode_animated(
         .map_err(|_| CodecError::new(CodecErrorCode::DecodeFailed))?;
     let color_space = match icc_profile {
         Some(profile) => ColorSpace::from_icc_profile(profile)
-            .map_err(|_| CodecError::new(CodecErrorCode::DecodeFailed))?,
+            .map_err(|_| CodecError::new(CodecErrorCode::UnsupportedColorProfile))?,
         None => ColorSpace::Srgb,
     };
     let animation = decoder
@@ -136,8 +140,13 @@ pub(crate) fn encode_animated<W: Write>(
     let mut info = Info::with_size(asset.width, asset.height);
     info.color_type = ColorType::Rgba;
     info.bit_depth = BitDepth::Eight;
-    if let Some(profile) = asset.frames[0].image.color_space().icc_profile() {
-        info.icc_profile = Some(Cow::Owned(profile.to_vec()));
+    if let Some(profile) = asset.frames[0]
+        .image
+        .color_space()
+        .encoded_icc_profile()
+        .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?
+    {
+        info.icc_profile = Some(Cow::Owned(profile));
     }
     if metadata == MetadataPolicy::Preserve {
         info.exif_metadata = asset
@@ -175,8 +184,12 @@ pub(crate) fn encode_animated<W: Write>(
                 })
             })
             .map_err(|_| CodecError::new(CodecErrorCode::InvalidAnimation))?;
+        let image = frame
+            .image
+            .to_straight_rgba8()
+            .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
         writer
-            .write_image_data(frame.image.pixels())
+            .write_image_data(image.pixels())
             .map_err(|_| CodecError::new(CodecErrorCode::EncodeFailed))?;
     }
     writer

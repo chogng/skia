@@ -107,7 +107,8 @@ at the application composition boundary; Bazel expresses the same boundary with
   discovery, generic-family resolution, and language-preferred family policy.
   It returns stable path/index identities and reloadable records; `skia-rs/text`
   remains independent of operating-system directories and font handles.
-- `skia-rs/image` owns the immutable RGBA8 resource representation. `skia-rs/codec`
+- `skia-rs/image` owns immutable pixel storage, row layout, alpha semantics,
+  color spaces, and bounded pixel/color conversion. `skia-rs/codec`
   parses untrusted, general-purpose image bytes into that representation and
   encodes those resources as general-purpose image formats. It does not depend
   on rendering backends or caller-specific types, so both decode and encode
@@ -119,6 +120,43 @@ at the application composition boundary; Bazel expresses the same boundary with
 - A Skia public type, method, error, or command must not mention caller-specific
   objects, operators, page state, or policy. Perform such translation in the
   caller's adapter.
+
+## Image pixels and color management
+
+`skia-image` is the foundational, backend-independent image layer. `ImageInfo`
+describes dimensions, `PixelFormat`, `AlphaType`, and `ColorSpace`; `Image`
+separately owns an explicit row stride and exact storage. RGBA8888 and
+BGRA8888, including padded rows, have implemented read and conversion paths.
+Straight, premultiplied, and opaque alpha are validated at construction.
+Premultiplied RGB must not exceed alpha, opaque storage must contain alpha 255,
+and a zero-alpha premultiplied pixel converts to transparent black.
+
+Color conversion reuses the pure-Rust `moxcms` dependency already present in
+the codec stack, but `skia-image` gates profiles to its bounded RGB matrix/TRC
+path. Built-in sRGB and linear sRGB are supported. Embedded ICC is accepted
+only when it parses as RGB/XYZ with three tone curves, contains no AToB/BToA
+LUT, and can build a transform to sRGB; malformed profiles, CMYK, device-link,
+abstract/named-color, and LUT profiles fail explicitly and are never
+interpreted as sRGB. Original
+accepted ICC bytes are retained for re-encoding. Linear sRGB is serialized as
+an ICC profile when a codec cannot otherwise carry that interpretation.
+
+Codecs decode to tight straight RGBA8888 while preserving the accepted source
+color space. Display-list registration, direct CPU image drawing, and generic
+GPU image registration are the rendering-resource boundaries: each converts
+exactly once to tight straight sRGB RGBA8888. Consequently CPU sampling,
+software replay, Metal texture upload, and Vulkan immutable-resource upload
+receive the same byte order, alpha representation, and working color space.
+Color transforms operate on straight RGB; premultiplication is removed before
+conversion and applied only after conversion when requested.
+
+Current support is deliberately limited to interleaved eight-bit RGBA/BGRA.
+There is no RGB10, RGBA16F, planar YUV, HDR transfer function, CMYK rendering,
+arbitrary ICC CLUT, or renderer-selected wide-gamut target yet. Render targets
+also retain the existing encoded-sRGB compositing contract; full-scene
+linear-light blending is not yet exposed as a surface mode. Color-managed
+images are nevertheless converted before sampling and compositing, so samples
+from different declared spaces are never mixed as if they shared an encoding.
 
 ## Text implementation boundary
 

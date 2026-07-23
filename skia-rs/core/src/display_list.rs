@@ -4,7 +4,7 @@ use crate::{
 };
 #[cfg(feature = "text")]
 use crate::{Point, TextLayoutEvent, text_layout_events};
-use skia_image::Image;
+use skia_image::{Image, ImageErrorCode};
 #[cfg(feature = "text")]
 use skia_text::{GlyphRun, ShapedParagraph, TextLayout, TextStyleId};
 
@@ -177,9 +177,15 @@ impl DisplayListBuilder {
         self.paths.push(path);
         Ok(PathId(id))
     }
-    /// Registers an immutable image.
+    /// Registers an immutable image after conversion to rendering sRGB RGBA8.
     pub fn add_image(&mut self, image: Image) -> Result<ImageId, SkiaError> {
         let id = self.resource_id(self.images.len())?;
+        let image = image
+            .to_rendering_image()
+            .map_err(|error| match error.code() {
+                ImageErrorCode::AllocationFailed => SkiaError::new(SkiaErrorCode::AllocationFailed),
+                _ => SkiaError::new(SkiaErrorCode::InvalidImage),
+            })?;
         self.images
             .try_reserve(1)
             .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;

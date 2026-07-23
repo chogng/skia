@@ -2,7 +2,7 @@ use skia_core::{
     BlendMode, ClipOp, Color, FillRule, Paint, Path, Point, Rect, SamplingOptions,
     SaveLayerOptions, SkiaError, SkiaErrorCode, StrokeOptions, Transform,
 };
-use skia_image::Image;
+use skia_image::{Image, ImageErrorCode};
 
 use crate::{
     GpuClipGeometry, GpuClipId, GpuClipNode, GpuCommand, GpuCommandBuffer, GpuCommandError,
@@ -188,9 +188,17 @@ impl GpuCommandEncoder {
         Ok(GpuPathId(id))
     }
 
-    /// Registers an immutable image and returns its command-buffer-local ID.
+    /// Registers an image as tight straight sRGB RGBA8 and returns its local ID.
     pub fn add_image(&mut self, image: Image) -> Result<GpuImageId, GpuCommandError> {
         let id = resource_id(self.images.len(), self.limits.max_images)?;
+        let image = image
+            .to_rendering_image()
+            .map_err(|error| match error.code() {
+                ImageErrorCode::AllocationFailed => {
+                    GpuCommandError::new(GpuCommandErrorCode::AllocationFailed)
+                }
+                _ => GpuCommandError::new(GpuCommandErrorCode::InvalidResource),
+            })?;
         self.images
             .try_reserve(1)
             .map_err(|_| GpuCommandError::new(GpuCommandErrorCode::AllocationFailed))?;

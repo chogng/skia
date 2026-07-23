@@ -65,7 +65,7 @@ impl Default for SurfaceLimits {
     }
 }
 
-/// Complete mutable CPU surface with top-left, tightly packed straight RGBA8 pixels.
+/// Complete mutable CPU surface with tight, top-left, straight sRGBA8 pixels.
 #[derive(Debug)]
 pub struct Surface {
     width: u32,
@@ -547,6 +547,14 @@ impl Canvas<'_> {
         if clipped.left == clipped.right || clipped.top == clipped.bottom {
             return Ok(());
         }
+        let rendering_image = image.to_rendering_image().map_err(|error| {
+            if error.code() == skia_image::ImageErrorCode::AllocationFailed {
+                SkiaError::new(SkiaErrorCode::AllocationFailed)
+            } else {
+                SkiaError::new(SkiaErrorCode::InvalidImage)
+            }
+        })?;
+        let image = &rendering_image;
         for y in clipped.top..clipped.bottom {
             for x in clipped.left..clipped.right {
                 let local = inverse.map_point(pixel_center(x, y)?)?;

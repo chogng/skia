@@ -3,7 +3,7 @@ use crate::{GpuCommandError, GpuCommandErrorCode};
 /// Portable pixel format of a GPU render target.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GpuSurfaceFormat {
-    /// Straight-alpha, normalized eight-bit red, green, blue, and alpha channels.
+    /// Straight-alpha sRGB-encoded eight-bit red, green, blue, and alpha channels.
     Rgba8Unorm,
 }
 
@@ -16,7 +16,7 @@ pub struct GpuSurfaceDescriptor {
 }
 
 impl GpuSurfaceDescriptor {
-    /// Creates one non-empty straight-alpha RGBA8 target descriptor.
+    /// Creates one non-empty straight-alpha sRGBA8 target descriptor.
     pub fn new(width: u32, height: u32) -> Result<Self, GpuCommandError> {
         Self::with_format(width, height, GpuSurfaceFormat::Rgba8Unorm)
     }
