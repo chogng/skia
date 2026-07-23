@@ -109,6 +109,17 @@ impl ColorSpace {
         }
     }
 
+    /// Returns a deterministic matrix/TRC ICC profile for standard sRGB.
+    ///
+    /// Container formats whose defaults already specify sRGB need not embed
+    /// this profile. Output formats with an explicit color-management contract,
+    /// such as PDF output intents, can use it to name their default RGB space.
+    pub fn srgb_icc_profile() -> Result<Vec<u8>, ImageError> {
+        srgb_profile()
+            .encode()
+            .map_err(|_| ImageError::new(ImageErrorCode::ColorTransformFailed))
+    }
+
     fn validate(&self) -> Result<(), ImageError> {
         if let Self::Icc(profile) = self {
             parse_supported_icc(profile)?

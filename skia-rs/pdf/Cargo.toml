@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 flate2 = { workspace = true }
+sha2 = { workspace = true }
 skia-core = { workspace = true }
 skia-cpu = { workspace = true }
 skia-image = { workspace = true }

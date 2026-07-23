@@ -32,6 +32,7 @@ fn main() {
             keywords: Some("pdf,vector,image,alpha,multipage".to_owned()),
             creator: Some("skia-pdf pdf_qa example".to_owned()),
             producer: None,
+            ..PdfMetadata::default()
         },
         unsupported_behavior: UnsupportedBehavior::RasterizePage,
         raster_fallback: RasterFallback {
@@ -118,6 +119,22 @@ fn main() {
     document
         .add_page(PageSpec::new(second_size), &fallback.finish())
         .expect("fallback page");
+
+    let opaque_stops = [
+        GradientStop::new(Scalar::ZERO, Color::rgba(20, 145, 220, 255)).expect("stop"),
+        GradientStop::new(scalar(1), Color::rgba(235, 90, 50, 255)).expect("stop"),
+    ];
+    let opaque_gradient =
+        Gradient::radial(point(160, 80), scalar(110), &opaque_stops, TileMode::Clamp)
+            .expect("gradient");
+    let mut native_gradient = DisplayListBuilder::new(4).expect("display list");
+    native_gradient
+        .fill_rect(rect(0, 0, 320, 160), Paint::from_gradient(opaque_gradient))
+        .expect("gradient fill");
+    let third_size = PageSize::new(scalar(320), scalar(160)).expect("page size");
+    document
+        .add_page(PageSpec::new(third_size), &native_gradient.finish())
+        .expect("native gradient page");
 
     document.finish().expect("write PDF");
 }

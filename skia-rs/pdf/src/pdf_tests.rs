@@ -1,8 +1,10 @@
 use std::io::{self, Write};
 
 use skia_core::{
-    BlendMode, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, Gradient, GradientStop,
-    Paint, PathBuilder, Point, Rect, Scalar, TileMode, Transform,
+    BlendMode, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, FontId, GlyphId,
+    GlyphOutline, GlyphOutlineProvider, GlyphRun, Gradient, GradientStop, OutlinePoint,
+    OutlineSegment, Paint, PathBuilder, Point, PositionedGlyph, Rect, Scalar, TextError, TextUnit,
+    TileMode, Transform,
 };
 use skia_image::Image;
 
@@ -25,6 +27,54 @@ fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
 
 fn size(width: i32, height: i32) -> PageSize {
     PageSize::new(scalar(width), scalar(height)).expect("test page size")
+}
+
+struct SingleGlyphProvider(GlyphOutline);
+
+impl GlyphOutlineProvider for SingleGlyphProvider {
+    fn glyph_outline(
+        &self,
+        font: FontId,
+        glyph: GlyphId,
+    ) -> Result<Option<GlyphOutline>, TextError> {
+        Ok((self.0.font() == font && self.0.glyph() == glyph).then(|| self.0.clone()))
+    }
+}
+
+fn text_unit(value: i32) -> TextUnit {
+    TextUnit::from_i32(value).expect("small exact coordinate")
+}
+
+fn glyph_run() -> GlyphRun {
+    GlyphRun::new(
+        FontId::new(7),
+        10 << 16,
+        10,
+        vec![PositionedGlyph::new(
+            GlyphId::new(3),
+            TextUnit::ZERO,
+            TextUnit::ZERO,
+            TextUnit::ZERO,
+            TextUnit::ZERO,
+        )],
+    )
+    .expect("valid run")
+}
+
+fn glyph_outline() -> GlyphOutline {
+    let point = |x, y| OutlinePoint::new(text_unit(x), text_unit(y));
+    GlyphOutline::new(
+        FontId::new(7),
+        GlyphId::new(3),
+        vec![
+            OutlineSegment::MoveTo(point(0, 0)),
+            OutlineSegment::LineTo(point(10, 0)),
+            OutlineSegment::LineTo(point(10, 10)),
+            OutlineSegment::LineTo(point(0, 10)),
+            OutlineSegment::Close,
+        ],
+    )
+    .expect("valid closed square")
 }
 
 fn empty_list() -> DisplayList {
@@ -197,6 +247,7 @@ fn metadata_is_escaped_and_non_ascii_uses_utf16() {
             keywords: Some("pdf,deterministic".to_owned()),
             creator: Some("tests".to_owned()),
             producer: Some("stable producer".to_owned()),
+            ..DocumentMetadata::default()
         },
         ..PdfOptions::default()
     };
@@ -209,13 +260,111 @@ fn metadata_is_escaped_and_non_ascii_uses_utf16() {
 }
 
 #[test]
+fn pdf_a_2b_writes_xmp_output_intent_and_deterministic_identifier() {
+    let timestamp = PdfDateTime::new(2026, 7, 23, 12, 34, 56).expect("timestamp");
+    let options = PdfOptions {
+        metadata: DocumentMetadata {
+            title: Some("A & B".to_owned()),
+            author: Some("Author".to_owned()),
+            subject: Some("Subject".to_owned()),
+            keywords: Some("pdf,a-2b".to_owned()),
+            creator: Some("tests".to_owned()),
+            producer: Some("stable producer".to_owned()),
+            creation: Some(timestamp),
+            modified: Some(timestamp),
+        },
+        conformance: PdfConformance::PdfA2b,
+        ..PdfOptions::default()
+    };
+    let first = PdfDocument::new(Vec::new(), options.clone())
+        .expect("document")
+        .finish()
+        .expect("finish");
+    let second = PdfDocument::new(Vec::new(), options)
+        .expect("document")
+        .finish()
+        .expect("finish");
+    assert_eq!(first, second);
+    let text = String::from_utf8_lossy(&first);
+    assert!(text.contains("/Metadata 4 0 R /OutputIntents [5 0 R]"));
+    assert!(text.contains("/S /GTS_PDFA1"));
+    assert!(text.contains("pdfaid:part=\"2\" pdfaid:conformance=\"B\""));
+    assert!(text.contains("A &amp; B"));
+    assert!(text.contains("/CreationDate (D:20260723123456Z)"));
+    assert!(text.contains("/ID [<"));
+    validate_xref(&first);
+
+    let invalid = PdfOptions {
+        conformance: PdfConformance::PdfA2b,
+        ..PdfOptions::default()
+    };
+    let Err(error) = PdfDocument::new(Vec::new(), invalid) else {
+        panic!("timestamps required");
+    };
+    assert_eq!(error.code(), DocumentErrorCode::InvalidMetadata);
+}
+
+#[test]
+fn links_and_named_destinations_preserve_top_left_coordinates() {
+    let mut document = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    document
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("first page");
+    document
+        .add_link(
+            rect(10, 10, 30, 30),
+            PdfLinkTarget::NamedDestination("second-page".to_owned()),
+        )
+        .expect("internal link");
+    document
+        .add_link(
+            rect(40, 10, 60, 30),
+            PdfLinkTarget::Uri("https://example.test/qa".to_owned()),
+        )
+        .expect("URI link");
+    document.end_page().expect("end first page");
+    document
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("second page");
+    document
+        .add_named_destination("second-page".to_owned(), point(15, 25))
+        .expect("destination");
+    document.end_page().expect("end second page");
+    let bytes = document.finish().expect("finish");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("/Annots ["));
+    assert!(text.contains("/Names << /Dests << /Names [ (second-page)"));
+    assert!(text.contains("/Dest (second-page)"));
+    assert!(text.contains("/URI (https://example.test/qa)"));
+    assert!(text.contains("/Rect [10 50 30 70]"));
+    assert!(text.contains("/XYZ 15 55 null"));
+    validate_xref(&bytes);
+
+    let mut unresolved = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    unresolved
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("page");
+    unresolved
+        .add_link(
+            rect(0, 0, 10, 10),
+            PdfLinkTarget::NamedDestination("missing".to_owned()),
+        )
+        .expect("link");
+    unresolved.end_page().expect("end page");
+    let Err(error) = unresolved.finish() else {
+        panic!("unresolved destination");
+    };
+    assert_eq!(error.code(), DocumentErrorCode::InvalidDestination);
+}
+
+#[test]
 fn unsupported_gradient_is_error_or_bounded_page_fallback() {
     let stops = [
         GradientStop::new(Scalar::ZERO, Color::RED).expect("stop"),
         GradientStop::new(scalar(1), Color::BLUE).expect("stop"),
     ];
     let gradient =
-        Gradient::linear(point(0, 0), point(100, 0), &stops, TileMode::Clamp).expect("gradient");
+        Gradient::linear(point(0, 0), point(100, 0), &stops, TileMode::Repeat).expect("gradient");
     let mut builder = DisplayListBuilder::new(2).expect("builder");
     builder
         .fill_rect(rect(0, 0, 100, 80), Paint::from_gradient(gradient))
@@ -248,6 +397,27 @@ fn unsupported_gradient_is_error_or_bounded_page_fallback() {
         .expect("fallback page");
     let text = String::from_utf8_lossy(&fallback.finish().expect("finish")).into_owned();
     assert!(text.contains("/Subtype /Image"));
+}
+
+#[test]
+fn opaque_clamped_gradients_stay_vector_native() {
+    let stops = [
+        GradientStop::new(Scalar::ZERO, Color::RED).expect("stop"),
+        GradientStop::new(scalar(1), Color::BLUE).expect("stop"),
+    ];
+    let gradient =
+        Gradient::linear(point(0, 0), point(100, 0), &stops, TileMode::Clamp).expect("gradient");
+    let mut builder = DisplayListBuilder::new(1).expect("builder");
+    builder
+        .fill_rect(rect(0, 0, 100, 80), Paint::from_gradient(gradient))
+        .expect("fill");
+    let bytes = pdf_for(&builder.finish());
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("/Shading << /Sh0"));
+    assert!(text.contains("/Sh0 sh"));
+    assert!(text.contains("/ShadingType 2"));
+    assert!(!text.contains("/Subtype /Image"));
+    validate_xref(&bytes);
 }
 
 #[test]
@@ -370,6 +540,41 @@ fn linear_match_rejects_opaque_non_source_over_blending() {
             .code(),
         DocumentErrorCode::Unsupported
     );
+}
+
+#[test]
+fn glyph_outlines_are_emitted_as_vector_paths() {
+    let mut builder = DisplayListBuilder::new(2).expect("builder");
+    let glyphs = builder.add_glyph_run(glyph_run()).expect("glyphs");
+    builder
+        .draw_glyph_run(glyphs, Paint::new(Color::rgba(20, 40, 60, 255)))
+        .expect("draw glyphs");
+    let list = builder.finish();
+
+    let mut unsupported = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    unsupported
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("begin");
+    unsupported.add_display_list(&list).expect("list");
+    assert_eq!(
+        unsupported
+            .end_page()
+            .expect_err("no outline provider")
+            .code(),
+        DocumentErrorCode::UnsupportedText
+    );
+
+    let mut document = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    document
+        .add_page_with_glyph_outlines(
+            PageSpec::new(size(100, 80)),
+            &list,
+            &SingleGlyphProvider(glyph_outline()),
+        )
+        .expect("outlined PDF page");
+    let text = String::from_utf8_lossy(&document.finish().expect("finish")).into_owned();
+    assert!(text.contains("0 0 m\n10 0 l\n10 10 l\n0 10 l\nh\nf"));
+    assert!(!text.contains("/Font"));
 }
 
 #[test]

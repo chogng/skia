@@ -91,6 +91,13 @@ fn linear_srgb_conversion_changes_encoded_samples_and_preserves_alpha() {
 }
 
 #[test]
+fn standard_srgb_icc_profile_is_embeddable_and_validated() {
+    let profile = ColorSpace::srgb_icc_profile().unwrap();
+    assert!(!profile.is_empty());
+    assert!(ColorSpace::from_icc_profile(profile).is_ok());
+}
+
+#[test]
 fn matrix_icc_conversion_is_applied() {
     let profile = ColorProfile::new_display_p3().encode().unwrap();
     let color_space = ColorSpace::from_icc_profile(profile).unwrap();

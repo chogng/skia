@@ -211,25 +211,34 @@ rectangle. The current mapping policy is:
 | Solid opaque sRGBA SourceOver paint | Native color |
 | Alpha, transparent image, or standard PDF blend mode | `NativePdf`: native color plus deduplicated ExtGState; `LinearMatch`: CPU page fallback or explicit error |
 | sRGB RGBA8 image, opacity, reuse | Native Image XObject; alpha uses SMask; sampling choice is retained as the interpolation policy |
-| Gradient/runtime shader, color filter, SaveLayer/image filter, difference clip, non-center stroke, path effect, non-PDF Porter-Duff mode, rational conic | Configurable whole-page CPU fallback, otherwise `Unsupported` |
+| Opaque, clamped two-stop-or-more linear or radial gradient fill | Native PDF shading pattern; no raster image |
+| Gradient with transparency, repeat/mirror tiling, a non-`SourceOver` blend, gradient stroke; runtime shader, color filter, SaveLayer/image filter, difference clip, non-center stroke, path effect, non-PDF Porter-Duff mode, rational conic | Configurable whole-page CPU fallback, otherwise `Unsupported` |
 | ICC-tagged image | `UnsupportedColorProfile`; profiles are never silently treated as sRGB |
-| Glyph-run command | `UnsupportedText` in the first API because a DisplayList does not own its outline resolver |
+| Glyph-run command | `end_page`/`add_page` return `UnsupportedText`; `end_page_with_glyph_outlines`/`add_page_with_glyph_outlines` turn a supplied `GlyphOutlineProvider` into native vector paths |
 
 Whole-page fallback has explicit DPI, pixel, and RGBA working-memory ceilings.
 It renders into transparent straight-alpha RGBA8 through `skia-cpu`, embeds the
 result as one image with an SMask when required, and does not depend on a GPU or
 platform renderer. Fallback remains whole-page in this release; region/layer
-rasterization is a future optimization. Text is intentionally not sent through
-that fallback until the API can accept the matching `GlyphOutlineProvider`.
-Consequently glyph content cannot disappear, but a glyph page currently fails
-explicitly. A later outline strategy may preserve appearance and font
-independence but will also document that outline text is not searchable;
-searchable PDF text requires complete font subsetting, metrics, CID mapping,
-and ToUnicode support and will not be added piecemeal.
+rasterization is a future optimization. Glyph pages use that same fallback when
+the matching `GlyphOutlineProvider` is supplied. The emitted outlines preserve
+appearance and font independence, but are not searchable. Searchable PDF text
+requires complete font subsetting, metrics, CID mapping, and ToUnicode support
+and will not be added piecemeal.
 
-PDF/A, tagged/structured PDF, outlines/bookmarks, encryption, and signatures
-are not current features. SVG remains a separate single-canvas output
-responsibility rather than being forced into this multi-page API.
+`PdfConformance::PdfA2b` adds fixed XMP identification metadata, an embedded
+standard-sRGB output intent, explicit UTC creation/modification dates, and a
+deterministic document identifier. It is a constrained PDF/A-2b output profile:
+the crate rejects unsupported drawing rather than silently claiming a different
+result, but external archival validation remains the caller's release check.
+`add_link` adds URI or named-destination link annotations; `add_named_destination`
+defines document-global destinations in the same top-left page coordinate space.
+These document-level APIs deliberately stay separate from the reusable
+`DisplayList`.
+
+Tagged/structured PDF, bookmark outlines, embedded/searchable fonts, encryption,
+and signatures are not current features. SVG remains a separate single-canvas
+output responsibility rather than being forced into this multi-page API.
 
 ## XPS and OpenXPS output
 

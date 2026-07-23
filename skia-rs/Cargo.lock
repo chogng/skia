@@ -734,6 +734,7 @@ dependencies = [
  "skia-image",
  "skia-path",
  "skia-tessellation",
+ "skia-text",
 ]
 
 [[package]]
@@ -809,6 +810,7 @@ name = "skia-pdf"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "sha2",
  "skia-core",
  "skia-cpu",
  "skia-image",
