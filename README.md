@@ -59,10 +59,11 @@ flowchart LR
   adapter, so adding Vulkan or WebGPU does not duplicate shaping or atlas policy.
 - `skia-rs/gpu/metal` and `skia-rs/gpu/vulkan` are platform execution adapters. The
   Vulkan adapter dynamically loads the platform loader and owns a real instance,
-  device, graphics queue, and offscreen RGBA8 image. It implements the complete
-  portable command vocabulary through deterministic composition plus Vulkan
-  staging upload, preserves target contents across submissions, retains a native
-  clear fast path, and reads pixels back from device-owned memory.
+  device, graphics queue, compute pipeline, and offscreen RGBA8 storage target.
+  It executes the complete portable command vocabulary in Vulkan shaders,
+  preserves target contents across submissions, expands path/stroke geometry on
+  the host, and reads pixels back from device-owned memory. The CPU renderer is
+  used only as a test oracle and is not a production dependency of this adapter.
 - `skia-rs/text/system` is the platform filesystem adapter for system/user font
   discovery, generic-family resolution, and language-preferred family policy.
   It returns stable path/index identities and reloadable records; `skia-rs/text`

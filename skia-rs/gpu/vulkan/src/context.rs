@@ -10,7 +10,6 @@ use crate::{VulkanError, VulkanErrorCode};
 pub(crate) struct VulkanContext {
     _entry: Entry,
     instance: ash::Instance,
-    physical_device: vk::PhysicalDevice,
     device: ash::Device,
     queue: vk::Queue,
     queue_family_index: u32,
@@ -106,7 +105,6 @@ impl VulkanContext {
         Ok(Self {
             _entry: entry,
             instance,
-            physical_device,
             device,
             queue,
             queue_family_index,
@@ -120,14 +118,6 @@ impl VulkanContext {
 
     pub(crate) const fn device(&self) -> &ash::Device {
         &self.device
-    }
-
-    pub(crate) const fn physical_device(&self) -> vk::PhysicalDevice {
-        self.physical_device
-    }
-
-    pub(crate) const fn instance(&self) -> &ash::Instance {
-        &self.instance
     }
 
     pub(crate) fn device_name(&self) -> String {

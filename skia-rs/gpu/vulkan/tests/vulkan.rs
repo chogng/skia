@@ -1,6 +1,7 @@
 use skia_core::{
-    BlendMode, ClipOp, Color, FillRule, ImageFilter, Paint, PathBuilder, Rect, SamplingOptions,
-    SaveLayerOptions, Scalar, StrokeCap, StrokeOptions, Transform,
+    BlendMode, ClipOp, Color, ColorFilter, ColorMatrix, FillRule, Gradient, GradientStop,
+    ImageFilter, Paint, PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar,
+    StrokeCap, StrokeOptions, TileMode, Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphQuad, GpuSurfaceDescriptor,
@@ -221,6 +222,144 @@ fn vulkan_backend_matches_the_reference_for_every_command_variant() {
         .submit(&mut actual, &commands)
         .expect("Vulkan submission");
 
+    assert_eq!(actual.read_rgba8().expect("readback"), expected.pixels());
+}
+
+#[test]
+fn vulkan_backend_matches_every_blend_mode() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let modes = [
+        BlendMode::Clear,
+        BlendMode::Source,
+        BlendMode::Destination,
+        BlendMode::SourceOver,
+        BlendMode::DestinationOver,
+        BlendMode::SourceIn,
+        BlendMode::DestinationIn,
+        BlendMode::SourceOut,
+        BlendMode::DestinationOut,
+        BlendMode::SourceAtop,
+        BlendMode::DestinationAtop,
+        BlendMode::Xor,
+        BlendMode::Plus,
+        BlendMode::Modulate,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+    ];
+    let descriptor = GpuSurfaceDescriptor::new(modes.len() as u32, 1).expect("descriptor");
+    let mut encoder = GpuCommandEncoder::new(modes.len() + 1).expect("encoder");
+    encoder
+        .clear(Color::rgba(35, 170, 90, 157))
+        .expect("destination");
+    for (index, mode) in modes.into_iter().enumerate() {
+        encoder
+            .fill_rect(
+                rect(index as i32, 0, index as i32 + 1, 1),
+                Paint::new(Color::rgba(220, 45, 180, 113)).with_blend_mode(mode),
+            )
+            .expect("blend draw");
+    }
+    assert_matches_reference(&mut backend, descriptor, &encoder.finish());
+}
+
+#[test]
+fn vulkan_backend_matches_gradients_and_color_filters() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let descriptor = GpuSurfaceDescriptor::new(8, 4).expect("descriptor");
+    let stops = [
+        GradientStop::new(Scalar::ZERO, Color::RED).expect("first stop"),
+        GradientStop::new(Scalar::from_bits(1 << 15), Color::GREEN).expect("middle stop"),
+        GradientStop::new(Scalar::from_i32(1).expect("one"), Color::BLUE).expect("last stop"),
+    ];
+    let gradient = Gradient::linear(
+        Point::new(Scalar::ZERO, Scalar::ZERO),
+        Point::new(Scalar::from_i32(4).expect("end"), Scalar::ZERO),
+        &stops,
+        TileMode::Mirror,
+    )
+    .expect("gradient");
+    let matrix = ColorMatrix::new([
+        0,
+        1 << 16,
+        0,
+        0,
+        8 << 16,
+        1 << 16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1 << 16,
+        0,
+    ]);
+    let mut encoder = GpuCommandEncoder::new(6).expect("encoder");
+    encoder.clear(Color::BLACK).expect("clear");
+    encoder
+        .fill_rect(rect(0, 0, 8, 2), Paint::from_gradient(gradient))
+        .expect("gradient fill");
+    encoder
+        .fill_rect(
+            rect(0, 2, 4, 4),
+            Paint::new(Color::rgba(40, 100, 180, 190))
+                .with_color_filter(ColorFilter::Matrix(matrix)),
+        )
+        .expect("matrix filter");
+    encoder
+        .save_layer(
+            SaveLayerOptions::new().with_filter(ImageFilter::Color(ColorFilter::Blend {
+                color: Color::rgba(240, 30, 10, 100),
+                mode: BlendMode::Screen,
+            })),
+        )
+        .expect("filtered layer");
+    encoder
+        .fill_rect(rect(4, 2, 8, 4), Paint::new(Color::rgba(20, 160, 80, 210)))
+        .expect("layer fill");
+    encoder.restore().expect("restore layer");
+    assert_matches_reference(&mut backend, descriptor, &encoder.finish());
+}
+
+fn assert_matches_reference(
+    backend: &mut VulkanBackend,
+    descriptor: GpuSurfaceDescriptor,
+    commands: &skia_gpu::GpuCommandBuffer,
+) {
+    let mut reference = SoftwareGpuBackend::default();
+    let mut expected = reference
+        .create_surface(descriptor)
+        .expect("reference surface");
+    reference
+        .submit(&mut expected, commands)
+        .expect("reference submission");
+    let mut actual = backend.create_surface(descriptor).expect("Vulkan surface");
+    backend
+        .submit(&mut actual, commands)
+        .expect("Vulkan submission");
     assert_eq!(actual.read_rgba8().expect("readback"), expected.pixels());
 }
 

@@ -2,19 +2,23 @@
 
 `skia-vulkan` is the cross-platform Vulkan execution adapter for `skia-gpu`.
 It dynamically loads the system Vulkan loader, selects a graphics-capable
-device and queue, and renders into a device-owned, optimal-tiled RGBA8 image.
+device and queue, and renders into a device-owned RGBA8 storage target.
 
 ## Current implementation
 
 - Target-wide clears use a native Vulkan transfer command.
-- The complete portable `GpuCommand` vocabulary is composed deterministically
-  and uploaded through a host-visible staging buffer.
+- A build-time WGSL-to-SPIR-V step produces the Vulkan compute shader.
+- Rectangles, paths, strokes, images, glyphs, complex clips, isolated layers,
+  gradients, filters, blur, sampling, and every portable blend mode execute in
+  the compute pipeline. The host only interprets commands, expands geometry,
+  and uploads immutable resources.
 - Surface contents are preserved across submissions.
 - Exact RGBA8 readback uses a separate Vulkan staging buffer.
+- `skia-cpu` and the software GPU backend are test-only pixel oracles; neither
+  is present in the production dependency graph.
 
 The backend is currently offscreen only. It does not create a window or
-swapchain. Presentation and fully native shader and descriptor pipelines are
-separate work.
+swapchain; presentation remains a separate platform-integration concern.
 
 ## Testing
 
