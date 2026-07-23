@@ -1,0 +1,12 @@
+load("//:defs.bzl", "skia_rust_crate")
+
+skia_rust_crate(
+    name = "vulkan",
+    build_script_data = ["shaders/renderer.wgsl"],
+    crate_name = "skia_vulkan",
+    target_compatible_with = select({
+        "@platforms//os:linux": [],
+        "@platforms//os:windows": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

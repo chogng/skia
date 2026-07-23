@@ -1,0 +1,8 @@
+load("//:defs.bzl", "skia_rust_crate")
+
+skia_rust_crate(
+    name = "gpu",
+    crate_features = ["software"],
+    crate_name = "skia_gpu",
+    test_data_extra = ["//skia-rs:golden-files"],
+)

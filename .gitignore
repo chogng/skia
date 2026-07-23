@@ -1,2 +1,3 @@
 /target/
 /skia-rs/target/
+/bazel-*

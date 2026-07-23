@@ -1,0 +1,36 @@
+exports_files([
+    "AGENTS.md",
+    "README.md",
+])
+
+# rules_rs distinguishes glibc and musl Rust toolchains. Mark native Linux as
+# glibc-compatible without turning common Rust libraries into platform targets.
+platform(
+    name = "local_linux",
+    constraint_values = [
+        "@llvm//constraints/libc:gnu.2.28",
+    ],
+    parents = ["@platforms//host"],
+)
+
+# Bazel's built-in Windows host platform does not identify the Rust ABI.
+# Native builds use the same MSVC ABI as Cargo on Windows.
+platform(
+    name = "local_windows",
+    constraint_values = [
+        "@rules_rs//rs/experimental/platforms/constraints:windows_msvc",
+    ],
+    parents = ["@platforms//host"],
+)
+
+filegroup(
+    name = "bazel-config",
+    srcs = [
+        ".bazelignore",
+        ".bazelrc",
+        ".bazelversion",
+        "MODULE.bazel",
+        "defs.bzl",
+    ],
+    visibility = ["//visibility:public"],
+)

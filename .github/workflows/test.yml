@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  portable:
-    name: portable Rust and Unicode conformance
+  linux:
+    name: Linux Rust and Unicode conformance
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +30,18 @@ jobs:
         env:
           SKIA_UNICODE_CONFORMANCE_DIR: target/unicode-conformance
         run: cargo test -p skia-text --test unicode_conformance -- --ignored
+
+  windows:
+    name: Windows Rust and Vulkan compile coverage
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint
+        working-directory: skia-rs
+        run: cargo clippy --workspace --exclude skia-metal --all-targets --all-features -- -D warnings
+      - name: Workspace tests
+        working-directory: skia-rs
+        run: cargo test --workspace --exclude skia-metal --all-features
 
   vulkan-lavapipe:
     name: Vulkan (Lavapipe + validation)
@@ -55,11 +67,14 @@ jobs:
           SKIA_VULKAN_VALIDATION: "1"
         run: cargo test -p skia-vulkan -- --nocapture --test-threads=1
 
-  metal-optional:
-    name: macOS Metal (device optional)
+  macos:
+    name: macOS Rust and Metal (device optional)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Metal tests
+      - name: Lint
         working-directory: skia-rs
-        run: cargo test -p skia-metal -p skia-gpu-text
+        run: cargo clippy --workspace --exclude skia-vulkan --all-targets --all-features -- -D warnings
+      - name: Workspace tests
+        working-directory: skia-rs
+        run: cargo test --workspace --exclude skia-vulkan --all-features

@@ -1,0 +1,6 @@
+load("//:defs.bzl", "skia_rust_crate")
+
+skia_rust_crate(
+    name = "geometry",
+    crate_name = "skia_geometry",
+)

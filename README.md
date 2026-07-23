@@ -6,6 +6,16 @@ text-glyph drawing contracts, display lists, and CPU/GPU execution. It is **not*
 implementation detail of a particular caller and it does not model caller-specific
 operators or objects.
 
+Cargo remains the dependency and package source of truth. The repository also
+contains an initial Bazel build rooted at `MODULE.bazel`: `rules_rs` reads
+`skia-rs/Cargo.toml` and `skia-rs/Cargo.lock`, while each crate has a small
+`BUILD.bazel` target for library and test ownership. Use `bazel build //skia-rs/...`,
+`bazel test //skia-rs/...`, or `bazel build --config=clippy //skia-rs/...`.
+The existing Cargo workflow remains authoritative while Bazel coverage is being
+introduced and validated on every supported platform. Native Windows Bazel builds
+require the MSVC C++ build tools used by `rules_rust`; set `BAZEL_SH` to Git Bash
+when analyzing or running Rust test targets.
+
 ```mermaid
 flowchart LR
   adapter["Upstream adapter"] --> api["Skia public API\nskia facade"]
@@ -27,6 +37,23 @@ flowchart LR
   text --> gpu_text["GPU text adapter"]
   gpu_text --> gpu
 ```
+
+## Platform support
+
+Common library targets have no Bazel operating-system constraint and build on
+Windows, Linux, and macOS. Backend targets describe only their real native
+availability; there is no separate `portable` platform, crate, or feature.
+
+| Capability | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| Facade, CPU, text, codecs, and shared GPU contracts | Yes | Yes | Yes |
+| Vulkan backend | Yes | Yes | No |
+| Metal backend | No | No | Yes |
+
+Vulkan on macOS is not part of the supported matrix until MoltenVK loading,
+packaging, and CI coverage are explicitly provided. Cargo selects backend crates
+at the application composition boundary; Bazel expresses the same boundary with
+`target_compatible_with` on the Metal and Vulkan targets.
 
 ## Dependency rule
 

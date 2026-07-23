@@ -1,0 +1,6 @@
+load("//:defs.bzl", "skia_rust_crate")
+
+skia_rust_crate(
+    name = "path",
+    crate_name = "skia_path",
+)

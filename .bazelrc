@@ -1,0 +1,21 @@
+common --enable_platform_specific_config
+common:linux --host_platform=//:local_linux
+common:windows --host_platform=//:local_windows
+common --test_output=errors
+
+# Keep local Bazel artifacts outside action output trees while preserving the
+# ordinary, offline-by-default local build behavior.
+common --disk_cache=~/.cache/bazel-disk-cache
+common --repository_cache=~/.cache/bazel-repo-cache
+
+# Match `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:clippy --output_groups=+clippy_checks
+build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+
+# Rust tests spawn their bodies on separate threads. Keep the same reserve on
+# every host so larger renderer tests do not inherit a small platform default.
+common --test_env=RUST_MIN_STACK=8388608
+
+# Optional per-user overrides stay out of the repository.
+try-import %workspace%/user.bazelrc
