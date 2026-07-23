@@ -290,12 +290,13 @@ longer `Copy`; it remains `Clone`, `Eq`, and `Hash`, with handle equality based
 on shared implementation identity and limits. CPU Canvas and DisplayList
 replay expand the effect before stroking; the generic GPU encoder expands it at
 recording time so hardware backends continue to receive an ordinary path.
-`ColorFilterHandle` gives `Paint` the same shared ownership model for existing
-value-backed color filters, and `ImageFilterHandle` lets `SaveLayerOptions`
-retain a shared layer filter inside a DisplayList. They deliberately lower back
-to the established value filters at execution, so CPU, Metal, and Vulkan keep
-their current filter implementations while the ownership boundary is ready for
-future dynamic filter types.
+`ShaderHandle` gives `Paint` shared ownership of a backend-neutral source
+shader; gradients lower through it today. `ColorFilterHandle` gives `Paint` the
+same model for existing value-backed color filters, and `ImageFilterHandle` lets
+`SaveLayerOptions` retain a shared layer filter inside a DisplayList. They
+deliberately lower back to established value effects at execution, so CPU,
+Metal, and Vulkan keep their current implementations while the ownership
+boundary is ready for future dynamic effect types.
 `skia-tessellation::stroke_to_path` produces a
 deterministic non-zero triangle-fill path.
 

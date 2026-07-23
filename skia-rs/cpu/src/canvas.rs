@@ -828,7 +828,7 @@ impl Canvas<'_> {
     }
 
     fn blend_pixel(&mut self, x: i64, y: i64, paint: &Paint) -> Result<(), SkiaError> {
-        let local = if paint.gradient().is_some() {
+        let local = if paint.shader_handle().is_some() {
             self.state
                 .transform
                 .inverse()?

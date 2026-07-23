@@ -30,7 +30,8 @@ pub use display_list::GlyphRunId;
 pub use display_list::{DisplayList, DisplayListBuilder, DrawCommand, ImageId, PathId};
 pub use paint::{
     BlendMode, Color, ColorFilter, ColorFilterHandle, ColorMatrix, Gradient, GradientGeometry,
-    GradientStop, ImageFilter, ImageFilterHandle, Paint, SaveLayerOptions, TileMode,
+    GradientStop, ImageFilter, ImageFilterHandle, Paint, SaveLayerOptions, Shader, ShaderHandle,
+    TileMode,
 };
 pub use path_effect::{
     PathEffect, PathEffectHandle, PathEffectLimits, apply_path_effect, compose_path_effects,

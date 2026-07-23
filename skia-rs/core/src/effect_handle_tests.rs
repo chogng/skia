@@ -1,6 +1,6 @@
 use super::{
-    BlendMode, Color, ColorFilter, ColorFilterHandle, ImageFilter, ImageFilterHandle, Paint,
-    SaveLayerOptions,
+    BlendMode, Color, ColorFilter, ColorFilterHandle, Gradient, GradientStop, ImageFilter,
+    ImageFilterHandle, Paint, Point, SaveLayerOptions, Scalar, ShaderHandle, TileMode,
 };
 
 #[test]
@@ -20,4 +20,21 @@ fn paint_and_layers_retain_shared_value_effect_handles() {
         options.filter(),
         Some(ImageFilter::box_blur(1).expect("blur"))
     );
+}
+
+#[test]
+fn paint_retains_a_shared_gradient_shader_handle() {
+    let start = Point::new(Scalar::ZERO, Scalar::ZERO);
+    let end = Point::new(Scalar::from_i32(2).expect("end"), Scalar::ZERO);
+    let stops = [
+        GradientStop::new(Scalar::ZERO, Color::RED).expect("start"),
+        GradientStop::new(Scalar::from_i32(1).expect("end"), Color::BLUE).expect("end"),
+    ];
+    let gradient = Gradient::linear(start, end, &stops, TileMode::Clamp).expect("gradient");
+    let shader = ShaderHandle::from_gradient(gradient);
+    let paint = Paint::new(Color::WHITE).with_shader(shader.clone());
+
+    assert_eq!(paint.shader_handle(), Some(&shader));
+    assert_eq!(paint.gradient(), Some(gradient));
+    assert_eq!(paint.source_color(start).expect("sample"), Color::RED);
 }

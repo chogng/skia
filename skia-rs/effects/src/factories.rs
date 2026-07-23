@@ -40,7 +40,7 @@ pub mod image_filters {
 
 /// Built-in paint-source shader factories.
 pub mod shaders {
-    use skia_core::{Gradient, GradientStop, Point, Scalar, SkiaError, TileMode};
+    use skia_core::{Gradient, GradientStop, Point, Scalar, ShaderHandle, SkiaError, TileMode};
 
     /// Creates a bounded local-space linear gradient shader.
     pub fn linear_gradient(
@@ -60,5 +60,10 @@ pub mod shaders {
         tile_mode: TileMode,
     ) -> Result<Gradient, SkiaError> {
         Gradient::radial(center, radius, stops, tile_mode)
+    }
+
+    /// Wraps a gradient for shared paint or display-list ownership.
+    pub fn gradient_handle(gradient: Gradient) -> ShaderHandle {
+        ShaderHandle::from_gradient(gradient)
     }
 }

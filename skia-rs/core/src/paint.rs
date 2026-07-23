@@ -446,6 +446,67 @@ impl ColorFilter {
     }
 }
 
+/// Backend-neutral source program currently implemented by paints.
+///
+/// The enum starts with gradients because all executors can lower them today.
+/// New variants require a defined CPU evaluator and a Metal/Vulkan lowering
+/// strategy before they become public.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Shader {
+    /// Evaluates a bounded local-space gradient.
+    Gradient(Gradient),
+}
+
+impl Shader {
+    /// Returns the gradient representation when this shader has one.
+    pub const fn gradient(self) -> Option<Gradient> {
+        match self {
+            Self::Gradient(gradient) => Some(gradient),
+        }
+    }
+
+    /// Evaluates this shader at one local-space point.
+    pub fn sample(self, point: Point) -> Result<Color, SkiaError> {
+        match self {
+            Self::Gradient(gradient) => gradient.sample(point),
+        }
+    }
+}
+
+/// Shared, immutable ownership of one backend-neutral [`Shader`].
+///
+/// A handle lets paints and display lists reuse the same source program while
+/// keeping source evaluation extensible beyond inline gradient values.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ShaderHandle {
+    shader: Arc<Shader>,
+}
+
+impl ShaderHandle {
+    /// Wraps one shader in shared ownership.
+    pub fn new(shader: Shader) -> Self {
+        Self {
+            shader: Arc::new(shader),
+        }
+    }
+
+    /// Wraps one gradient shader in shared ownership.
+    pub fn from_gradient(gradient: Gradient) -> Self {
+        Self::new(Shader::Gradient(gradient))
+    }
+
+    /// Returns the backend-neutral shader value.
+    pub fn shader(&self) -> Shader {
+        *self.shader
+    }
+}
+
+impl From<Gradient> for ShaderHandle {
+    fn from(gradient: Gradient) -> Self {
+        Self::from_gradient(gradient)
+    }
+}
+
 /// Shared, immutable ownership of one built-in [`ColorFilter`].
 ///
 /// The handle lets paints and display lists share one filter allocation while
@@ -708,12 +769,12 @@ impl BlendMode {
     }
 }
 
-/// Immutable constant-color paint selected for one draw operation.
+/// Immutable paint selected for one draw operation.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Paint {
     color: Color,
     blend_mode: BlendMode,
-    gradient: Option<Gradient>,
+    shader: Option<ShaderHandle>,
     color_filter: Option<ColorFilterHandle>,
     path_effect: Option<PathEffectHandle>,
 }
@@ -724,18 +785,18 @@ impl Paint {
         Self {
             color,
             blend_mode: BlendMode::SourceOver,
-            gradient: None,
+            shader: None,
             color_filter: None,
             path_effect: None,
         }
     }
 
     /// Creates a source-over gradient paint with full opacity.
-    pub const fn from_gradient(gradient: Gradient) -> Self {
+    pub fn from_gradient(gradient: Gradient) -> Self {
         Self {
             color: Color::WHITE,
             blend_mode: BlendMode::SourceOver,
-            gradient: Some(gradient),
+            shader: Some(ShaderHandle::from_gradient(gradient)),
             color_filter: None,
             path_effect: None,
         }
@@ -766,14 +827,26 @@ impl Paint {
     }
 
     /// Selects a local-space gradient; the current color alpha modulates it.
-    pub const fn with_gradient(mut self, gradient: Gradient) -> Self {
-        self.gradient = Some(gradient);
+    pub fn with_gradient(mut self, gradient: Gradient) -> Self {
+        self.shader = Some(ShaderHandle::from_gradient(gradient));
+        self
+    }
+
+    /// Selects a shared local-space source shader.
+    pub fn with_shader(mut self, shader: ShaderHandle) -> Self {
+        self.shader = Some(shader);
         self
     }
 
     /// Restores constant-color source evaluation.
-    pub const fn without_gradient(mut self) -> Self {
-        self.gradient = None;
+    pub fn without_gradient(mut self) -> Self {
+        self.shader = None;
+        self
+    }
+
+    /// Restores constant-color source evaluation.
+    pub fn without_shader(mut self) -> Self {
+        self.shader = None;
         self
     }
 
@@ -821,8 +894,20 @@ impl Paint {
     }
 
     /// Returns the optional local-space gradient.
-    pub const fn gradient(&self) -> Option<Gradient> {
-        self.gradient
+    pub fn gradient(&self) -> Option<Gradient> {
+        self.shader
+            .as_ref()
+            .and_then(|shader| shader.shader().gradient())
+    }
+
+    /// Returns the optional backend-neutral source shader.
+    pub fn shader(&self) -> Option<Shader> {
+        self.shader.as_ref().map(ShaderHandle::shader)
+    }
+
+    /// Borrows the optional shared source shader.
+    pub fn shader_handle(&self) -> Option<&ShaderHandle> {
+        self.shader.as_ref()
     }
 
     /// Returns the optional pre-compositing color filter.
@@ -842,8 +927,11 @@ impl Paint {
 
     /// Evaluates this paint's source at one local-space point.
     pub fn source_color(&self, point: Point) -> Result<Color, SkiaError> {
-        let source = if let Some(gradient) = self.gradient {
-            gradient.sample(point)?.with_opacity(self.color.alpha())
+        let source = if let Some(shader) = self.shader.as_ref() {
+            shader
+                .shader()
+                .sample(point)?
+                .with_opacity(self.color.alpha())
         } else {
             self.color
         };
