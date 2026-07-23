@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use skia_gpu::{GpuBackend, GpuCapabilities, GpuCommandBuffer, GpuSurfaceDescriptor};
+use skia_gpu::{
+    GpuBackend, GpuCapabilities, GpuCommandBuffer, GpuSurfaceDescriptor, RuntimeShaderPacketCache,
+};
 
 use crate::{
     VulkanError, VulkanErrorCode, commands, context::VulkanContext, renderer::VulkanRenderer,
@@ -11,6 +13,7 @@ use crate::{
 pub struct VulkanBackend {
     context: Arc<VulkanContext>,
     renderer: VulkanRenderer,
+    runtime_shader_packets: RuntimeShaderPacketCache,
 }
 
 impl VulkanBackend {
@@ -18,7 +21,11 @@ impl VulkanBackend {
     pub fn new() -> Result<Self, VulkanError> {
         let context = Arc::new(VulkanContext::new()?);
         let renderer = VulkanRenderer::new(context.clone())?;
-        Ok(Self { context, renderer })
+        Ok(Self {
+            context,
+            renderer,
+            runtime_shader_packets: RuntimeShaderPacketCache::default(),
+        })
     }
 
     /// Returns the selected physical-device name with invalid bytes replaced.
@@ -63,6 +70,12 @@ impl GpuBackend for VulkanBackend {
         if !surface.belongs_to(&self.context) {
             return Err(VulkanError::new(VulkanErrorCode::UnsupportedCommand));
         }
-        commands::submit(&self.renderer, self.context.clone(), surface, commands)
+        commands::submit(
+            &self.renderer,
+            self.context.clone(),
+            surface,
+            commands,
+            &mut self.runtime_shader_packets,
+        )
     }
 }

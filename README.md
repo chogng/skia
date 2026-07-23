@@ -305,8 +305,10 @@ and Vulkan encode the validated program and its uniforms into a fixed-size
 packet and interpret it in their existing precompiled paint shaders, so source
 draws need neither runtime MSL/SPIR-V compilation nor a per-program pipeline.
 The portable limits (64 instructions, 16 color uniforms, and 16 registers)
-keep that packet bounded. A future program-hash specialization cache can be an
-optimization over this baseline rather than a capability requirement.
+keep that packet bounded. Each hardware backend retains a bounded
+program-hash cache of encoded instruction streams and rebinds only uniforms per
+draw. A future specialized native-pipeline cache can be an optimization over
+this baseline rather than a capability requirement.
 `skia-tessellation::stroke_to_path` produces a
 deterministic non-zero triangle-fill path.
 

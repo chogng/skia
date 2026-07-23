@@ -31,6 +31,11 @@ pub use resource::{
 };
 pub use runtime_shader::{
     RUNTIME_SHADER_INSTRUCTION_WORDS, RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS,
-    RuntimeShaderPacket, runtime_shader_packet,
+    RuntimeShaderPacket, RuntimeShaderPacketCache, RuntimeShaderPacketCacheStats,
+    runtime_shader_packet,
 };
+
+#[cfg(test)]
+#[path = "runtime_shader_tests.rs"]
+mod runtime_shader_tests;
 pub use surface::{GpuSurfaceDescriptor, GpuSurfaceFormat};

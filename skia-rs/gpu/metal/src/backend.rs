@@ -12,7 +12,7 @@
 mod clip;
 mod clip_geometry;
 
-use std::{collections::HashMap, fmt, mem::size_of};
+use std::{cell::RefCell, collections::HashMap, fmt, mem::size_of};
 
 use metal::{
     CommandQueue, Device, MTLClearColor, MTLCommandBufferStatus, MTLLoadAction, MTLOrigin,
@@ -27,7 +27,7 @@ use skia_core::{
 use skia_gpu::{
     GpuBackend, GpuCapabilities, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphAtlasKey,
     GpuGlyphQuad, GpuSurfaceDescriptor, RUNTIME_SHADER_INSTRUCTION_WORDS,
-    RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS, runtime_shader_packet,
+    RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS, RuntimeShaderPacketCache,
 };
 use skia_image::Image;
 
@@ -143,6 +143,7 @@ pub struct MetalBackend {
     atlas_cache_hits: u64,
     atlas_uploads: u64,
     atlas_evictions: u64,
+    runtime_shader_packets: RefCell<RuntimeShaderPacketCache>,
 }
 
 /// Observable native glyph-atlas texture cache counters.
@@ -296,6 +297,7 @@ impl MetalBackend {
             atlas_cache_hits: 0,
             atlas_uploads: 0,
             atlas_evictions: 0,
+            runtime_shader_packets: RefCell::new(RuntimeShaderPacketCache::default()),
         })
     }
 
@@ -773,7 +775,7 @@ impl MetalBackend {
         encoder.set_vertex_buffer(0, Some(&vertex_buffer), 0);
         let viewport = viewport_size(surface.descriptor);
         encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
-        let paint = paint_uniforms(paint);
+        let paint = paint_uniforms(paint, Some(&mut self.runtime_shader_packets.borrow_mut()));
         encoder.set_fragment_bytes(
             0,
             size_of_val(&paint) as u64,
@@ -1104,7 +1106,7 @@ impl MetalBackend {
         encoder.set_vertex_buffer(0, Some(&vertex_buffer), 0);
         let viewport = viewport_size(surface.descriptor);
         encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
-        let paint = paint_uniforms(paint);
+        let paint = paint_uniforms(paint, Some(&mut self.runtime_shader_packets.borrow_mut()));
         encoder.set_fragment_bytes(
             0,
             size_of_val(&paint) as u64,
@@ -1436,12 +1438,15 @@ fn paint_color(color: Color) -> [f32; 4] {
 }
 
 fn image_paint_uniforms(paint: Paint) -> PaintUniforms {
-    let mut uniforms = paint_uniforms(paint);
+    let mut uniforms = paint_uniforms(paint, None);
     uniforms.modes[0] = 0;
     uniforms
 }
 
-fn paint_uniforms(paint: Paint) -> PaintUniforms {
+fn paint_uniforms(
+    paint: Paint,
+    runtime_shader_packets: Option<&mut RuntimeShaderPacketCache>,
+) -> PaintUniforms {
     let mut uniforms = PaintUniforms {
         color: paint_color(paint.color()),
         gradient_colors: [[0.0; 4]; 8],
@@ -1457,7 +1462,7 @@ fn paint_uniforms(paint: Paint) -> PaintUniforms {
             * RUNTIME_SHADER_INSTRUCTION_WORDS],
         runtime_uniforms: [0; RUNTIME_SHADER_MAX_UNIFORMS],
     };
-    if let Some(runtime) = runtime_shader_packet(&paint) {
+    if let Some(runtime) = runtime_shader_packets.and_then(|cache| cache.packet(&paint)) {
         uniforms.modes[0] = 3;
         uniforms.runtime_header[0] = runtime.instruction_count();
         for (index, instruction) in runtime.instructions().iter().enumerate() {

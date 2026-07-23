@@ -7,7 +7,7 @@ use skia_core::{
 use skia_gpu::{
     GpuClipGeometry, GpuClipId, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor,
     RUNTIME_SHADER_INSTRUCTION_WORDS, RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS,
-    runtime_shader_packet,
+    RuntimeShaderPacketCache,
 };
 use skia_tessellation::{DEFAULT_CURVE_STEPS, FlatteningLimits, PathFlattener, stroke_mesh};
 
@@ -37,6 +37,7 @@ pub(crate) fn submit(
     context: Arc<crate::context::VulkanContext>,
     surface: &mut VulkanSurface,
     commands: &GpuCommandBuffer,
+    runtime_shader_packets: &mut RuntimeShaderPacketCache,
 ) -> Result<(), VulkanError> {
     let descriptor = surface.descriptor();
     let mut layers = Vec::<Layer>::new();
@@ -105,7 +106,14 @@ pub(crate) fn submit(
                     *clip,
                     &mut clips,
                 )?;
-                let mut params = draw_params(OP_SOLID, descriptor, paint, *transform, *scissor)?;
+                let mut params = draw_params(
+                    OP_SOLID,
+                    descriptor,
+                    paint,
+                    *transform,
+                    *scissor,
+                    runtime_shader_packets,
+                )?;
                 set_rect(&mut params, *rect);
                 params[7] = u32::from(clip.is_some());
                 renderer.dispatch(current_target(surface, &layers), None, clip, &[], &params)?;
@@ -130,7 +138,14 @@ pub(crate) fn submit(
                     *clip,
                     &mut clips,
                 )?;
-                let mut params = draw_params(OP_PATH, descriptor, paint, *transform, *scissor)?;
+                let mut params = draw_params(
+                    OP_PATH,
+                    descriptor,
+                    paint,
+                    *transform,
+                    *scissor,
+                    runtime_shader_packets,
+                )?;
                 params[4] = u32::try_from(edges.len() / 4)
                     .map_err(|_| VulkanError::new(VulkanErrorCode::SubmissionFailed))?;
                 params[5] = u32::from(matches!(rule, FillRule::EvenOdd));
@@ -173,8 +188,14 @@ pub(crate) fn submit(
                     *clip,
                     &mut clips,
                 )?;
-                let mut params =
-                    draw_params(OP_TRIANGLES, descriptor, paint, *transform, *scissor)?;
+                let mut params = draw_params(
+                    OP_TRIANGLES,
+                    descriptor,
+                    paint,
+                    *transform,
+                    *scissor,
+                    runtime_shader_packets,
+                )?;
                 params[4] = u32::try_from(mesh.vertices().len() / 3)
                     .map_err(|_| VulkanError::new(VulkanErrorCode::SubmissionFailed))?;
                 params[7] = u32::from(clip.is_some());
@@ -209,7 +230,14 @@ pub(crate) fn submit(
                     *clip,
                     &mut clips,
                 )?;
-                let mut params = draw_params(OP_IMAGE, descriptor, paint, *transform, *scissor)?;
+                let mut params = draw_params(
+                    OP_IMAGE,
+                    descriptor,
+                    paint,
+                    *transform,
+                    *scissor,
+                    runtime_shader_packets,
+                )?;
                 params[32] = 0;
                 set_rect(&mut params, *destination);
                 params[4] = multiply_255(*opacity, paint.color().alpha());
@@ -254,8 +282,14 @@ pub(crate) fn submit(
                     &mut clips,
                 )?;
                 for glyph in glyphs {
-                    let mut params =
-                        draw_params(OP_GLYPH, descriptor, paint, *transform, *scissor)?;
+                    let mut params = draw_params(
+                        OP_GLYPH,
+                        descriptor,
+                        paint,
+                        *transform,
+                        *scissor,
+                        runtime_shader_packets,
+                    )?;
                     set_rect(&mut params, glyph.destination());
                     params[4] = u32::from(paint.color().alpha());
                     params[5] = u32::from(glyph.is_mask());
@@ -414,9 +448,10 @@ fn draw_params(
     paint: &Paint,
     transform: Transform,
     scissor: Option<Rect>,
+    runtime_shader_packets: &mut RuntimeShaderPacketCache,
 ) -> Result<[u32; PARAMETER_WORDS], VulkanError> {
     let mut params = base_params(operation, descriptor);
-    encode_paint(&mut params, paint);
+    encode_paint(&mut params, paint, runtime_shader_packets);
     params[12] = blend_mode(paint.blend_mode());
     set_transform(&mut params, transform)?;
     set_scissor(&mut params, scissor);
@@ -617,9 +652,13 @@ fn color_word(color: Color) -> u32 {
     u32::from_le_bytes(color.channels())
 }
 
-fn encode_paint(params: &mut [u32; PARAMETER_WORDS], paint: &Paint) {
+fn encode_paint(
+    params: &mut [u32; PARAMETER_WORDS],
+    paint: &Paint,
+    runtime_shader_packets: &mut RuntimeShaderPacketCache,
+) {
     params[3] = color_word(paint.color());
-    if let Some(runtime) = runtime_shader_packet(paint) {
+    if let Some(runtime) = runtime_shader_packets.packet(paint) {
         params[32] = 3;
         params[RUNTIME_SHADER_HEADER] = runtime.instruction_count();
         for (index, instruction) in runtime.instructions().iter().enumerate() {
