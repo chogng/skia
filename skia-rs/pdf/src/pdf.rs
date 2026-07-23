@@ -7,10 +7,10 @@ use std::{
 use flate2::{Compression, write::ZlibEncoder};
 use sha2::{Digest, Sha256};
 use skia_core::{
-    BlendMode, ClipOp, DisplayList, DrawCommand, FillRule, FontId, GlyphId, GlyphOutline,
+    BlendMode, ClipOp, DisplayList, DrawCommand, FillRule, FontFace, FontId, GlyphId, GlyphOutline,
     GlyphOutlineProvider, GlyphRun, Gradient, GradientGeometry, Paint, Path, PathVerb, Point, Rect,
-    Scalar, SkiaError, StrokeAlign, StrokeCap, StrokeJoin, TextError, TileMode, Transform,
-    glyph_outline_path,
+    Scalar, SkiaError, StrokeAlign, StrokeCap, StrokeJoin, TextError, TextUnit, TileMode,
+    Transform, glyph_outline_path,
 };
 use skia_cpu::{ClipRect, Surface, SurfaceLimits};
 use skia_image::{ColorSpace, Image};
@@ -276,6 +276,102 @@ pub enum PdfLinkTarget {
     NamedDestination(String),
 }
 
+/// Semantic role assigned to one complete display list in a tagged PDF page.
+///
+/// The document writer creates a standards-defined marked-content sequence for
+/// the list and a matching flat structure-tree element.  It deliberately does
+/// not infer semantics from drawing commands.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PdfStructureTag {
+    /// A paragraph of prose.
+    Paragraph,
+    /// A first-level heading.
+    Heading1,
+    /// A second-level heading.
+    Heading2,
+    /// A generic inline span.
+    Span,
+    /// A figure or illustration.
+    Figure,
+    /// A list container.
+    List,
+    /// One list item.
+    ListItem,
+    /// A table container.
+    Table,
+    /// One table row.
+    TableRow,
+    /// One table header cell.
+    TableHeader,
+    /// One table data cell.
+    TableData,
+}
+
+/// One embedded TrueType font program selected for searchable PDF text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PdfEmbeddedFont {
+    font: FontId,
+    program: Vec<u8>,
+}
+
+impl PdfEmbeddedFont {
+    /// Creates an embeddable single-face TrueType program for `font`.
+    ///
+    /// Collection fonts and CFF/OpenType programs require a proper subsetter
+    /// and are rejected rather than being mislabeled as `FontFile2` data.
+    pub fn new(font: FontId, program: Vec<u8>) -> Result<Self, DocumentError> {
+        const MAX_PROGRAM_BYTES: usize = 64 * 1024 * 1024;
+        let supported = matches!(program.get(..4), Some(b"\0\x01\0\0" | b"true" | b"typ1"));
+        if program.is_empty() || program.len() > MAX_PROGRAM_BYTES || !supported {
+            return Err(DocumentError::new(DocumentErrorCode::UnsupportedText));
+        }
+        Ok(Self { font, program })
+    }
+
+    /// Copies a single-face TrueType program from a portable [`FontFace`].
+    pub fn from_font_face(face: &FontFace) -> Result<Self, DocumentError> {
+        if face.face_index() != 0 {
+            return Err(DocumentError::new(DocumentErrorCode::UnsupportedText));
+        }
+        Self::new(face.id(), face.encoded_bytes().to_vec())
+    }
+
+    /// Returns the stable font identity selected by this program.
+    pub const fn font(&self) -> FontId {
+        self.font
+    }
+}
+
+/// Supplies an embedded TrueType program and source text for PDF glyph runs.
+///
+/// The exact source text becomes an `ActualText` replacement, preserving
+/// search and copy semantics without guessing Unicode values from glyph IDs.
+pub trait PdfTextProvider {
+    /// Returns the embeddable program selected by a glyph run's font ID.
+    fn embedded_font(&self, font: FontId) -> Option<PdfEmbeddedFont>;
+
+    /// Returns the original non-empty Unicode source text for one glyph run.
+    fn source_text(&self, run: &GlyphRun) -> Option<String>;
+}
+
+impl PdfStructureTag {
+    fn pdf_name(self) -> &'static str {
+        match self {
+            Self::Paragraph => "P",
+            Self::Heading1 => "H1",
+            Self::Heading2 => "H2",
+            Self::Span => "Span",
+            Self::Figure => "Figure",
+            Self::List => "L",
+            Self::ListItem => "LI",
+            Self::Table => "Table",
+            Self::TableRow => "TR",
+            Self::TableHeader => "TH",
+            Self::TableData => "TD",
+        }
+    }
+}
+
 /// Hard ceilings for PDF construction and serialized output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PdfLimits {
@@ -291,6 +387,10 @@ pub struct PdfLimits {
     pub max_annotations_per_page: usize,
     /// Maximum document-global named destinations.
     pub max_named_destinations: usize,
+    /// Maximum document-global bookmark entries.
+    pub max_bookmarks: usize,
+    /// Maximum tagged display lists accepted by one page.
+    pub max_structure_elements_per_page: usize,
     /// Maximum serialized PDF bytes.
     pub max_output_bytes: u64,
 }
@@ -304,6 +404,8 @@ impl PdfLimits {
             || self.max_commands_per_page == 0
             || self.max_annotations_per_page == 0
             || self.max_named_destinations == 0
+            || self.max_bookmarks == 0
+            || self.max_structure_elements_per_page == 0
             || self.max_output_bytes == 0
         {
             return Err(DocumentError::new(DocumentErrorCode::InvalidLimits));
@@ -321,6 +423,8 @@ impl Default for PdfLimits {
             max_commands_per_page: 1_000_000,
             max_annotations_per_page: 16_384,
             max_named_destinations: 16_384,
+            max_bookmarks: 16_384,
+            max_structure_elements_per_page: 16_384,
             max_output_bytes: 512 * 1024 * 1024,
         }
     }
@@ -414,10 +518,16 @@ impl Default for PdfOptions {
 #[derive(Clone)]
 struct ActivePage {
     spec: PageSpec,
-    lists: Vec<DisplayList>,
+    lists: Vec<ActiveList>,
     command_count: usize,
     annotations: Vec<LinkAnnotation>,
     destinations: Vec<NamedDestination>,
+}
+
+#[derive(Clone)]
+struct ActiveList {
+    list: DisplayList,
+    structure_tag: Option<PdfStructureTag>,
 }
 
 #[derive(Clone)]
@@ -427,8 +537,11 @@ struct PageData {
     ext_gstates: Vec<usize>,
     images: Vec<usize>,
     gradients: Vec<usize>,
+    forms: Vec<usize>,
+    fonts: Vec<usize>,
     annotations: Vec<LinkAnnotation>,
     destinations: Vec<NamedDestination>,
+    structure: Vec<PdfStructureEntry>,
 }
 
 #[derive(Clone)]
@@ -443,6 +556,18 @@ struct NamedDestination {
     point: Point,
 }
 
+#[derive(Clone)]
+struct PdfBookmark {
+    title: String,
+    destination: String,
+}
+
+#[derive(Clone, Copy)]
+struct PdfStructureEntry {
+    tag: PdfStructureTag,
+    mcid: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ExtGState {
     alpha: u8,
@@ -454,12 +579,31 @@ struct Resources {
     ext_gstates: Vec<ExtGState>,
     images: Vec<PdfImage>,
     gradients: Vec<Gradient>,
+    forms: Vec<PdfForm>,
+    fonts: Vec<PdfFont>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
 struct PdfImage {
     image: Image,
     interpolate: bool,
+}
+
+#[derive(Clone)]
+struct PdfForm {
+    size: PageSize,
+    content: Vec<u8>,
+    ext_gstates: Vec<usize>,
+    images: Vec<usize>,
+    gradients: Vec<usize>,
+    forms: Vec<usize>,
+    fonts: Vec<usize>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct PdfFont {
+    font: FontId,
+    program: Vec<u8>,
 }
 
 /// Stateful PDF 1.7 document writer over an arbitrary `std::io::Write`.
@@ -473,6 +617,7 @@ pub struct PdfDocument<W: Write> {
     pages: Vec<PageData>,
     active: Option<ActivePage>,
     resources: Resources,
+    bookmarks: Vec<PdfBookmark>,
 }
 
 impl<W: Write> PdfDocument<W> {
@@ -491,6 +636,7 @@ impl<W: Write> PdfDocument<W> {
             pages: Vec::new(),
             active: None,
             resources: Resources::default(),
+            bookmarks: Vec::new(),
         })
     }
 
@@ -526,7 +672,44 @@ impl<W: Write> PdfDocument<W> {
             return Err(DocumentError::new(DocumentErrorCode::ResourceLimit));
         }
         active.command_count = count;
-        active.lists.push(list.clone());
+        active.lists.push(ActiveList {
+            list: list.clone(),
+            structure_tag: None,
+        });
+        Ok(())
+    }
+
+    /// Appends one semantically tagged immutable display list to the active
+    /// page. Tagged output requires native PDF compilation; it is not silently
+    /// replaced with a page bitmap.
+    pub fn add_tagged_display_list(
+        &mut self,
+        tag: PdfStructureTag,
+        list: &DisplayList,
+    ) -> Result<(), DocumentError> {
+        let active = self
+            .active
+            .as_mut()
+            .ok_or(DocumentError::new(DocumentErrorCode::InvalidState))?;
+        let count = active
+            .command_count
+            .checked_add(list.commands().len())
+            .ok_or(DocumentError::new(DocumentErrorCode::ResourceLimit))?;
+        if count > self.options.limits.max_commands_per_page
+            || active
+                .lists
+                .iter()
+                .filter(|entry| entry.structure_tag.is_some())
+                .count()
+                >= self.options.limits.max_structure_elements_per_page
+        {
+            return Err(DocumentError::new(DocumentErrorCode::ResourceLimit));
+        }
+        active.command_count = count;
+        active.lists.push(ActiveList {
+            list: list.clone(),
+            structure_tag: Some(tag),
+        });
         Ok(())
     }
 
@@ -573,9 +756,26 @@ impl<W: Write> PdfDocument<W> {
         Ok(())
     }
 
+    /// Adds a document-outline bookmark that jumps to an existing or later
+    /// named destination.
+    pub fn add_bookmark(
+        &mut self,
+        title: String,
+        destination: String,
+    ) -> Result<(), DocumentError> {
+        if title.is_empty()
+            || destination.is_empty()
+            || self.bookmarks.len() >= self.options.limits.max_bookmarks
+        {
+            return Err(DocumentError::new(DocumentErrorCode::InvalidDestination));
+        }
+        self.bookmarks.push(PdfBookmark { title, destination });
+        Ok(())
+    }
+
     /// Completes the active page and resolves its native or fallback content.
     pub fn end_page(&mut self) -> Result<(), DocumentError> {
-        self.end_page_with_glyph_outlines_inner(None)
+        self.end_page_inner(None, None)
     }
 
     /// Completes the active page using portable glyph outlines when it contains
@@ -584,12 +784,22 @@ impl<W: Write> PdfDocument<W> {
         &mut self,
         glyphs: &impl GlyphOutlineProvider,
     ) -> Result<(), DocumentError> {
-        self.end_page_with_glyph_outlines_inner(Some(glyphs))
+        self.end_page_inner(Some(glyphs), None)
     }
 
-    fn end_page_with_glyph_outlines_inner(
+    /// Completes the active page using embedded TrueType glyph text and the
+    /// provider's exact source string for searchable PDF output.
+    pub fn end_page_with_embedded_text(
+        &mut self,
+        text: &impl PdfTextProvider,
+    ) -> Result<(), DocumentError> {
+        self.end_page_inner(None, Some(text))
+    }
+
+    fn end_page_inner(
         &mut self,
         glyphs: Option<&dyn GlyphOutlineProvider>,
+        text: Option<&dyn PdfTextProvider>,
     ) -> Result<(), DocumentError> {
         let active = self
             .active
@@ -601,7 +811,7 @@ impl<W: Write> PdfDocument<W> {
         {
             Err(DocumentError::new(DocumentErrorCode::Unsupported))
         } else {
-            compile_native_page(active, glyphs, &mut resources, self.options.limits)
+            compile_native_page(active, glyphs, text, &mut resources, self.options.limits)
         };
         let page = match native {
             Ok(page) => page,
@@ -653,6 +863,24 @@ impl<W: Write> PdfDocument<W> {
         Ok(())
     }
 
+    /// Adds and completes one page using embedded TrueType glyph text.
+    pub fn add_page_with_embedded_text(
+        &mut self,
+        spec: PageSpec,
+        list: &DisplayList,
+        text: &impl PdfTextProvider,
+    ) -> Result<(), DocumentError> {
+        self.begin_page(spec)?;
+        if let Err(error) = self
+            .add_display_list(list)
+            .and_then(|()| self.end_page_with_embedded_text(text))
+        {
+            self.active = None;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Returns the number of completed pages.
     pub const fn page_count(&self) -> usize {
         self.pages.len()
@@ -675,6 +903,7 @@ impl<W: Write> PdfDocument<W> {
             &self.options.metadata,
             self.options.conformance,
             self.options.limits,
+            &self.bookmarks,
         )
     }
 
@@ -697,7 +926,8 @@ impl GlyphOutlineProvider for OutlineProviderRef<'_> {
 }
 
 fn page_requires_linear_match_fallback(active: &ActivePage) -> Result<bool, DocumentError> {
-    for list in &active.lists {
+    for entry in &active.lists {
+        let list = &entry.list;
         for command in list.commands() {
             match command {
                 DrawCommand::Clear(color) if color.alpha() != u8::MAX => return Ok(true),
@@ -752,6 +982,7 @@ fn image_has_transparency(image: &Image) -> bool {
 fn compile_native_page(
     active: &ActivePage,
     glyphs: Option<&dyn GlyphOutlineProvider>,
+    text: Option<&dyn PdfTextProvider>,
     resources: &mut Resources,
     limits: DocumentLimits,
 ) -> Result<PageData, DocumentError> {
@@ -759,6 +990,9 @@ fn compile_native_page(
     let mut used_gstates = Vec::new();
     let mut used_images = Vec::new();
     let mut used_gradients = Vec::new();
+    let mut used_forms = Vec::new();
+    let mut used_fonts = Vec::new();
+    let mut structure = Vec::new();
     push_text(&mut content, "q\n");
     push_text(
         &mut content,
@@ -768,20 +1002,35 @@ fn compile_native_page(
         emit_rect(&mut content, rect);
         push_text(&mut content, "W n\n");
     }
-    for (list_index, list) in active.lists.iter().enumerate() {
+    for (list_index, entry) in active.lists.iter().enumerate() {
+        let list = &entry.list;
         push_text(&mut content, "q\n");
+        if let Some(tag) = entry.structure_tag {
+            let mcid = structure.len();
+            push_text(
+                &mut content,
+                &format!("/{} << /MCID {mcid} >> BDC\n", tag.pdf_name()),
+            );
+            structure.push(PdfStructureEntry { tag, mcid });
+        }
         compile_list(
             list,
             list_index == 0,
             active.spec,
             glyphs,
+            text,
             &mut content,
             resources,
             &mut used_gstates,
             &mut used_images,
             &mut used_gradients,
+            &mut used_forms,
+            &mut used_fonts,
             limits,
         )?;
+        if entry.structure_tag.is_some() {
+            push_text(&mut content, "EMC\n");
+        }
         push_text(&mut content, "Q\n");
     }
     push_text(&mut content, "Q\n");
@@ -791,8 +1040,11 @@ fn compile_native_page(
         ext_gstates: used_gstates,
         images: used_images,
         gradients: used_gradients,
+        forms: used_forms,
+        fonts: used_fonts,
         annotations: active.annotations.clone(),
         destinations: active.destinations.clone(),
+        structure,
     })
 }
 
@@ -802,19 +1054,69 @@ fn compile_list(
     first_list: bool,
     spec: PageSpec,
     glyphs: Option<&dyn GlyphOutlineProvider>,
+    text: Option<&dyn PdfTextProvider>,
     output: &mut Vec<u8>,
     resources: &mut Resources,
     used_gstates: &mut Vec<usize>,
     used_images: &mut Vec<usize>,
     used_gradients: &mut Vec<usize>,
+    used_forms: &mut Vec<usize>,
+    used_fonts: &mut Vec<usize>,
     limits: DocumentLimits,
 ) -> Result<(), DocumentError> {
-    let mut transform = Transform::IDENTITY;
+    let mut cursor = 0;
+    compile_commands(
+        list,
+        &mut cursor,
+        first_list,
+        false,
+        spec,
+        glyphs,
+        text,
+        output,
+        resources,
+        used_gstates,
+        used_images,
+        used_gradients,
+        used_forms,
+        used_fonts,
+        limits,
+        Transform::IDENTITY,
+    )?;
+    if cursor != list.commands().len() {
+        return Err(DocumentError::new(DocumentErrorCode::InvalidState));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_commands(
+    list: &DisplayList,
+    cursor: &mut usize,
+    allow_initial_clear: bool,
+    stop_at_restore: bool,
+    spec: PageSpec,
+    glyphs: Option<&dyn GlyphOutlineProvider>,
+    text: Option<&dyn PdfTextProvider>,
+    output: &mut Vec<u8>,
+    resources: &mut Resources,
+    used_gstates: &mut Vec<usize>,
+    used_images: &mut Vec<usize>,
+    used_gradients: &mut Vec<usize>,
+    used_forms: &mut Vec<usize>,
+    used_fonts: &mut Vec<usize>,
+    limits: DocumentLimits,
+    mut transform: Transform,
+) -> Result<Transform, DocumentError> {
     let mut transforms = Vec::new();
-    for (command_index, command) in list.commands().iter().enumerate() {
+    while let Some(command) = list.commands().get(*cursor) {
+        let command_index = *cursor;
+        *cursor = cursor
+            .checked_add(1)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
         match command {
             DrawCommand::Clear(color) => {
-                if !first_list || command_index != 0 {
+                if !allow_initial_clear || command_index != 0 {
                     return Err(DocumentError::new(DocumentErrorCode::Unsupported));
                 }
                 emit_paint(
@@ -832,14 +1134,39 @@ fn compile_list(
                 push_text(output, "q\n");
                 transforms.push(transform);
             }
-            DrawCommand::SaveLayer(_) => {
-                return Err(DocumentError::new(DocumentErrorCode::Unsupported));
+            DrawCommand::SaveLayer(options) => {
+                let form = compile_layer(
+                    list,
+                    cursor,
+                    spec,
+                    options.clone(),
+                    glyphs,
+                    text,
+                    resources,
+                    limits,
+                    transform,
+                )?;
+                let gstate = intern_gstate(
+                    resources,
+                    ExtGState {
+                        alpha: options.opacity(),
+                        blend_mode: options.blend_mode(),
+                    },
+                    limits,
+                )?;
+                push_unique(used_gstates, gstate);
+                push_unique(used_forms, form);
+                push_text(output, &format!("q\n/GS{gstate} gs\n/Fm{form} Do\nQ\n"));
             }
             DrawCommand::Restore => {
-                transform = transforms
-                    .pop()
-                    .ok_or(DocumentError::new(DocumentErrorCode::InvalidState))?;
-                push_text(output, "Q\n");
+                if let Some(saved) = transforms.pop() {
+                    transform = saved;
+                    push_text(output, "Q\n");
+                } else if stop_at_restore {
+                    return Ok(transform);
+                } else {
+                    return Err(DocumentError::new(DocumentErrorCode::InvalidState));
+                }
             }
             DrawCommand::ClipRect { rect, op } => {
                 if *op != ClipOp::Intersect {
@@ -1014,12 +1341,27 @@ fn compile_list(
                 );
             }
             DrawCommand::DrawGlyphRun { run, paint } => {
-                let glyphs =
-                    glyphs.ok_or(DocumentError::new(DocumentErrorCode::UnsupportedText))?;
                 let run = list
                     .glyph_run(*run)
                     .ok_or(DocumentError::new(DocumentErrorCode::InvalidResource))?;
-                emit_glyph_run(output, run, glyphs, paint, resources, used_gstates, limits)?;
+                if let Some(text) = text {
+                    emit_embedded_glyph_run(
+                        output,
+                        run,
+                        Point::new(Scalar::ZERO, Scalar::ZERO),
+                        None,
+                        text,
+                        paint,
+                        resources,
+                        used_gstates,
+                        used_fonts,
+                        limits,
+                    )?;
+                } else {
+                    let glyphs =
+                        glyphs.ok_or(DocumentError::new(DocumentErrorCode::UnsupportedText))?;
+                    emit_glyph_run(output, run, glyphs, paint, resources, used_gstates, limits)?;
+                }
             }
             DrawCommand::DrawPositionedGlyphRun {
                 run,
@@ -1027,29 +1369,104 @@ fn compile_list(
                 offsets_x_bits,
                 paint,
             } => {
-                let glyphs =
-                    glyphs.ok_or(DocumentError::new(DocumentErrorCode::UnsupportedText))?;
                 let run = list
                     .glyph_run(*run)
                     .ok_or(DocumentError::new(DocumentErrorCode::InvalidResource))?;
-                emit_positioned_glyph_run(
-                    output,
-                    run,
-                    *origin,
-                    offsets_x_bits,
-                    glyphs,
-                    paint,
-                    resources,
-                    used_gstates,
-                    limits,
-                )?;
+                if let Some(text) = text {
+                    emit_embedded_glyph_run(
+                        output,
+                        run,
+                        *origin,
+                        Some(offsets_x_bits),
+                        text,
+                        paint,
+                        resources,
+                        used_gstates,
+                        used_fonts,
+                        limits,
+                    )?;
+                } else {
+                    let glyphs =
+                        glyphs.ok_or(DocumentError::new(DocumentErrorCode::UnsupportedText))?;
+                    emit_positioned_glyph_run(
+                        output,
+                        run,
+                        *origin,
+                        offsets_x_bits,
+                        glyphs,
+                        paint,
+                        resources,
+                        used_gstates,
+                        limits,
+                    )?;
+                }
             }
         }
     }
-    if !transforms.is_empty() {
+    if stop_at_restore || !transforms.is_empty() {
         return Err(DocumentError::new(DocumentErrorCode::InvalidState));
     }
-    Ok(())
+    Ok(transform)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_layer(
+    list: &DisplayList,
+    cursor: &mut usize,
+    spec: PageSpec,
+    options: skia_core::SaveLayerOptions,
+    glyphs: Option<&dyn GlyphOutlineProvider>,
+    text: Option<&dyn PdfTextProvider>,
+    resources: &mut Resources,
+    limits: DocumentLimits,
+    transform: Transform,
+) -> Result<usize, DocumentError> {
+    if options.filter_handle().is_some() || pdf_blend_name(options.blend_mode()).is_none() {
+        return Err(DocumentError::new(DocumentErrorCode::Unsupported));
+    }
+    let mut content = Vec::new();
+    let mut used_gstates = Vec::new();
+    let mut used_images = Vec::new();
+    let mut used_gradients = Vec::new();
+    let mut used_forms = Vec::new();
+    let mut used_fonts = Vec::new();
+    push_text(&mut content, "q\n");
+    if let Some(bounds) = options.bounds() {
+        emit_rect(&mut content, bounds);
+        push_text(&mut content, "W n\n");
+    }
+    compile_commands(
+        list,
+        cursor,
+        false,
+        true,
+        spec,
+        glyphs,
+        text,
+        &mut content,
+        resources,
+        &mut used_gstates,
+        &mut used_images,
+        &mut used_gradients,
+        &mut used_forms,
+        &mut used_fonts,
+        limits,
+        transform,
+    )?;
+    push_text(&mut content, "Q\n");
+    intern_form(
+        resources,
+        PdfForm {
+            size: spec.size,
+            content,
+            ext_gstates: used_gstates,
+            images: used_images,
+            gradients: used_gradients,
+            forms: used_forms,
+            fonts: used_fonts,
+        },
+        limits,
+    )
 }
 
 fn emit_paint(
@@ -1187,6 +1604,100 @@ fn emit_glyph_run(
         emit_glyph_path(output, run, *glyph, glyphs)?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_embedded_glyph_run(
+    output: &mut Vec<u8>,
+    run: &GlyphRun,
+    origin: Point,
+    offsets_x_bits: Option<&[i32]>,
+    text: &dyn PdfTextProvider,
+    paint: &Paint,
+    resources: &mut Resources,
+    used_gstates: &mut Vec<usize>,
+    used_fonts: &mut Vec<usize>,
+    limits: DocumentLimits,
+) -> Result<(), DocumentError> {
+    let embedded = text
+        .embedded_font(run.font())
+        .ok_or(DocumentError::new(DocumentErrorCode::UnsupportedText))?;
+    if embedded.font() != run.font() {
+        return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
+    }
+    let source = text
+        .source_text(run)
+        .filter(|source| !source.is_empty())
+        .ok_or(DocumentError::new(DocumentErrorCode::UnsupportedText))?;
+    if let Some(offsets) = offsets_x_bits
+        && offsets.len() != run.glyphs().len()
+    {
+        return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
+    }
+    let font = intern_font(resources, embedded, limits)?;
+    push_unique(used_fonts, font);
+    emit_paint(output, paint, false, resources, used_gstates, limits)?;
+    push_text(output, "q\n");
+    push_text(
+        output,
+        &format!(
+            "/Span << /ActualText {} >> BDC\nBT\n/F{font} {} Tf\n",
+            pdf_string(&source),
+            pdf_scalar(Scalar::from_bits(run.font_size_bits()))
+        ),
+    );
+    for (index, glyph) in run.glyphs().iter().enumerate() {
+        let glyph_id = u16::try_from(glyph.glyph().value())
+            .map_err(|_| DocumentError::new(DocumentErrorCode::UnsupportedText))?;
+        let mut x = scaled_text_unit(glyph.x(), run)?;
+        let y = scaled_text_unit(glyph.y(), run)?;
+        x = scalar_sum(x, origin.x())?;
+        if let Some(offsets) = offsets_x_bits {
+            x = scalar_sum(x, Scalar::from_bits(offsets[index]))?;
+        }
+        let y = scalar_sum(y, origin.y())?;
+        push_text(
+            output,
+            &format!(
+                "1 0 0 -1 {} {} Tm\n<{glyph_id:04X}> Tj\n",
+                pdf_scalar(x),
+                pdf_scalar(y),
+            ),
+        );
+    }
+    push_text(output, "ET\nEMC\nQ\n");
+    Ok(())
+}
+
+fn scaled_text_unit(unit: TextUnit, run: &GlyphRun) -> Result<Scalar, DocumentError> {
+    let numerator = i128::from(unit.bits())
+        .checked_mul(i128::from(run.font_size_bits()))
+        .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+    let denominator = i128::from(64_i32)
+        .checked_mul(i128::from(run.units_per_em()))
+        .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+    let bits = if numerator >= 0 {
+        numerator
+            .checked_add(denominator / 2)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?
+            / denominator
+    } else {
+        -((-numerator
+            .checked_add(denominator / 2)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?)
+            / denominator)
+    };
+    i32::try_from(bits)
+        .map(Scalar::from_bits)
+        .map_err(|_| DocumentError::new(DocumentErrorCode::NumericOverflow))
+}
+
+fn scalar_sum(first: Scalar, second: Scalar) -> Result<Scalar, DocumentError> {
+    first
+        .bits()
+        .checked_add(second.bits())
+        .map(Scalar::from_bits)
+        .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1438,12 +1949,49 @@ fn ensure_resource_capacity(
     resources: &Resources,
     limits: DocumentLimits,
 ) -> Result<(), DocumentError> {
-    if resources.ext_gstates.len() + resources.images.len() + resources.gradients.len()
+    if resources.ext_gstates.len()
+        + resources.images.len()
+        + resources.gradients.len()
+        + resources.forms.len()
+        + resources.fonts.len()
         >= limits.max_resources
     {
         return Err(DocumentError::new(DocumentErrorCode::ResourceLimit));
     }
     Ok(())
+}
+
+fn intern_form(
+    resources: &mut Resources,
+    form: PdfForm,
+    limits: DocumentLimits,
+) -> Result<usize, DocumentError> {
+    ensure_resource_capacity(resources, limits)?;
+    resources.forms.push(form);
+    Ok(resources.forms.len() - 1)
+}
+
+fn intern_font(
+    resources: &mut Resources,
+    font: PdfEmbeddedFont,
+    limits: DocumentLimits,
+) -> Result<usize, DocumentError> {
+    if let Some(index) = resources
+        .fonts
+        .iter()
+        .position(|candidate| candidate.font == font.font)
+    {
+        if resources.fonts[index].program != font.program {
+            return Err(DocumentError::new(DocumentErrorCode::InvalidResource));
+        }
+        return Ok(index);
+    }
+    ensure_resource_capacity(resources, limits)?;
+    resources.fonts.push(PdfFont {
+        font: font.font,
+        program: font.program,
+    });
+    Ok(resources.fonts.len() - 1)
 }
 
 fn push_unique(values: &mut Vec<usize>, value: usize) {
@@ -1459,7 +2007,15 @@ fn compile_raster_page(
     fallback: RasterFallback,
     limits: DocumentLimits,
 ) -> Result<PageData, DocumentError> {
-    for list in &active.lists {
+    if active
+        .lists
+        .iter()
+        .any(|entry| entry.structure_tag.is_some())
+    {
+        return Err(DocumentError::new(DocumentErrorCode::Unsupported));
+    }
+    for entry in &active.lists {
+        let list = &entry.list;
         for command in list.commands() {
             if matches!(
                 command,
@@ -1520,8 +2076,11 @@ fn compile_raster_page(
         ext_gstates: vec![gstate],
         images: vec![image_index],
         gradients: Vec::new(),
+        forms: Vec::new(),
+        fonts: Vec::new(),
         annotations: active.annotations.clone(),
         destinations: active.destinations.clone(),
+        structure: Vec::new(),
     })
 }
 
@@ -1550,7 +2109,8 @@ fn replay_scaled(
             .clip_rect(ClipRect::new(rect))
             .map_err(map_skia_error)?;
     }
-    for list in &active.lists {
+    for entry in &active.lists {
+        let list = &entry.list;
         let mut logical = Transform::IDENTITY;
         let mut stack = Vec::new();
         canvas.set_transform(logical.concat(device_scale).map_err(map_skia_error)?);
@@ -1673,6 +2233,7 @@ fn replay_scaled(
 
 fn collect_destinations(
     pages: &[PageData],
+    bookmarks: &[PdfBookmark],
 ) -> Result<BTreeMap<String, (usize, Point)>, DocumentError> {
     let mut destinations = BTreeMap::new();
     for (page_index, page) in pages.iter().enumerate() {
@@ -1694,6 +2255,12 @@ fn collect_destinations(
                 return Err(DocumentError::new(DocumentErrorCode::InvalidDestination));
             }
         }
+    }
+    if bookmarks
+        .iter()
+        .any(|bookmark| !names.contains(&bookmark.destination))
+    {
+        return Err(DocumentError::new(DocumentErrorCode::InvalidDestination));
     }
     Ok(destinations)
 }
@@ -1721,6 +2288,7 @@ fn serialize_pdf<W: Write>(
     metadata: &DocumentMetadata,
     conformance: PdfConformance,
     limits: DocumentLimits,
+    bookmarks: &[PdfBookmark],
 ) -> Result<W, DocumentError> {
     let mut next_object = 4_usize;
     let conformance_objects = if conformance == PdfConformance::PdfA2b {
@@ -1742,9 +2310,36 @@ fn serialize_pdf<W: Write>(
     let gradient_start = gstate_start
         .checked_add(resources.ext_gstates.len())
         .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
-    let image_start = gradient_start
+    let form_start = gradient_start
         .checked_add(resources.gradients.len())
         .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+    let font_start = form_start
+        .checked_add(resources.forms.len())
+        .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+    let font_object_count = resources
+        .fonts
+        .len()
+        .checked_mul(4)
+        .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+    let image_start = font_start
+        .checked_add(font_object_count)
+        .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+    let mut font_objects = Vec::with_capacity(resources.fonts.len());
+    for index in 0..resources.fonts.len() {
+        let type0 = font_start
+            .checked_add(index * 4)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+        let cid = type0
+            .checked_add(1)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+        let descriptor = cid
+            .checked_add(1)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+        let program = descriptor
+            .checked_add(1)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+        font_objects.push((type0, cid, descriptor, program));
+    }
     let mut image_objects = Vec::with_capacity(resources.images.len());
     next_object = image_start;
     for resource in &resources.images {
@@ -1762,7 +2357,7 @@ fn serialize_pdf<W: Write>(
         });
         image_objects.push((rgb, mask));
     }
-    let destinations = collect_destinations(pages)?;
+    let destinations = collect_destinations(pages, bookmarks)?;
     let mut annotation_objects = Vec::with_capacity(pages.len());
     for page in pages {
         let mut objects = Vec::with_capacity(page.annotations.len());
@@ -1774,6 +2369,45 @@ fn serialize_pdf<W: Write>(
         }
         annotation_objects.push(objects);
     }
+    let outline_objects = if bookmarks.is_empty() {
+        None
+    } else {
+        let root = next_object;
+        next_object = next_object
+            .checked_add(1)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+        let mut items = Vec::with_capacity(bookmarks.len());
+        for _ in bookmarks {
+            items.push(next_object);
+            next_object = next_object
+                .checked_add(1)
+                .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+        }
+        Some((root, items))
+    };
+    let structure_objects = if pages.iter().all(|page| page.structure.is_empty()) {
+        None
+    } else {
+        let root = next_object;
+        let parent_tree = root
+            .checked_add(1)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+        next_object = parent_tree
+            .checked_add(1)
+            .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+        let mut entries = Vec::with_capacity(pages.len());
+        for page in pages {
+            let mut page_entries = Vec::with_capacity(page.structure.len());
+            for _ in &page.structure {
+                page_entries.push(next_object);
+                next_object = next_object
+                    .checked_add(1)
+                    .ok_or(DocumentError::new(DocumentErrorCode::NumericOverflow))?;
+            }
+            entries.push(page_entries);
+        }
+        Some((root, parent_tree, entries))
+    };
     let object_count = next_object - 1;
     if object_count > limits.max_objects {
         return Err(DocumentError::new(DocumentErrorCode::ResourceLimit));
@@ -1784,6 +2418,16 @@ fn serialize_pdf<W: Write>(
     if let Some((xmp, output_intent, _)) = conformance_objects {
         catalog.push_str(&format!(
             " /Metadata {xmp} 0 R /OutputIntents [{output_intent} 0 R]"
+        ));
+    }
+    if let Some((outline_root, _)) = &outline_objects {
+        catalog.push_str(&format!(
+            " /Outlines {outline_root} 0 R /PageMode /UseOutlines"
+        ));
+    }
+    if let Some((structure_root, _, _)) = &structure_objects {
+        catalog.push_str(&format!(
+            " /MarkInfo << /Marked true >> /StructTreeRoot {structure_root} 0 R"
         ));
     }
     if !destinations.is_empty() {
@@ -1827,31 +2471,18 @@ fn serialize_pdf<W: Write>(
     for (index, page) in pages.iter().enumerate() {
         let page_object = page_start + index;
         let content_object = content_start + index;
-        let mut resource_dictionary = String::from("<<");
-        if !page.ext_gstates.is_empty() {
-            resource_dictionary.push_str(" /ExtGState <<");
-            for value in &page.ext_gstates {
-                resource_dictionary.push_str(&format!(" /GS{value} {} 0 R", gstate_start + value));
-            }
-            resource_dictionary.push_str(" >>");
-        }
-        if !page.images.is_empty() {
-            resource_dictionary.push_str(" /XObject <<");
-            for value in &page.images {
-                resource_dictionary
-                    .push_str(&format!(" /Im{value} {} 0 R", image_objects[*value].0));
-            }
-            resource_dictionary.push_str(" >>");
-        }
-        if !page.gradients.is_empty() {
-            resource_dictionary.push_str(" /Shading <<");
-            for value in &page.gradients {
-                resource_dictionary
-                    .push_str(&format!(" /Sh{value} {} 0 R", gradient_start + value));
-            }
-            resource_dictionary.push_str(" >>");
-        }
-        resource_dictionary.push_str(" >>");
+        let resource_dictionary = resource_dictionary(
+            &page.ext_gstates,
+            &page.images,
+            &page.gradients,
+            &page.forms,
+            &page.fonts,
+            gstate_start,
+            gradient_start,
+            form_start,
+            &font_objects,
+            &image_objects,
+        );
         let annotations = if annotation_objects[index].is_empty() {
             String::new()
         } else {
@@ -1862,8 +2493,13 @@ fn serialize_pdf<W: Write>(
                 .join(" ");
             format!(" /Annots [{values}]")
         };
+        let struct_parents = if !page.structure.is_empty() {
+            format!(" /StructParents {index}")
+        } else {
+            String::new()
+        };
         bodies[page_object] = format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources {resource_dictionary} /Contents {content_object} 0 R{annotations} >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources {resource_dictionary} /Contents {content_object} 0 R{annotations}{struct_parents} >>",
             pdf_scalar(page.spec.size.width),
             pdf_scalar(page.spec.size.height)
         )
@@ -1882,6 +2518,47 @@ fn serialize_pdf<W: Write>(
     }
     for (index, gradient) in resources.gradients.iter().enumerate() {
         bodies[gradient_start + index] = pdf_gradient_dictionary(*gradient)?.into_bytes();
+    }
+    for (index, form) in resources.forms.iter().enumerate() {
+        let resource_dictionary = resource_dictionary(
+            &form.ext_gstates,
+            &form.images,
+            &form.gradients,
+            &form.forms,
+            &form.fonts,
+            gstate_start,
+            gradient_start,
+            form_start,
+            &font_objects,
+            &image_objects,
+        );
+        let dictionary = format!(
+            "/Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 {} {}] /Group << /S /Transparency /I true /K false >> /Resources {resource_dictionary}",
+            pdf_scalar(form.size.width),
+            pdf_scalar(form.size.height),
+        );
+        bodies[form_start + index] = stream_object(&dictionary, &form.content);
+    }
+    for (index, font) in resources.fonts.iter().enumerate() {
+        let (type0, cid, descriptor, program) = font_objects[index];
+        let name = format!("SkiaFont{}", font.font.value());
+        bodies[type0] = format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /{name} /Encoding /Identity-H /DescendantFonts [{cid} 0 R] >>"
+        )
+        .into_bytes();
+        bodies[cid] = format!(
+            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{name} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {descriptor} 0 R /CIDToGIDMap /Identity /DW 1000 >>"
+        )
+        .into_bytes();
+        bodies[descriptor] = format!(
+            "<< /Type /FontDescriptor /FontName /{name} /Flags 4 /FontBBox [0 -200 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 {program} 0 R >>"
+        )
+        .into_bytes();
+        let compressed = zlib_compress(&font.program)?;
+        bodies[program] = stream_object(
+            &format!("/Length1 {} /Filter /FlateDecode", font.program.len()),
+            &compressed,
+        );
     }
     for (index, resource) in resources.images.iter().enumerate() {
         let image = &resource.image;
@@ -1915,6 +2592,62 @@ fn serialize_pdf<W: Write>(
     for (page_index, page) in pages.iter().enumerate() {
         for (annotation, object) in page.annotations.iter().zip(&annotation_objects[page_index]) {
             bodies[*object] = annotation_dictionary(page.spec, annotation).into_bytes();
+        }
+    }
+    if let Some((outline_root, outline_items)) = outline_objects {
+        let first = outline_items[0];
+        let last = outline_items[outline_items.len() - 1];
+        bodies[outline_root] = format!(
+            "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {} >>",
+            outline_items.len()
+        )
+        .into_bytes();
+        for (index, (bookmark, object)) in bookmarks.iter().zip(outline_items).enumerate() {
+            let previous = (index > 0).then(|| format!(" /Prev {} 0 R", object - 1));
+            let next = (index + 1 < bookmarks.len()).then(|| format!(" /Next {} 0 R", object + 1));
+            bodies[object] = format!(
+                "<< /Title {} /Parent {outline_root} 0 R /Dest {}{}{} >>",
+                pdf_string(&bookmark.title),
+                pdf_string(&bookmark.destination),
+                previous.unwrap_or_default(),
+                next.unwrap_or_default(),
+            )
+            .into_bytes();
+        }
+    }
+    if let Some((structure_root, parent_tree, structure_entries)) = structure_objects {
+        let children = structure_entries
+            .iter()
+            .flatten()
+            .map(|object| format!("{object} 0 R"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        bodies[structure_root] =
+            format!("<< /Type /StructTreeRoot /K [{children}] /ParentTree {parent_tree} 0 R >>")
+                .into_bytes();
+        let mut parent_tree_numbers = String::new();
+        for (page_index, entries) in structure_entries.iter().enumerate() {
+            if entries.is_empty() {
+                continue;
+            }
+            let values = entries
+                .iter()
+                .map(|object| format!("{object} 0 R"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            parent_tree_numbers.push_str(&format!(" {page_index} [{values}]"));
+        }
+        bodies[parent_tree] = format!("<< /Nums [{parent_tree_numbers} ] >>").into_bytes();
+        for (page_index, (page, entries)) in pages.iter().zip(structure_entries).enumerate() {
+            for (entry, object) in page.structure.iter().zip(entries) {
+                bodies[object] = format!(
+                    "<< /Type /StructElem /S /{} /P {structure_root} 0 R /Pg {} 0 R /K {} >>",
+                    entry.tag.pdf_name(),
+                    page_start + page_index,
+                    entry.mcid,
+                )
+                .into_bytes();
+            }
         }
     }
 
@@ -1952,6 +2685,55 @@ fn serialize_pdf<W: Write>(
         .as_bytes(),
     )?;
     Ok(sink.writer)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resource_dictionary(
+    ext_gstates: &[usize],
+    images: &[usize],
+    gradients: &[usize],
+    forms: &[usize],
+    fonts: &[usize],
+    gstate_start: usize,
+    gradient_start: usize,
+    form_start: usize,
+    font_objects: &[(usize, usize, usize, usize)],
+    image_objects: &[(usize, Option<usize>)],
+) -> String {
+    let mut dictionary = String::from("<<");
+    if !ext_gstates.is_empty() {
+        dictionary.push_str(" /ExtGState <<");
+        for value in ext_gstates {
+            dictionary.push_str(&format!(" /GS{value} {} 0 R", gstate_start + value));
+        }
+        dictionary.push_str(" >>");
+    }
+    if !images.is_empty() || !forms.is_empty() {
+        dictionary.push_str(" /XObject <<");
+        for value in images {
+            dictionary.push_str(&format!(" /Im{value} {} 0 R", image_objects[*value].0));
+        }
+        for value in forms {
+            dictionary.push_str(&format!(" /Fm{value} {} 0 R", form_start + value));
+        }
+        dictionary.push_str(" >>");
+    }
+    if !fonts.is_empty() {
+        dictionary.push_str(" /Font <<");
+        for value in fonts {
+            dictionary.push_str(&format!(" /F{value} {} 0 R", font_objects[*value].0));
+        }
+        dictionary.push_str(" >>");
+    }
+    if !gradients.is_empty() {
+        dictionary.push_str(" /Shading <<");
+        for value in gradients {
+            dictionary.push_str(&format!(" /Sh{value} {} 0 R", gradient_start + value));
+        }
+        dictionary.push_str(" >>");
+    }
+    dictionary.push_str(" >>");
+    dictionary
 }
 
 fn info_dictionary(metadata: &DocumentMetadata) -> String {

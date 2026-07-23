@@ -12,5 +12,8 @@ skia-core = { workspace = true }
 skia-cpu = { workspace = true }
 skia-image = { workspace = true }
 
+[dev-dependencies]
+skia-text = { workspace = true }
+
 [lib]
 path = "src/lib.rs"

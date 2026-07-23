@@ -1,8 +1,9 @@
 use std::{env, fs::File};
 
 use skia_core::{
-    ClipOp, Color, DisplayListBuilder, FillRule, Gradient, GradientStop, Paint, PathBuilder, Point,
-    Rect, SamplingOptions, Scalar, StrokeCap, StrokeJoin, StrokeOptions, TileMode, Transform,
+    BlendMode, ClipOp, Color, DisplayListBuilder, FillRule, Gradient, GradientStop, Paint,
+    PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar, StrokeCap, StrokeJoin,
+    StrokeOptions, TileMode, Transform,
 };
 use skia_image::Image;
 use skia_pdf::{
@@ -90,6 +91,19 @@ fn main() {
         SamplingOptions::LINEAR,
     )
     .expect("draw image");
+    page.save_layer(
+        SaveLayerOptions::new()
+            .with_bounds(rect(45, 70, 135, 150))
+            .with_opacity(150)
+            .with_blend_mode(BlendMode::Multiply),
+    )
+    .expect("save layer");
+    page.fill_rect(
+        rect(20, 55, 150, 165),
+        Paint::new(Color::rgba(255, 210, 35, 255)),
+    )
+    .expect("layer fill");
+    page.restore().expect("restore layer");
     let page = page.finish();
     let first_size = PageSize::new(scalar(240), scalar(180)).expect("page size");
     document

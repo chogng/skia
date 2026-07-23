@@ -814,6 +814,7 @@ dependencies = [
  "skia-core",
  "skia-cpu",
  "skia-image",
+ "skia-text",
 ]
 
 [[package]]

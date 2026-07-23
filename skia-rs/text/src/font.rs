@@ -718,6 +718,13 @@ impl FontFace {
         self.face_index
     }
 
+    /// Borrows the immutable encoded TrueType/OpenType collection that backs
+    /// this face. The caller must retain the associated face index when the
+    /// bytes contain more than one face.
+    pub fn encoded_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// Returns the face design-unit scale.
     pub const fn units_per_em(&self) -> u16 {
         self.units_per_em

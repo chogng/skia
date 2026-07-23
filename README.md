@@ -212,9 +212,10 @@ rectangle. The current mapping policy is:
 | Alpha, transparent image, or standard PDF blend mode | `NativePdf`: native color plus deduplicated ExtGState; `LinearMatch`: CPU page fallback or explicit error |
 | sRGB RGBA8 image, opacity, reuse | Native Image XObject; alpha uses SMask; sampling choice is retained as the interpolation policy |
 | Opaque, clamped two-stop-or-more linear or radial gradient fill | Native PDF shading pattern; no raster image |
-| Gradient with transparency, repeat/mirror tiling, a non-`SourceOver` blend, gradient stroke; runtime shader, color filter, SaveLayer/image filter, difference clip, non-center stroke, path effect, non-PDF Porter-Duff mode, rational conic | Configurable whole-page CPU fallback, otherwise `Unsupported` |
+| SaveLayer without an image filter and with a standard PDF blend mode | Native isolated transparency-group Form XObject; restore opacity/blend remain native |
+| Gradient with transparency, repeat/mirror tiling, a non-`SourceOver` blend, gradient stroke; runtime shader, color filter, filtered SaveLayer, difference clip, non-center stroke, path effect, non-PDF Porter-Duff mode, rational conic | Configurable whole-page CPU fallback, otherwise `Unsupported` |
 | ICC-tagged image | `UnsupportedColorProfile`; profiles are never silently treated as sRGB |
-| Glyph-run command | `end_page`/`add_page` return `UnsupportedText`; `end_page_with_glyph_outlines`/`add_page_with_glyph_outlines` turn a supplied `GlyphOutlineProvider` into native vector paths |
+| Glyph-run command | `end_page`/`add_page` return `UnsupportedText`; outline APIs turn a supplied `GlyphOutlineProvider` into native paths; embedded-text APIs write single-face TrueType CID text with `ActualText` |
 
 Whole-page fallback has explicit DPI, pixel, and RGBA working-memory ceilings.
 It renders into transparent straight-alpha RGBA8 through `skia-cpu`, embeds the
@@ -222,9 +223,14 @@ result as one image with an SMask when required, and does not depend on a GPU or
 platform renderer. Fallback remains whole-page in this release; region/layer
 rasterization is a future optimization. Glyph pages use that same fallback when
 the matching `GlyphOutlineProvider` is supplied. The emitted outlines preserve
-appearance and font independence, but are not searchable. Searchable PDF text
-requires complete font subsetting, metrics, CID mapping, and ToUnicode support
-and will not be added piecemeal.
+appearance and font independence, but are not searchable. For interoperable
+search and copy, `end_page_with_embedded_text` and
+`add_page_with_embedded_text` require a `PdfTextProvider`: it supplies a
+single-face TrueType program and the exact source text for every glyph run. The
+writer embeds that program as `FontFile2`, paints CID glyph IDs, and supplies
+the source as `ActualText`; it never guesses Unicode from glyph indices. Font
+subsetting, CFF/OpenType programs, collections, vertical writing, and a
+generated `ToUnicode` map remain explicit future work.
 
 `PdfConformance::PdfA2b` adds fixed XMP identification metadata, an embedded
 standard-sRGB output intent, explicit UTC creation/modification dates, and a
@@ -232,13 +238,19 @@ deterministic document identifier. It is a constrained PDF/A-2b output profile:
 the crate rejects unsupported drawing rather than silently claiming a different
 result, but external archival validation remains the caller's release check.
 `add_link` adds URI or named-destination link annotations; `add_named_destination`
-defines document-global destinations in the same top-left page coordinate space.
-These document-level APIs deliberately stay separate from the reusable
+defines document-global destinations in the same top-left page coordinate space;
+`add_bookmark` exposes them as PDF outline entries. `add_tagged_display_list`
+adds one marked-content sequence and a flat, standards-defined structure-tree
+entry for a complete display list. Tagged lists intentionally fail instead of
+being silently rasterized: a bitmap cannot retain the list's declared semantic
+role. These document-level APIs deliberately stay separate from the reusable
 `DisplayList`.
 
-Tagged/structured PDF, bookmark outlines, embedded/searchable fonts, encryption,
-and signatures are not current features. SVG remains a separate single-canvas
-output responsibility rather than being forced into this multi-page API.
+Encryption and digital signatures are not current features: both need a
+reviewed cryptographic implementation plus caller-owned password/key and CMS
+signing contracts, so this writer does not emit a misleading placeholder. SVG
+remains a separate single-canvas output responsibility rather than being forced
+into this multi-page API.
 
 ## XPS and OpenXPS output
 

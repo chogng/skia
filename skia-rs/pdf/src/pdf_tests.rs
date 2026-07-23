@@ -1,10 +1,10 @@
 use std::io::{self, Write};
 
 use skia_core::{
-    BlendMode, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, FontId, GlyphId,
+    BlendMode, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, FontFace, FontId, GlyphId,
     GlyphOutline, GlyphOutlineProvider, GlyphRun, Gradient, GradientStop, OutlinePoint,
-    OutlineSegment, Paint, PathBuilder, Point, PositionedGlyph, Rect, Scalar, TextError, TextUnit,
-    TileMode, Transform,
+    OutlineSegment, Paint, PathBuilder, Point, PositionedGlyph, Rect, SaveLayerOptions, Scalar,
+    TextError, TextUnit, TileMode, Transform,
 };
 use skia_image::Image;
 
@@ -12,6 +12,9 @@ use super::*;
 use crate::{
     PdfErrorCode as DocumentErrorCode, PdfLimits as DocumentLimits, PdfMetadata as DocumentMetadata,
 };
+
+#[path = "../../test-support/font.rs"]
+mod test_font;
 
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).expect("test scalar")
@@ -30,6 +33,21 @@ fn size(width: i32, height: i32) -> PageSize {
 }
 
 struct SingleGlyphProvider(GlyphOutline);
+
+struct EmbeddedTextProvider {
+    font: PdfEmbeddedFont,
+    source: String,
+}
+
+impl PdfTextProvider for EmbeddedTextProvider {
+    fn embedded_font(&self, font: FontId) -> Option<PdfEmbeddedFont> {
+        (self.font.font() == font).then(|| self.font.clone())
+    }
+
+    fn source_text(&self, _run: &GlyphRun) -> Option<String> {
+        Some(self.source.clone())
+    }
+}
 
 impl GlyphOutlineProvider for SingleGlyphProvider {
     fn glyph_outline(
@@ -75,6 +93,22 @@ fn glyph_outline() -> GlyphOutline {
         ],
     )
     .expect("valid closed square")
+}
+
+fn searchable_text_run() -> GlyphRun {
+    GlyphRun::new(
+        FontId::new(23),
+        12 << 16,
+        1_000,
+        vec![PositionedGlyph::new(
+            GlyphId::new(1),
+            TextUnit::ZERO,
+            TextUnit::ZERO,
+            TextUnit::ZERO,
+            TextUnit::ZERO,
+        )],
+    )
+    .expect("valid run")
 }
 
 fn empty_list() -> DisplayList {
@@ -358,6 +392,89 @@ fn links_and_named_destinations_preserve_top_left_coordinates() {
 }
 
 #[test]
+fn bookmarks_reference_named_destinations_and_fail_closed_when_unresolved() {
+    let mut document = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    document
+        .add_bookmark("Second page".to_owned(), "second-page".to_owned())
+        .expect("bookmark");
+    document
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("first page");
+    document.end_page().expect("end first page");
+    document
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("second page");
+    document
+        .add_named_destination("second-page".to_owned(), point(10, 20))
+        .expect("destination");
+    document.end_page().expect("end second page");
+    let bytes = document.finish().expect("finish");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("/Outlines "));
+    assert!(text.contains("/PageMode /UseOutlines"));
+    assert!(text.contains("/Type /Outlines"));
+    assert!(text.contains("/Title (Second page)"));
+    assert!(text.contains("/Dest (second-page)"));
+    validate_xref(&bytes);
+
+    let mut unresolved = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    unresolved
+        .add_bookmark("Missing".to_owned(), "missing".to_owned())
+        .expect("bookmark declaration");
+    let Err(error) = unresolved.finish() else {
+        panic!("unresolved destination");
+    };
+    assert_eq!(error.code(), DocumentErrorCode::InvalidDestination);
+}
+
+#[test]
+fn tagged_display_lists_write_marked_content_and_structure_tree() {
+    let mut document = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    document
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("page");
+    document
+        .add_tagged_display_list(PdfStructureTag::Paragraph, &vector_list())
+        .expect("tagged content");
+    document.end_page().expect("end page");
+    let bytes = document.finish().expect("finish");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("/P << /MCID 0 >> BDC"));
+    assert!(text.contains("/MarkInfo << /Marked true >> /StructTreeRoot"));
+    assert!(text.contains("/StructParents 0"));
+    assert!(text.contains("/Type /StructTreeRoot"));
+    assert!(text.contains("/Type /StructElem /S /P"));
+    assert!(text.contains("/Nums [ 0 ["));
+    validate_xref(&bytes);
+}
+
+#[test]
+fn save_layers_emit_native_isolated_transparency_groups() {
+    let mut builder = DisplayListBuilder::new(4).expect("builder");
+    builder.clear(Color::WHITE).expect("clear");
+    builder
+        .save_layer(
+            SaveLayerOptions::new()
+                .with_bounds(rect(10, 10, 90, 70))
+                .with_opacity(180)
+                .with_blend_mode(BlendMode::Multiply),
+        )
+        .expect("save layer");
+    builder
+        .fill_rect(rect(0, 0, 100, 80), Paint::new(Color::RED))
+        .expect("draw in layer");
+    builder.restore().expect("restore layer");
+    let bytes = pdf_for(&builder.finish());
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("/Subtype /Form"));
+    assert!(text.contains("/Group << /S /Transparency /I true /K false >>"));
+    assert!(text.contains("/Fm0 Do"));
+    assert!(text.contains("/BM /Multiply"));
+    assert!(!text.contains("/Subtype /Image"));
+    validate_xref(&bytes);
+}
+
+#[test]
 fn unsupported_gradient_is_error_or_bounded_page_fallback() {
     let stops = [
         GradientStop::new(Scalar::ZERO, Color::RED).expect("stop"),
@@ -575,6 +692,33 @@ fn glyph_outlines_are_emitted_as_vector_paths() {
     let text = String::from_utf8_lossy(&document.finish().expect("finish")).into_owned();
     assert!(text.contains("0 0 m\n10 0 l\n10 10 l\n0 10 l\nh\nf"));
     assert!(!text.contains("/Font"));
+}
+
+#[test]
+fn embedded_true_type_text_is_searchable_and_uses_actual_text() {
+    let face = FontFace::from_bytes(FontId::new(23), test_font::toy_font('A')).expect("face");
+    let provider = EmbeddedTextProvider {
+        font: PdfEmbeddedFont::from_font_face(&face).expect("embedded font"),
+        source: "A".to_owned(),
+    };
+    let mut builder = DisplayListBuilder::new(2).expect("builder");
+    let run = builder.add_glyph_run(searchable_text_run()).expect("run");
+    builder
+        .draw_glyph_run(run, Paint::new(Color::rgba(20, 40, 60, 255)))
+        .expect("draw text");
+    let list = builder.finish();
+    let mut document = PdfDocument::new(Vec::new(), PdfOptions::default()).expect("document");
+    document
+        .add_page_with_embedded_text(PageSpec::new(size(100, 80)), &list, &provider)
+        .expect("embedded text page");
+    let bytes = document.finish().expect("finish");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("/Subtype /Type0"));
+    assert!(text.contains("/FontFile2"));
+    assert!(text.contains("/ActualText (A)"));
+    assert!(text.contains("/F0 12 Tf"));
+    assert!(text.contains("<0001> Tj"));
+    validate_xref(&bytes);
 }
 
 #[test]
