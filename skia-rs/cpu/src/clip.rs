@@ -56,3 +56,7 @@ pub(crate) fn mask_index(width: u32, x: i64, y: i64) -> Result<usize, SkiaError>
         .and_then(|value| usize::try_from(value).ok())
         .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))
 }
+
+#[cfg(test)]
+#[path = "clip_tests.rs"]
+mod tests;

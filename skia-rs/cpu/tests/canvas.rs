@@ -8,7 +8,7 @@ use skia_cpu::{ClipRect, Surface, SurfaceLimits};
 use skia_effects::DashPathEffect;
 use skia_error::SkiaErrorCode;
 use skia_geometry::{Point, Rect, Scalar, Transform};
-use skia_image::{ColorSpace, Image, ImageErrorCode};
+use skia_image::{ColorSpace, Image};
 use skia_path::{ConicWeight, FillRule, PathBuilder};
 use skia_tessellation::stroke_to_path;
 
@@ -206,8 +206,7 @@ fn even_odd_path_hole_and_translation_are_deterministic() {
 }
 
 #[test]
-fn fixed_point_construction_and_surface_budgets_fail_closed() {
-    assert!(Scalar::from_ratio(1, 0).is_err());
+fn surface_budgets_fail_closed() {
     assert!(Surface::new(3, 3, SurfaceLimits::new(8, 32, 1).unwrap()).is_err());
 }
 
@@ -464,53 +463,6 @@ fn display_list_replays_a_runtime_shader_held_by_paint() {
 }
 
 #[test]
-fn concatenated_transforms_and_curve_order_fail_closed() {
-    let transform = Transform::translate(scalar(1), scalar(1))
-        .concat(Transform::scale(scalar(2), scalar(3)))
-        .unwrap();
-    assert_eq!(transform.map_point(point(1, 1)).unwrap(), point(4, 6));
-
-    let mut path = PathBuilder::new(1).unwrap();
-    assert_eq!(
-        path.cubic_to(point(0, 0), point(1, 1), point(2, 2))
-            .unwrap_err()
-            .code(),
-        SkiaErrorCode::InvalidPath
-    );
-}
-
-#[test]
-fn affine_transforms_round_trip_points_and_reject_singular_matrices() {
-    let transform = Transform::new(
-        scalar(1),
-        scalar(1),
-        Scalar::ZERO,
-        scalar(1),
-        scalar(2),
-        scalar(3),
-    );
-    let mapped = transform.map_point(point(4, 5)).expect("map point");
-    assert_eq!(mapped, point(6, 12));
-    assert_eq!(
-        transform.inverse().unwrap().map_point(mapped).unwrap(),
-        point(4, 5)
-    );
-
-    let singular = Transform::new(
-        scalar(1),
-        scalar(2),
-        scalar(2),
-        scalar(4),
-        Scalar::ZERO,
-        Scalar::ZERO,
-    );
-    assert_eq!(
-        singular.inverse().unwrap_err().code(),
-        SkiaErrorCode::InvalidGeometry
-    );
-}
-
-#[test]
 fn rgba_images_scale_nearest_neighbor_and_keep_source_color_under_opacity() {
     let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
     let mut surface = Surface::new(4, 2, SurfaceLimits::default()).unwrap();
@@ -524,10 +476,6 @@ fn rgba_images_scale_nearest_neighbor_and_keep_source_color_under_opacity() {
     assert_eq!(pixel(&surface, 1, 1), [255, 0, 0, 128]);
     assert_eq!(pixel(&surface, 2, 0), [0, 0, 255, 128]);
     assert_eq!(pixel(&surface, 3, 1), [0, 0, 255, 128]);
-    assert_eq!(
-        Image::from_rgba8(2, 2, vec![0; 3]).unwrap_err().code(),
-        ImageErrorCode::InvalidPixels
-    );
 }
 
 #[test]

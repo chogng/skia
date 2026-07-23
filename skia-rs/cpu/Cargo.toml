@@ -15,3 +15,4 @@ skia-error = { workspace = true }
 skia-effects = { workspace = true }
 skia-geometry = { workspace = true }
 skia-path = { workspace = true }
+skia-text = { workspace = true }

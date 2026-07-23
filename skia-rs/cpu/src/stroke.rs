@@ -55,3 +55,7 @@ pub(crate) fn stroke_bounds(
         bottom: ceil_q16_i64(bottom),
     })
 }
+
+#[cfg(test)]
+#[path = "stroke_tests.rs"]
+mod tests;

@@ -13,6 +13,18 @@ fn point(x: i32, y: i32) -> Point {
     Point::new(scalar(x), scalar(y))
 }
 
+#[test]
+fn curve_commands_require_an_active_contour() {
+    let mut path = PathBuilder::new(1).expect("path builder");
+
+    assert_eq!(
+        path.cubic_to(point(0, 0), point(1, 1), point(2, 2))
+            .expect_err("cubic without move")
+            .code(),
+        SkiaErrorCode::InvalidPath
+    );
+}
+
 fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
     Rect::new(scalar(left), scalar(top), scalar(right), scalar(bottom)).expect("positive rectangle")
 }

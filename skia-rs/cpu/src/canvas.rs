@@ -1327,3 +1327,7 @@ fn ceil_q16(value: i32) -> i64 {
 pub(crate) fn ceil_q16_i64(value: i64) -> i64 {
     -floor_q16_i64(value.saturating_neg())
 }
+
+#[cfg(test)]
+#[path = "canvas_tests.rs"]
+mod tests;
