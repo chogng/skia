@@ -104,16 +104,12 @@ a physical GPU.  Vendor hardware remains a separate main/nightly runner concern.
 `skia-rs/gpu/tests/support/render_cases.rs` now contains four repository-authored scenes that
 exercise clips/alpha, even-odd paths/transforms, layers/gradients, and linear
 image sampling.  `skia-rs/gpu/tests/render_oracle.rs` renders them through CPU and
-`skia-gpu` software replay, requiring exact RGBA8 equality and dimensions.
-`skia-rs/gpu/tests/golden/` holds their reviewed raw-pixel/PNG fixtures and manifest.
-
-Introduce `skia-rs/gpu/tests/golden/manifest.toml` only for explicitly accepted expected
-images.  Each entry should include renderer version, scene ID, width/height,
-pixel format/color space, SHA-256 of raw RGBA and PNG, and an update reason.
-`scripts/regenerate_goldens.sh` refuses to overwrite without
-`SKIA_UPDATE_GOLDENS=1`; it records SHA-256 for raw RGBA and PNG output.
-Never use PNG-file checksums alone.  The next increment should add fixed
-locale/timezone and a JSON diff summary before the scene set grows materially.
+`skia-gpu` software replay, requiring exact RGBA8 equality and dimensions. Generated
+raw RGBA/PNG output stays local at `skia-rs/gpu/tests/golden/`: it is ignored and
+never committed. `scripts/regenerate_goldens.sh` refuses to overwrite without
+`SKIA_UPDATE_GOLDENS=1`; it records raw-RGBA and PNG SHA-256 values for local visual
+review. The optional local-golden test remains ignored by default, so ordinary tests
+and CI depend only on the repository-authored scenes and their CPU/software parity.
 
 ### Phase 2 — backend matrix and tolerances
 

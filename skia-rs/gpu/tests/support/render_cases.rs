@@ -1,8 +1,7 @@
 // Shared owned render scenes for the pixel-oracle integration test.
 use std::{
     fmt::Write as _,
-    fs::{self, File},
-    io::{BufRead, BufReader},
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -161,47 +160,7 @@ pub fn render_software_gpu(case: RenderCase) -> Surface {
 }
 
 pub fn golden_directory() -> PathBuf {
-    const MANIFEST: &str = "skia-rs/gpu/tests/golden/manifest.toml";
-
-    resolve_runfile(MANIFEST)
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden"))
-}
-
-fn resolve_runfile(logical_path: &str) -> Option<PathBuf> {
-    let mut logical_paths = vec![logical_path.to_owned()];
-    if let Ok(workspace) = std::env::var("TEST_WORKSPACE")
-        && !workspace.is_empty()
-    {
-        logical_paths.push(format!("{workspace}/{logical_path}"));
-    }
-
-    for root_env in ["RUNFILES_DIR", "TEST_SRCDIR"] {
-        let Some(root) = std::env::var_os(root_env) else {
-            continue;
-        };
-        let root = PathBuf::from(root);
-        for logical_path in &logical_paths {
-            let candidate = root.join(logical_path);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-
-    let manifest = PathBuf::from(std::env::var_os("RUNFILES_MANIFEST_FILE")?);
-    for line in BufReader::new(File::open(manifest).ok()?)
-        .lines()
-        .map_while(Result::ok)
-    {
-        let Some((key, value)) = line.split_once(' ') else {
-            continue;
-        };
-        if logical_paths.iter().any(|logical_path| logical_path == key) {
-            return Some(PathBuf::from(value));
-        }
-    }
-    None
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
 }
 
 pub fn write_goldens(directory: &Path) -> Result<(), String> {

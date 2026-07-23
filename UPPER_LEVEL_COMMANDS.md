@@ -638,12 +638,12 @@ Metal 的 device-optional 测试。需要真实设备像素门禁时，必须配
 设置 `SKIA_REQUIRE_METAL_DEVICE=1`；不得把无 device 的跳过当成硬件通过。
 
 CPU 与 software-GPU 共享的自有像素场景位于 `gpu/tests/support/render_cases.rs`；普通测试将它们逐
-RGBA8 像素与 `tests/golden/` 中审查过的 fixture 比较。只有在明确审查像素/PNG diff 后，才可更新
-golden：
+RGBA8 像素直接比较。`tests/golden/` 是本地忽略的人工视觉检查数据，不进入 Git 或 CI。需要生成并
+检查本地 golden 时，运行：
 
 ```sh
 SKIA_UPDATE_GOLDENS=1 scripts/regenerate_goldens.sh
-cargo test -p skia-gpu --features software --test render_oracle
+cargo test -p skia-gpu --features software --test render_oracle local_goldens_match_software_replay -- --ignored --exact
 ```
 
 只验证上层公开图片 codec 契约时，运行根 crate 的 facade 集成测试；该测试不直接引用

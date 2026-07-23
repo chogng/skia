@@ -24,7 +24,8 @@ fn owned_scenes_match_cpu_and_software_gpu_pixels() {
 }
 
 #[test]
-fn checked_in_goldens_match_software_replay() {
+#[ignore = "requires local generated golden data; run scripts/regenerate_goldens.sh first"]
+fn local_goldens_match_software_replay() {
     let directory = golden_directory();
     let manifest = fs::read_to_string(directory.join("manifest.toml")).expect("golden manifest");
     for case in CASES {
