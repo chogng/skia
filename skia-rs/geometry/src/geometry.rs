@@ -172,6 +172,14 @@ impl Transform {
         Self::new(x, Scalar::ZERO, Scalar::ZERO, y, Scalar::ZERO, Scalar::ZERO)
     }
 
+    /// Returns the affine coefficients in Canvas order `(a, b, c, d, e, f)`.
+    ///
+    /// This is the backend-neutral representation consumed by renderers and
+    /// document writers when lowering a transform to their native matrix form.
+    pub const fn coefficients(self) -> [Scalar; 6] {
+        [self.a, self.b, self.c, self.d, self.e, self.f]
+    }
+
     /// Returns the affine transform produced by applying `self` and then `next`.
     ///
     /// This order matches canvas state concatenation: `current.concat(next)`

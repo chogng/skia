@@ -158,6 +158,65 @@ linear-light blending is not yet exposed as a surface mode. Color-managed
 images are nevertheless converted before sampling and compositing, so samples
 from different declared spaces are never mixed as if they shared an encoding.
 
+## PDF output
+
+`skia-pdf::PdfDocument` uses an explicit `begin_page` /
+`add_display_list` / `end_page` lifecycle, plus an ergonomic `add_page`
+operation. `finish` and `abort` consume the writer, preventing repeated
+closure. An unfinished or nested page, unbalanced save state, invalid page
+geometry, output failure, and every configured resource ceiling produce a
+stable `PdfErrorCode`; unsupported commands are never discarded.
+Serialization is delayed until `finish`, so command mapping is transactional
+and an error does not emit a misleading partial PDF. The destination can
+still fail during the final write, in which case the I/O category is retained.
+
+The crate deliberately uses a small in-tree PDF writer rather than a general
+PDF object-model dependency. The required surface is narrow (new documents,
+page content streams, images, graphics state, Info metadata, and classic xref),
+while direct ownership makes object ordering, byte limits, partial-write
+behavior, and reproducibility straightforward to audit. PDF 1.7 was selected
+because it is broadly supported and provides the standard transparency and
+blend-mode facilities required by the current paint vocabulary. Streams use
+deterministic zlib/Flate encoding, object numbers follow document declaration
+order, and no timestamps, random identifiers, or current-time metadata are
+written by default.
+
+One point is one logical display-list unit. Page content starts with a
+top-left-to-PDF coordinate conversion, then preserves display-list affine
+transforms. `PageSpec` can additionally impose a validated content clipping
+rectangle. The current mapping policy is:
+
+| Display-list semantic | PDF policy |
+| --- | --- |
+| Save/restore, affine set/concat transform | Native graphics state and matrix |
+| Rectangle/path fill, even-odd/non-zero rule | Native; quadratic curves become exact cubic curves |
+| Center stroke, cap/join/miter, dash | Native |
+| Intersect rectangle/path clip | Native |
+| Solid sRGBA paint and alpha | Native color plus deduplicated ExtGState |
+| Multiply, Screen, Overlay, Darken, Lighten, ColorDodge, ColorBurn, HardLight, SoftLight, Difference, Exclusion, Hue, Saturation, Color, Luminosity | Native PDF blend mode |
+| sRGB RGBA8 image, opacity, reuse | Native Image XObject; alpha uses SMask; sampling choice is retained as the interpolation policy |
+| Gradient/runtime shader, color filter, SaveLayer/image filter, difference clip, non-center stroke, path effect, non-PDF Porter-Duff mode, rational conic | Configurable whole-page CPU fallback, otherwise `Unsupported` |
+| ICC-tagged image | `UnsupportedColorProfile`; profiles are never silently treated as sRGB |
+| Glyph-run command | `UnsupportedText` in the first API because a DisplayList does not own its outline resolver |
+
+Whole-page fallback has explicit DPI, pixel, and RGBA working-memory ceilings.
+It renders into transparent straight-alpha RGBA8 through `skia-cpu`, embeds the
+result as one image with an SMask when required, and does not depend on a GPU or
+platform renderer. Fallback remains whole-page in this release; region/layer
+rasterization is a future optimization. Text is intentionally not sent through
+that fallback until the API can accept the matching `GlyphOutlineProvider`.
+Consequently glyph content cannot disappear, but a glyph page currently fails
+explicitly. A later outline strategy may preserve appearance and font
+independence but will also document that outline text is not searchable;
+searchable PDF text requires complete font subsetting, metrics, CID mapping,
+and ToUnicode support and will not be added piecemeal.
+
+PDF/A, tagged/structured PDF, outlines/bookmarks, encryption, and signatures
+are not current features. XPS may later share a small multi-page lifecycle
+crate with PDF once a second implementation proves that abstraction useful.
+SVG remains a separate single-canvas output responsibility rather than being
+forced into this multi-page API.
+
 ## Text implementation boundary
 
 `skia-rs/text` owns portable font identities, ordered in-memory font collections,

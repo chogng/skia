@@ -1,2 +1,3 @@
 /skia-rs/target/
 /bazel-*
+/tmp/

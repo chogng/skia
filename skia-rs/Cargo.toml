@@ -3,6 +3,7 @@ members = [
     "codec",
     "core",
     "cpu",
+    "pdf",
     "effects",
     "error",
     "geometry",
@@ -28,6 +29,7 @@ rust-version = "1.89"
 skia-codec = { path = "codec" }
 skia-core = { path = "core", default-features = false }
 skia-cpu = { path = "cpu" }
+skia-pdf = { path = "pdf" }
 skia-effects = { path = "effects" }
 skia-error = { path = "error" }
 skia-geometry = { path = "geometry" }
@@ -44,6 +46,7 @@ skia-vulkan = { path = "gpu/vulkan" }
 # External
 ash = { version = "0.38.0", default-features = false }
 clipper2-rust = "1.0.3"
+flate2 = "1.1.9"
 hyphenation = "0.8.4"
 image = { version = "0.25.10", default-features = false }
 metal = "0.33.0"

@@ -805,6 +805,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "skia-pdf"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "skia-core",
+ "skia-cpu",
+ "skia-image",
+]
+
+[[package]]
 name = "skia-system-fonts"
 version = "0.1.0"
 dependencies = [
