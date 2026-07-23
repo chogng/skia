@@ -17,6 +17,12 @@ const OP_LAYER: u32 = 6u;
 const OP_CLIP: u32 = 7u;
 const OP_BLUR_X: u32 = 8u;
 const OP_BLUR_Y: u32 = 9u;
+const RUNTIME_SHADER_INSTRUCTION_WORDS: u32 = 6u;
+const RUNTIME_SHADER_MAX_INSTRUCTIONS: u32 = 64u;
+const RUNTIME_SHADER_HEADER: u32 = 96u;
+const RUNTIME_SHADER_INSTRUCTION_BASE: u32 = RUNTIME_SHADER_HEADER + 2u;
+const RUNTIME_SHADER_UNIFORM_BASE: u32 =
+    RUNTIME_SHADER_INSTRUCTION_BASE + RUNTIME_SHADER_MAX_INSTRUCTIONS * RUNTIME_SHADER_INSTRUCTION_WORDS;
 
 fn channel(color: u32, shift: u32) -> u32 {
     return (color >> shift) & 255u;
@@ -217,9 +223,99 @@ fn tile_parameter(value: f32, mode: u32) -> f32 {
     return select(repeated, 2.0-repeated, repeated > 1.0);
 }
 
+fn runtime_instruction_word(instruction: u32, word: u32) -> u32 {
+    return params.values[
+        RUNTIME_SHADER_INSTRUCTION_BASE + instruction * RUNTIME_SHADER_INSTRUCTION_WORDS + word
+    ];
+}
+
+fn runtime_color(value: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32(channel(value, 0u)) / 255.0,
+        f32(channel(value, 8u)) / 255.0,
+        f32(channel(value, 16u)) / 255.0,
+        f32(channel(value, 24u)) / 255.0,
+    );
+}
+
+fn pack_runtime_color(color: vec4<f32>) -> u32 {
+    let channels = vec4<u32>(round(clamp(color, vec4<f32>(0.0), vec4<f32>(1.0)) * 255.0));
+    return pack(channels.x, channels.y, channels.z, channels.w);
+}
+
+fn runtime_coordinate(point: f32, start_bits: u32, end_bits: u32) -> f32 {
+    let start = f32(bitcast<i32>(start_bits)) / 65536.0;
+    let end = f32(bitcast<i32>(end_bits)) / 65536.0;
+    return clamp((point - start) / (end - start), 0.0, 1.0);
+}
+
+fn evaluate_runtime_paint(point: vec2<f32>) -> u32 {
+    var registers: array<vec4<f32>, 16>;
+    var source = vec4<f32>(0.0);
+    let count = min(params.values[RUNTIME_SHADER_HEADER], RUNTIME_SHADER_MAX_INSTRUCTIONS);
+    for (var index = 0u; index < count; index++) {
+        let opcode = runtime_instruction_word(index, 0u);
+        let destination = runtime_instruction_word(index, 1u);
+        if opcode == 1u {
+            registers[destination] = runtime_color(runtime_instruction_word(index, 2u));
+        } else if opcode == 2u {
+            registers[destination] = runtime_color(
+                params.values[RUNTIME_SHADER_UNIFORM_BASE + runtime_instruction_word(index, 2u)]
+            );
+        } else if opcode == 3u {
+            registers[destination] = vec4<f32>(
+                runtime_coordinate(
+                    point.x,
+                    runtime_instruction_word(index, 2u),
+                    runtime_instruction_word(index, 3u),
+                )
+            );
+        } else if opcode == 4u {
+            registers[destination] = vec4<f32>(
+                runtime_coordinate(
+                    point.y,
+                    runtime_instruction_word(index, 2u),
+                    runtime_instruction_word(index, 3u),
+                )
+            );
+        } else if opcode == 5u {
+            registers[destination] = clamp(
+                registers[runtime_instruction_word(index, 2u)] + registers[runtime_instruction_word(index, 3u)],
+                vec4<f32>(0.0),
+                vec4<f32>(1.0),
+            );
+        } else if opcode == 6u {
+            registers[destination] = clamp(
+                registers[runtime_instruction_word(index, 2u)] * registers[runtime_instruction_word(index, 3u)],
+                vec4<f32>(0.0),
+                vec4<f32>(1.0),
+            );
+        } else if opcode == 7u {
+            registers[destination] = mix(
+                registers[runtime_instruction_word(index, 2u)],
+                registers[runtime_instruction_word(index, 3u)],
+                clamp(registers[runtime_instruction_word(index, 4u)].x, 0.0, 1.0),
+            );
+        } else if opcode == 8u {
+            registers[destination] = clamp(
+                registers[runtime_instruction_word(index, 2u)],
+                vec4<f32>(0.0),
+                vec4<f32>(1.0),
+            );
+        } else if opcode == 9u {
+            source = registers[runtime_instruction_word(index, 2u)];
+        }
+    }
+    source.a *= f32(channel(params.values[3u], 24u)) / 255.0;
+    return pack_runtime_color(source);
+}
+
 fn evaluate_paint(point: vec2<f32>) -> u32 {
     var color = params.values[3u];
     let kind = params.values[32u];
+    if kind == 3u {
+        return apply_color_filter(evaluate_runtime_paint(point));
+    }
     if kind != 0u {
         let first = vec2<f32>(bitcast<f32>(params.values[35u]), bitcast<f32>(params.values[36u]));
         var parameter = 0.0;

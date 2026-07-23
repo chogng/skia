@@ -458,6 +458,13 @@ pub struct RuntimeShaderLimits {
 }
 
 impl RuntimeShaderLimits {
+    /// Maximum instruction count supported by the portable shader packet.
+    pub const MAX_INSTRUCTIONS: u8 = 64;
+    /// Maximum color-uniform count supported by the portable shader packet.
+    pub const MAX_UNIFORMS: u8 = 16;
+    /// Maximum typed register count supported by the portable shader packet.
+    pub const MAX_REGISTERS: u8 = RUNTIME_SHADER_MAX_REGISTERS as u8;
+
     /// Creates instruction, uniform, and register ceilings for one program.
     pub fn new(
         max_instructions: u8,
@@ -465,8 +472,10 @@ impl RuntimeShaderLimits {
         max_registers: u8,
     ) -> Result<Self, SkiaError> {
         if max_instructions == 0
+            || max_instructions > Self::MAX_INSTRUCTIONS
+            || max_uniforms > Self::MAX_UNIFORMS
             || max_registers == 0
-            || usize::from(max_registers) > RUNTIME_SHADER_MAX_REGISTERS
+            || max_registers > Self::MAX_REGISTERS
         {
             return Err(SkiaError::new(SkiaErrorCode::InvalidLimits));
         }
@@ -496,9 +505,9 @@ impl RuntimeShaderLimits {
 impl Default for RuntimeShaderLimits {
     fn default() -> Self {
         Self {
-            max_instructions: 64,
-            max_uniforms: 16,
-            max_registers: RUNTIME_SHADER_MAX_REGISTERS as u8,
+            max_instructions: Self::MAX_INSTRUCTIONS,
+            max_uniforms: Self::MAX_UNIFORMS,
+            max_registers: Self::MAX_REGISTERS,
         }
     }
 }
@@ -585,7 +594,7 @@ pub enum RuntimeShaderInstruction {
 ///
 /// Programs contain no loops, host callbacks, source text, or texture access.
 /// Their compact typed register IR is portable to a future CPU interpreter and
-/// Metal/Vulkan lowering path.
+/// Metal/Vulkan's precompiled shader VM.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RuntimeShaderProgram {
     instructions: Arc<[RuntimeShaderInstruction]>,

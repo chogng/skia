@@ -4,7 +4,11 @@ use skia_core::{
     BlendMode, ClipOp, Color, ColorFilter, FillRule, GradientGeometry, ImageFilter, Paint, Point,
     Rect, SamplingFilter, SaveLayerOptions, Scalar, TileMode, Transform,
 };
-use skia_gpu::{GpuClipGeometry, GpuClipId, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor};
+use skia_gpu::{
+    GpuClipGeometry, GpuClipId, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor,
+    RUNTIME_SHADER_INSTRUCTION_WORDS, RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS,
+    runtime_shader_packet,
+};
 use skia_tessellation::{DEFAULT_CURVE_STEPS, FlatteningLimits, PathFlattener, stroke_mesh};
 
 use crate::{
@@ -22,7 +26,11 @@ const OP_LAYER: u32 = 6;
 const OP_CLIP: u32 = 7;
 const OP_BLUR_X: u32 = 8;
 const OP_BLUR_Y: u32 = 9;
-const PARAMETER_WORDS: usize = 96;
+const RUNTIME_SHADER_HEADER: usize = 96;
+const RUNTIME_SHADER_INSTRUCTION_BASE: usize = RUNTIME_SHADER_HEADER + 2;
+const RUNTIME_SHADER_UNIFORM_BASE: usize = RUNTIME_SHADER_INSTRUCTION_BASE
+    + RUNTIME_SHADER_MAX_INSTRUCTIONS * RUNTIME_SHADER_INSTRUCTION_WORDS;
+const PARAMETER_WORDS: usize = RUNTIME_SHADER_UNIFORM_BASE + RUNTIME_SHADER_MAX_UNIFORMS;
 
 pub(crate) fn submit(
     renderer: &VulkanRenderer,
@@ -30,13 +38,6 @@ pub(crate) fn submit(
     surface: &mut VulkanSurface,
     commands: &GpuCommandBuffer,
 ) -> Result<(), VulkanError> {
-    if commands
-        .commands()
-        .iter()
-        .any(GpuCommand::requires_runtime_shader_lowering)
-    {
-        return Err(VulkanError::new(VulkanErrorCode::UnsupportedCommand));
-    }
     let descriptor = surface.descriptor();
     let mut layers = Vec::<Layer>::new();
     let mut clips = HashMap::<GpuClipId, PixelBuffer>::new();
@@ -618,7 +619,17 @@ fn color_word(color: Color) -> u32 {
 
 fn encode_paint(params: &mut [u32; PARAMETER_WORDS], paint: &Paint) {
     params[3] = color_word(paint.color());
-    if let Some(gradient) = paint.gradient() {
+    if let Some(runtime) = runtime_shader_packet(paint) {
+        params[32] = 3;
+        params[RUNTIME_SHADER_HEADER] = runtime.instruction_count();
+        for (index, instruction) in runtime.instructions().iter().enumerate() {
+            let offset = RUNTIME_SHADER_INSTRUCTION_BASE + index * RUNTIME_SHADER_INSTRUCTION_WORDS;
+            params[offset..offset + RUNTIME_SHADER_INSTRUCTION_WORDS].copy_from_slice(instruction);
+        }
+        params[RUNTIME_SHADER_UNIFORM_BASE
+            ..RUNTIME_SHADER_UNIFORM_BASE + RUNTIME_SHADER_MAX_UNIFORMS]
+            .copy_from_slice(runtime.uniforms());
+    } else if let Some(gradient) = paint.gradient() {
         match gradient.geometry() {
             GradientGeometry::Linear { start, end } => {
                 params[32] = 1;

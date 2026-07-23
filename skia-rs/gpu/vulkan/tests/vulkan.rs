@@ -67,7 +67,7 @@ fn vulkan_backend_clears_and_reads_an_offscreen_surface() {
 }
 
 #[test]
-fn vulkan_rejects_runtime_shaders_until_native_lowering_exists() {
+fn vulkan_backend_executes_runtime_shaders() {
     let Some(mut backend) = backend_or_skip() else {
         return;
     };
@@ -77,30 +77,84 @@ fn vulkan_rejects_runtime_shaders_until_native_lowering_exists() {
                 destination: 0,
                 color: Color::RED,
             },
-            RuntimeShaderInstruction::Return { source: 0 },
+            RuntimeShaderInstruction::UniformColor {
+                destination: 1,
+                uniform: 0,
+            },
+            RuntimeShaderInstruction::LocalX {
+                destination: 2,
+                start: Scalar::ZERO,
+                end: Scalar::from_i32(4).expect("end"),
+            },
+            RuntimeShaderInstruction::Mix {
+                destination: 3,
+                first: 0,
+                second: 1,
+                factor: 2,
+            },
+            RuntimeShaderInstruction::Return { source: 3 },
         ],
-        0,
+        1,
         RuntimeShaderLimits::default(),
     )
     .expect("program");
     let paint = Paint::new(Color::WHITE).with_shader(ShaderHandle::from_runtime(
-        RuntimeShader::new(program, &[]).expect("runtime shader"),
+        RuntimeShader::new(program, &[Color::BLUE]).expect("runtime shader"),
     ));
-    let mut encoder = GpuCommandEncoder::new(1).expect("encoder");
+    let mut encoder = GpuCommandEncoder::new(2).expect("encoder");
+    encoder.clear(Color::BLACK).expect("clear");
     encoder
-        .fill_rect(rect(0, 0, 1, 1), paint)
+        .fill_rect(rect(0, 0, 4, 1), paint)
         .expect("runtime fill");
-    let mut surface = backend
-        .create_surface(GpuSurfaceDescriptor::new(1, 1).expect("surface descriptor"))
-        .expect("surface");
+    let descriptor = GpuSurfaceDescriptor::new(4, 1).expect("surface descriptor");
+    assert_matches_reference(&mut backend, descriptor, &encoder.finish());
+}
 
-    assert_eq!(
-        backend
-            .submit(&mut surface, &encoder.finish())
-            .expect_err("runtime shader requires lowering")
-            .code(),
-        VulkanErrorCode::UnsupportedCommand
-    );
+#[test]
+fn vulkan_backend_matches_runtime_shader_arithmetic() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let program = RuntimeShaderProgram::new(
+        &[
+            RuntimeShaderInstruction::ConstantColor {
+                destination: 0,
+                color: Color::rgba(40, 80, 120, 160),
+            },
+            RuntimeShaderInstruction::UniformColor {
+                destination: 1,
+                uniform: 0,
+            },
+            RuntimeShaderInstruction::Multiply {
+                destination: 2,
+                first: 0,
+                second: 1,
+            },
+            RuntimeShaderInstruction::Add {
+                destination: 3,
+                first: 0,
+                second: 2,
+            },
+            RuntimeShaderInstruction::Clamp {
+                destination: 4,
+                source: 3,
+            },
+            RuntimeShaderInstruction::Return { source: 4 },
+        ],
+        1,
+        RuntimeShaderLimits::default(),
+    )
+    .expect("program");
+    let paint = Paint::new(Color::WHITE).with_shader(ShaderHandle::from_runtime(
+        RuntimeShader::new(program, &[Color::rgba(100, 150, 200, 220)]).expect("runtime"),
+    ));
+    let mut encoder = GpuCommandEncoder::new(2).expect("encoder");
+    encoder.clear(Color::BLACK).expect("clear");
+    encoder
+        .fill_rect(rect(0, 0, 2, 2), paint)
+        .expect("runtime fill");
+    let descriptor = GpuSurfaceDescriptor::new(2, 2).expect("surface descriptor");
+    assert_matches_reference(&mut backend, descriptor, &encoder.finish());
 }
 
 #[test]

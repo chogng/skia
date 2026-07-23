@@ -22,6 +22,9 @@ struct PaintUniforms {
     float4 filter_color;
     uint4 modes;
     uint4 extra;
+    uint4 runtime_header;
+    uint runtime_instructions[384];
+    uint runtime_uniforms[16];
 };
 
 float4 from_premul(float4 value) {
@@ -150,8 +153,79 @@ float tiled_parameter(float parameter, uint mode) {
     return value > 1.0 ? 2.0 - value : value;
 }
 
+uint runtime_instruction_word(constant PaintUniforms& paint, uint instruction, uint word) {
+    return paint.runtime_instructions[instruction * 6 + word];
+}
+
+float4 runtime_color(uint color) {
+    return float4(
+        float(color & 255) / 255.0,
+        float((color >> 8) & 255) / 255.0,
+        float((color >> 16) & 255) / 255.0,
+        float((color >> 24) & 255) / 255.0);
+}
+
+float runtime_coordinate(float point, uint start_bits, uint end_bits) {
+    float start = float(as_type<int>(start_bits)) / 65536.0;
+    float end = float(as_type<int>(end_bits)) / 65536.0;
+    return clamp((point - start) / (end - start), 0.0, 1.0);
+}
+
+float4 evaluate_runtime_paint(float2 local_position, constant PaintUniforms& paint) {
+    float4 registers[16] = {};
+    float4 source = float4(0.0);
+    uint count = min(paint.runtime_header.x, 64u);
+    for (uint index = 0; index < count; ++index) {
+        uint opcode = runtime_instruction_word(paint, index, 0);
+        uint destination = runtime_instruction_word(paint, index, 1);
+        if (opcode == 1) {
+            registers[destination] = runtime_color(runtime_instruction_word(paint, index, 2));
+        } else if (opcode == 2) {
+            registers[destination] = runtime_color(
+                paint.runtime_uniforms[runtime_instruction_word(paint, index, 2)]);
+        } else if (opcode == 3) {
+            registers[destination] = float4(runtime_coordinate(
+                local_position.x,
+                runtime_instruction_word(paint, index, 2),
+                runtime_instruction_word(paint, index, 3)));
+        } else if (opcode == 4) {
+            registers[destination] = float4(runtime_coordinate(
+                local_position.y,
+                runtime_instruction_word(paint, index, 2),
+                runtime_instruction_word(paint, index, 3)));
+        } else if (opcode == 5) {
+            registers[destination] = clamp(
+                registers[runtime_instruction_word(paint, index, 2)]
+                    + registers[runtime_instruction_word(paint, index, 3)],
+                0.0,
+                1.0);
+        } else if (opcode == 6) {
+            registers[destination] = clamp(
+                registers[runtime_instruction_word(paint, index, 2)]
+                    * registers[runtime_instruction_word(paint, index, 3)],
+                0.0,
+                1.0);
+        } else if (opcode == 7) {
+            registers[destination] = mix(
+                registers[runtime_instruction_word(paint, index, 2)],
+                registers[runtime_instruction_word(paint, index, 3)],
+                clamp(registers[runtime_instruction_word(paint, index, 4)].x, 0.0, 1.0));
+        } else if (opcode == 8) {
+            registers[destination] = clamp(
+                registers[runtime_instruction_word(paint, index, 2)],
+                0.0,
+                1.0);
+        } else if (opcode == 9) {
+            source = registers[runtime_instruction_word(paint, index, 2)];
+        }
+    }
+    source.a *= paint.color.a;
+    return clamp(source, 0.0, 1.0);
+}
+
 float4 evaluate_paint(float2 local_position, constant PaintUniforms& paint) {
     float4 source = paint.color;
+    if (paint.modes.x == 3) return apply_filter(evaluate_runtime_paint(local_position, paint), paint);
     if (paint.modes.x != 0) {
         float parameter;
         if (paint.modes.x == 1) {

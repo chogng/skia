@@ -300,9 +300,13 @@ boundary is ready for future dynamic effect types.
 The first runtime-shader tier adds a bounded typed IR with color uniforms,
 local X/Y parameters, add/multiply/mix/clamp, and no loops, source text, host
 callbacks, or texture access. `skia-core` validates the IR before a handle can
-retain it; CPU Canvas and the software GPU evaluate it deterministically. Until
-native lowering and pipeline caching land, Metal and Vulkan reject a source draw
-that carries this runtime shader instead of silently substituting a solid paint.
+retain it; CPU Canvas and the software GPU evaluate it deterministically. Metal
+and Vulkan encode the validated program and its uniforms into a fixed-size
+packet and interpret it in their existing precompiled paint shaders, so source
+draws need neither runtime MSL/SPIR-V compilation nor a per-program pipeline.
+The portable limits (64 instructions, 16 color uniforms, and 16 registers)
+keep that packet bounded. A future program-hash specialization cache can be an
+optimization over this baseline rather than a capability requirement.
 `skia-tessellation::stroke_to_path` produces a
 deterministic non-zero triangle-fill path.
 

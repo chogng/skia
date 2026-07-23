@@ -26,7 +26,8 @@ use skia_core::{
 };
 use skia_gpu::{
     GpuBackend, GpuCapabilities, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphAtlasKey,
-    GpuGlyphQuad, GpuSurfaceDescriptor,
+    GpuGlyphQuad, GpuSurfaceDescriptor, RUNTIME_SHADER_INSTRUCTION_WORDS,
+    RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS, runtime_shader_packet,
 };
 use skia_image::Image;
 
@@ -367,13 +368,6 @@ impl GpuBackend for MetalBackend {
         surface: &mut Self::Surface,
         commands: &GpuCommandBuffer,
     ) -> Result<(), Self::Error> {
-        if commands
-            .commands()
-            .iter()
-            .any(GpuCommand::requires_runtime_shader_lowering)
-        {
-            return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
-        }
         for command in commands.commands() {
             match command {
                 GpuCommand::Clear(_) => {}
@@ -1340,9 +1334,12 @@ struct PaintUniforms {
     filter_color: [f32; 4],
     modes: [u32; 4],
     extra: [u32; 4],
+    runtime_header: [u32; 4],
+    runtime_instructions: [u32; RUNTIME_SHADER_MAX_INSTRUCTIONS * RUNTIME_SHADER_INSTRUCTION_WORDS],
+    runtime_uniforms: [u32; RUNTIME_SHADER_MAX_UNIFORMS],
 }
 
-const _: [u8; 320] = [0; size_of::<PaintUniforms>()];
+const _: [u8; 1_936] = [0; size_of::<PaintUniforms>()];
 
 struct CachedAtlasTexture {
     key: GpuGlyphAtlasKey,
@@ -1455,8 +1452,23 @@ fn paint_uniforms(paint: Paint) -> PaintUniforms {
         filter_color: [0.0; 4],
         modes: [0; 4],
         extra: [blend_mode_id(paint.blend_mode()), 0, 0, 0],
+        runtime_header: [0; 4],
+        runtime_instructions: [0; RUNTIME_SHADER_MAX_INSTRUCTIONS
+            * RUNTIME_SHADER_INSTRUCTION_WORDS],
+        runtime_uniforms: [0; RUNTIME_SHADER_MAX_UNIFORMS],
     };
-    if let Some(gradient) = paint.gradient() {
+    if let Some(runtime) = runtime_shader_packet(&paint) {
+        uniforms.modes[0] = 3;
+        uniforms.runtime_header[0] = runtime.instruction_count();
+        for (index, instruction) in runtime.instructions().iter().enumerate() {
+            let offset = index * RUNTIME_SHADER_INSTRUCTION_WORDS;
+            uniforms.runtime_instructions[offset..offset + RUNTIME_SHADER_INSTRUCTION_WORDS]
+                .copy_from_slice(instruction);
+        }
+        uniforms
+            .runtime_uniforms
+            .copy_from_slice(runtime.uniforms());
+    } else if let Some(gradient) = paint.gradient() {
         uniforms.modes[0] = match gradient.geometry() {
             GradientGeometry::Linear { start, end } => {
                 uniforms.gradient_geometry = [

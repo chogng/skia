@@ -13,6 +13,7 @@ mod encoder;
 mod error;
 mod limits;
 mod resource;
+mod runtime_shader;
 mod surface;
 
 /// Deterministic CPU replay backend for GPU command conformance tests.
@@ -27,5 +28,9 @@ pub use limits::{GpuCapabilities, GpuCommandLimits};
 pub use resource::{
     GpuAtlasRect, GpuClipGeometry, GpuClipId, GpuClipNode, GpuGlyphAtlas, GpuGlyphAtlasId,
     GpuGlyphAtlasKey, GpuGlyphQuad, GpuImageId, GpuPathId,
+};
+pub use runtime_shader::{
+    RUNTIME_SHADER_INSTRUCTION_WORDS, RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS,
+    RuntimeShaderPacket, runtime_shader_packet,
 };
 pub use surface::{GpuSurfaceDescriptor, GpuSurfaceFormat};
