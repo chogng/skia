@@ -338,7 +338,7 @@ impl DisplayListBuilder {
         origin: Point,
         paint: Paint,
     ) -> Result<(), SkiaError> {
-        self.draw_shaped_paragraph_with_styles(paragraph, origin, &|_| Some(paint))
+        self.draw_shaped_paragraph_with_styles(paragraph, origin, &|_| Some(paint.clone()))
     }
 
     /// Expands one shaped paragraph with caller-resolved per-run paints.
@@ -362,7 +362,7 @@ impl DisplayListBuilder {
         origin: Point,
         paint: Paint,
     ) -> Result<(), SkiaError> {
-        self.draw_text_layout_with_styles(layout, origin, &|_| Some(paint))
+        self.draw_text_layout_with_styles(layout, origin, &|_| Some(paint.clone()))
     }
 
     /// Expands a text layout using caller-resolved glyph and decoration paints.

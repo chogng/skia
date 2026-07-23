@@ -1,8 +1,10 @@
 use skia_core::{
-    BlendMode, Color, ColorFilter, ColorMatrix, Gradient, GradientStop, ImageFilter, Paint,
+    BlendMode, Color, ColorFilter, ColorMatrix, DisplayListBuilder, FontCollection,
+    FontCollectionLimits, Gradient, GradientStop, ImageFilter, Paint, PathEffectHandle,
     SamplingOptions, SaveLayerOptions, StrokeCap, StrokeOptions, TileMode,
 };
 use skia_cpu::{ClipRect, Surface, SurfaceLimits};
+use skia_effects::DashPathEffect;
 use skia_error::SkiaErrorCode;
 use skia_geometry::{Point, Rect, Scalar, Transform};
 use skia_image::{Image, ImageErrorCode};
@@ -362,6 +364,37 @@ fn stroke_has_round_caps_and_joins_without_external_dependencies() {
     assert_eq!(pixel(&surface, 0, 2), [255, 0, 0, 255]);
     assert_eq!(pixel(&surface, 5, 1), [255, 0, 0, 255]);
     assert_eq!(pixel(&surface, 3, 0), [0, 0, 0, 0]);
+}
+
+#[test]
+fn display_list_replays_a_path_effect_held_by_paint() {
+    let mut path = PathBuilder::new(2).expect("path builder");
+    path.move_to(point(0, 2)).expect("move");
+    path.line_to(point(8, 2)).expect("line");
+    let effect = DashPathEffect::new(&[scalar(2), scalar(2)], Scalar::ZERO).expect("dash");
+    let paint = Paint::new(Color::WHITE).with_path_effect(PathEffectHandle::new(effect));
+    let options = StrokeOptions::new(scalar(2))
+        .expect("stroke")
+        .with_cap(StrokeCap::Butt);
+    let mut builder = DisplayListBuilder::new(4).expect("display list");
+    let path = builder
+        .add_path(path.finish().expect("path"))
+        .expect("path resource");
+    builder
+        .stroke_path_with_options(path, options, paint)
+        .expect("stroke command");
+    let list = builder.finish();
+    let mut surface = Surface::new(8, 4, SurfaceLimits::default()).expect("surface");
+    surface
+        .execute_display_list(&list, &FontCollection::new(FontCollectionLimits::default()))
+        .expect("replay");
+
+    for x in [0, 1, 4, 5] {
+        assert_eq!(pixel(&surface, x, 2), Color::WHITE.channels());
+    }
+    for x in [2, 3, 6, 7] {
+        assert_eq!(pixel(&surface, x, 2), Color::TRANSPARENT.channels());
+    }
 }
 
 #[test]

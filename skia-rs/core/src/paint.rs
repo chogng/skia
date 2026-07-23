@@ -1,3 +1,4 @@
+use crate::PathEffectHandle;
 use skia_error::{SkiaError, SkiaErrorCode};
 use skia_geometry::{Point, Scalar};
 
@@ -637,12 +638,13 @@ impl BlendMode {
 }
 
 /// Immutable constant-color paint selected for one draw operation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Paint {
     color: Color,
     blend_mode: BlendMode,
     gradient: Option<Gradient>,
     color_filter: Option<ColorFilter>,
+    path_effect: Option<PathEffectHandle>,
 }
 
 impl Paint {
@@ -653,6 +655,7 @@ impl Paint {
             blend_mode: BlendMode::SourceOver,
             gradient: None,
             color_filter: None,
+            path_effect: None,
         }
     }
 
@@ -663,6 +666,7 @@ impl Paint {
             blend_mode: BlendMode::SourceOver,
             gradient: Some(gradient),
             color_filter: None,
+            path_effect: None,
         }
     }
 
@@ -714,28 +718,48 @@ impl Paint {
         self
     }
 
+    /// Selects a logical path transformation for stroked path draws.
+    ///
+    /// The effect expands the local path before the canvas or encoder applies
+    /// its current transform. Fill, image, and text draws ignore this field.
+    pub fn with_path_effect(mut self, path_effect: PathEffectHandle) -> Self {
+        self.path_effect = Some(path_effect);
+        self
+    }
+
+    /// Removes the optional logical path transformation.
+    pub fn without_path_effect(mut self) -> Self {
+        self.path_effect = None;
+        self
+    }
+
     /// Returns the straight source color.
-    pub const fn color(self) -> Color {
+    pub const fn color(&self) -> Color {
         self.color
     }
 
     /// Returns the compositing operation.
-    pub const fn blend_mode(self) -> BlendMode {
+    pub const fn blend_mode(&self) -> BlendMode {
         self.blend_mode
     }
 
     /// Returns the optional local-space gradient.
-    pub const fn gradient(self) -> Option<Gradient> {
+    pub const fn gradient(&self) -> Option<Gradient> {
         self.gradient
     }
 
     /// Returns the optional pre-compositing color filter.
-    pub const fn color_filter(self) -> Option<ColorFilter> {
+    pub const fn color_filter(&self) -> Option<ColorFilter> {
         self.color_filter
     }
 
+    /// Borrows the optional logical path transformation.
+    pub fn path_effect(&self) -> Option<&PathEffectHandle> {
+        self.path_effect.as_ref()
+    }
+
     /// Evaluates this paint's source at one local-space point.
-    pub fn source_color(self, point: Point) -> Result<Color, SkiaError> {
+    pub fn source_color(&self, point: Point) -> Result<Color, SkiaError> {
         let source = if let Some(gradient) = self.gradient {
             gradient.sample(point)?.with_opacity(self.color.alpha())
         } else {
@@ -745,7 +769,7 @@ impl Paint {
     }
 
     /// Applies only this paint's color filter to an externally supplied source.
-    pub fn filter_color(self, source: Color) -> Color {
+    pub fn filter_color(&self, source: Color) -> Color {
         self.color_filter
             .map_or(source, |filter| filter.apply(source))
     }

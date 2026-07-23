@@ -1,6 +1,6 @@
 use skia_core::{
     BlendMode, ClipOp, Color, FillRule, Paint, Path, Point, Rect, SamplingOptions,
-    SaveLayerOptions, StrokeOptions, Transform,
+    SaveLayerOptions, SkiaError, SkiaErrorCode, StrokeOptions, Transform,
 };
 use skia_image::Image;
 
@@ -254,9 +254,26 @@ impl GpuCommandEncoder {
         options: StrokeOptions,
         paint: Paint,
     ) -> Result<(), GpuCommandError> {
-        if self.path(path).is_none() {
-            return Err(GpuCommandError::new(GpuCommandErrorCode::InvalidResource));
+        let source = self
+            .path(path)
+            .ok_or(GpuCommandError::new(GpuCommandErrorCode::InvalidResource))?;
+        if matches!(self.state.scissor, ClipState::Empty) {
+            return Ok(());
         }
+        if self.commands.len() == self.limits.max_commands {
+            return Err(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit));
+        }
+        let (path, paint) = if let Some(effect) = paint.path_effect() {
+            let Some(expanded) = effect
+                .apply(source, Transform::IDENTITY)
+                .map_err(map_path_effect_error)?
+            else {
+                return Ok(());
+            };
+            (self.add_path(expanded)?, paint.without_path_effect())
+        } else {
+            (path, paint)
+        };
         self.push(GpuCommand::StrokePath {
             path,
             options,
@@ -439,6 +456,23 @@ fn resource_id(length: usize, max_resources: usize) -> Result<u32, GpuCommandErr
         return Err(GpuCommandError::new(GpuCommandErrorCode::ResourceLimit));
     }
     u32::try_from(length).map_err(|_| GpuCommandError::new(GpuCommandErrorCode::ResourceLimit))
+}
+
+fn map_path_effect_error(error: SkiaError) -> GpuCommandError {
+    let code = match error.code() {
+        SkiaErrorCode::NumericOverflow => GpuCommandErrorCode::NumericOverflow,
+        SkiaErrorCode::InvalidLimits => GpuCommandErrorCode::InvalidLimits,
+        SkiaErrorCode::ResourceLimit => GpuCommandErrorCode::ResourceLimit,
+        SkiaErrorCode::AllocationFailed => GpuCommandErrorCode::AllocationFailed,
+        SkiaErrorCode::UnsupportedTransform => GpuCommandErrorCode::UnsupportedTransform,
+        SkiaErrorCode::InvalidGeometry
+        | SkiaErrorCode::InvalidResource
+        | SkiaErrorCode::InvalidImage
+        | SkiaErrorCode::InvalidPath
+        | SkiaErrorCode::RestoreUnderflow
+        | SkiaErrorCode::TextResolverFailed => GpuCommandErrorCode::InvalidResource,
+    };
+    GpuCommandError::new(code)
 }
 
 fn map_axis_aligned_rect(transform: Transform, rect: Rect) -> Result<Rect, GpuCommandError> {

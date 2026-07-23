@@ -167,12 +167,12 @@ impl Surface {
                 }
                 DrawCommand::SetTransform(transform) => canvas.set_transform(*transform),
                 DrawCommand::ConcatTransform(transform) => canvas.concat(*transform)?,
-                DrawCommand::FillRect { rect, paint } => canvas.fill_rect(*rect, *paint)?,
+                DrawCommand::FillRect { rect, paint } => canvas.fill_rect(*rect, paint.clone())?,
                 DrawCommand::FillPath { path, rule, paint } => {
                     let path = list
                         .path(*path)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    canvas.fill_path(path, *rule, *paint)?;
+                    canvas.fill_path(path, *rule, paint.clone())?;
                 }
                 DrawCommand::StrokePath {
                     path,
@@ -182,7 +182,7 @@ impl Surface {
                     let path = list
                         .path(*path)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    canvas.stroke_path_with_options(path, options, *paint)?;
+                    canvas.stroke_path_with_options(path, options, paint.clone())?;
                 }
                 DrawCommand::DrawImage {
                     image,
@@ -198,7 +198,7 @@ impl Surface {
                         image,
                         *destination,
                         *opacity,
-                        *paint,
+                        paint.clone(),
                         *sampling,
                     )?;
                 }
@@ -206,7 +206,7 @@ impl Surface {
                     let run = list
                         .glyph_run(*run)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    canvas.draw_glyph_run(run, glyphs, *paint)?;
+                    canvas.draw_glyph_run(run, glyphs, paint.clone())?;
                 }
                 DrawCommand::DrawPositionedGlyphRun {
                     run,
@@ -222,7 +222,7 @@ impl Surface {
                         offsets_x_bits,
                         *origin,
                         glyphs,
-                        *paint,
+                        paint.clone(),
                     )?;
                 }
             }
@@ -419,7 +419,7 @@ impl Canvas<'_> {
         points.push(transform.map_point(Point::new(rect.right(), rect.bottom()))?);
         points.push(transform.map_point(Point::new(rect.left(), rect.bottom()))?);
         let contour = Contour::new(points, true);
-        self.fill_contours(&[contour], FillRule::NonZero, paint)
+        self.fill_contours(&[contour], FillRule::NonZero, &paint)
     }
 
     /// Fills a transformed line path using the selected winding rule.
@@ -433,7 +433,7 @@ impl Canvas<'_> {
         if contours.iter().all(|contour| contour.points().len() < 3) {
             return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
         }
-        self.fill_contours(&contours, rule, paint)
+        self.fill_contours(&contours, rule, &paint)
     }
 
     /// Strokes a transformed path with round caps and round joins.
@@ -463,6 +463,12 @@ impl Canvas<'_> {
         options: &StrokeOptions,
         paint: Paint,
     ) -> Result<(), SkiaError> {
+        if let Some(effect) = paint.path_effect() {
+            let Some(path) = effect.apply(path, Transform::IDENTITY)? else {
+                return Ok(());
+            };
+            return self.stroke_path_with_options(&path, options, paint.without_path_effect());
+        }
         let contours = transformed_contours(path, self.state.transform)?;
         if contours.iter().all(|contour| contour.points().len() < 2) {
             return Err(SkiaError::new(SkiaErrorCode::InvalidPath));
@@ -473,7 +479,7 @@ impl Canvas<'_> {
             for x in bounds.left..bounds.right {
                 let sample = pixel_center(x, y)?;
                 if mesh.contains(sample)? {
-                    self.blend_pixel(x, y, paint)?;
+                    self.blend_pixel(x, y, &paint)?;
                 }
             }
         }
@@ -577,7 +583,7 @@ impl Canvas<'_> {
         paint: Paint,
     ) -> Result<(), SkiaError> {
         for glyph in run.glyphs() {
-            self.draw_positioned_glyph(run, *glyph, provider, paint)?;
+            self.draw_positioned_glyph(run, *glyph, provider, &paint)?;
         }
         Ok(())
     }
@@ -609,7 +615,7 @@ impl Canvas<'_> {
                     ))?;
                     applied_offset_bits = *offset_bits;
                 }
-                self.draw_positioned_glyph(run, *glyph, provider, paint)?;
+                self.draw_positioned_glyph(run, *glyph, provider, &paint)?;
             }
             Ok(())
         })();
@@ -629,7 +635,7 @@ impl Canvas<'_> {
         origin: Point,
         paint: Paint,
     ) -> Result<(), SkiaError> {
-        self.draw_shaped_paragraph_resolved(paragraph, provider, origin, &|_| Some(paint))
+        self.draw_shaped_paragraph_resolved(paragraph, provider, origin, &|_| Some(paint.clone()))
     }
 
     /// Draws a shaped paragraph by resolving each run's caller-defined style ID.
@@ -677,7 +683,7 @@ impl Canvas<'_> {
         origin: Point,
         paint: Paint,
     ) -> Result<(), SkiaError> {
-        self.draw_text_layout_resolved(layout, provider, origin, &|_| Some(paint))
+        self.draw_text_layout_resolved(layout, provider, origin, &|_| Some(paint.clone()))
     }
 
     /// Draws a text layout by resolving each run and decoration style ID.
@@ -725,7 +731,7 @@ impl Canvas<'_> {
         run: &GlyphRun,
         glyph: PositionedGlyph,
         provider: &impl GlyphOutlineProvider,
-        paint: Paint,
+        paint: &Paint,
     ) -> Result<(), SkiaError> {
         let Some(outline) = provider
             .glyph_outline(run.font(), glyph.glyph())
@@ -739,14 +745,14 @@ impl Canvas<'_> {
         let Some(path) = glyph_outline_path(run, glyph, &outline)? else {
             return Ok(());
         };
-        self.fill_path(&path, FillRule::NonZero, paint)
+        self.fill_path(&path, FillRule::NonZero, paint.clone())
     }
 
     fn fill_contours(
         &mut self,
         contours: &[Contour],
         rule: FillRule,
-        paint: Paint,
+        paint: &Paint,
     ) -> Result<(), SkiaError> {
         let bounds = contour_bounds(contours).intersection(self.state.scissor);
         for y in bounds.top..bounds.bottom {
@@ -821,7 +827,7 @@ impl Canvas<'_> {
         Ok(())
     }
 
-    fn blend_pixel(&mut self, x: i64, y: i64, paint: Paint) -> Result<(), SkiaError> {
+    fn blend_pixel(&mut self, x: i64, y: i64, paint: &Paint) -> Result<(), SkiaError> {
         let local = if paint.gradient().is_some() {
             self.state
                 .transform

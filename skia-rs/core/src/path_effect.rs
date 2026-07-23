@@ -1,3 +1,9 @@
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
+
 use crate::{Path, SkiaError, SkiaErrorCode, Transform};
 
 const DEFAULT_CURVE_STEPS: u32 = 16;
@@ -15,6 +21,73 @@ pub trait PathEffect: Send + Sync {
         transform: Transform,
         limits: PathEffectLimits,
     ) -> Result<Option<Path>, SkiaError>;
+}
+
+/// Cloneable, thread-safe ownership of one concrete [`PathEffect`].
+///
+/// Handles compare and hash by shared implementation identity and their
+/// configured limits. This lets an immutable paint or display list retain an
+/// extensible effect without requiring `skia-core` to know its concrete type.
+#[derive(Clone)]
+pub struct PathEffectHandle {
+    effect: Arc<dyn PathEffect>,
+    limits: PathEffectLimits,
+}
+
+impl PathEffectHandle {
+    /// Wraps one concrete effect with default resource ceilings.
+    pub fn new(effect: impl PathEffect + 'static) -> Self {
+        Self::from_arc(Arc::new(effect))
+    }
+
+    /// Wraps shared effect ownership with default resource ceilings.
+    pub fn from_arc(effect: Arc<dyn PathEffect>) -> Self {
+        Self::with_limits_arc(effect, PathEffectLimits::default())
+    }
+
+    /// Wraps one concrete effect with explicit resource ceilings.
+    pub fn with_limits(effect: impl PathEffect + 'static, limits: PathEffectLimits) -> Self {
+        Self::with_limits_arc(Arc::new(effect), limits)
+    }
+
+    /// Wraps shared effect ownership with explicit resource ceilings.
+    pub fn with_limits_arc(effect: Arc<dyn PathEffect>, limits: PathEffectLimits) -> Self {
+        Self { effect, limits }
+    }
+
+    /// Returns the resource ceilings selected for this handle.
+    pub const fn limits(&self) -> PathEffectLimits {
+        self.limits
+    }
+
+    /// Applies this handle's effect with its configured resource ceilings.
+    pub fn apply(&self, path: &Path, transform: Transform) -> Result<Option<Path>, SkiaError> {
+        apply_path_effect(path, self.effect.as_ref(), transform, self.limits)
+    }
+}
+
+impl fmt::Debug for PathEffectHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PathEffectHandle")
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for PathEffectHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.effect, &other.effect) && self.limits == other.limits
+    }
+}
+
+impl Eq for PathEffectHandle {}
+
+impl Hash for PathEffectHandle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.effect) as *const ()).hash(state);
+        self.limits.hash(state);
+    }
 }
 
 /// Resource ceilings for one path-effect operation.

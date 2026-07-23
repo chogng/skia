@@ -113,7 +113,7 @@ impl GpuBackend for SoftwareGpuBackend {
                     *transform,
                     *scissor,
                     *clip,
-                    |canvas| canvas.fill_rect(*rect, *paint),
+                    |canvas| canvas.fill_rect(*rect, paint.clone()),
                 )?,
                 GpuCommand::FillPath {
                     path,
@@ -130,7 +130,7 @@ impl GpuBackend for SoftwareGpuBackend {
                         *transform,
                         *scissor,
                         *clip,
-                        |canvas| canvas.fill_path(path, *rule, *paint),
+                        |canvas| canvas.fill_path(path, *rule, paint.clone()),
                     )?
                 }
                 GpuCommand::StrokePath {
@@ -148,7 +148,7 @@ impl GpuBackend for SoftwareGpuBackend {
                         *transform,
                         *scissor,
                         *clip,
-                        |canvas| canvas.stroke_path_with_options(path, options, *paint),
+                        |canvas| canvas.stroke_path_with_options(path, options, paint.clone()),
                     )?
                 }
                 GpuCommand::DrawImage {
@@ -173,7 +173,7 @@ impl GpuBackend for SoftwareGpuBackend {
                                 image,
                                 *destination,
                                 *opacity,
-                                *paint,
+                                paint.clone(),
                                 *sampling,
                             )
                         },
@@ -191,7 +191,7 @@ impl GpuBackend for SoftwareGpuBackend {
                     let images: Vec<_> = glyphs
                         .iter()
                         .map(|glyph| {
-                            glyph_image(atlas.image(), *glyph, *paint)
+                            glyph_image(atlas.image(), *glyph, paint.clone())
                                 .map(|image| (image, glyph.destination()))
                         })
                         .collect::<Result<_, _>>()?;

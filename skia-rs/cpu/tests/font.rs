@@ -2588,12 +2588,12 @@ fn display_list_expands_layout_runs_and_decorations_transactionally() {
     let mut direct = Surface::new(30, 24, SurfaceLimits::default()).expect("direct surface");
     direct
         .canvas()
-        .draw_text_layout(&layout, &fonts, origin, paint)
+        .draw_text_layout(&layout, &fonts, origin, paint.clone())
         .expect("direct layout");
 
     let mut builder = DisplayListBuilder::new(64).expect("display-list limits");
     builder
-        .draw_text_layout(&layout, origin, paint)
+        .draw_text_layout(&layout, origin, paint.clone())
         .expect("record layout");
     let list = builder.finish();
     let mut replay = Surface::new(30, 24, SurfaceLimits::default()).expect("replay surface");
@@ -2605,7 +2605,7 @@ fn display_list_expands_layout_runs_and_decorations_transactionally() {
     let mut bounded = DisplayListBuilder::new(1).expect("tight limits");
     assert_eq!(
         bounded
-            .draw_text_layout(&layout, origin, paint)
+            .draw_text_layout(&layout, origin, paint.clone())
             .expect_err("decoration commands exceed limit")
             .code(),
         SkiaErrorCode::ResourceLimit
@@ -2714,8 +2714,8 @@ fn styled_layout_resolves_per_span_paints_and_decorations() {
             &fonts,
             Point::new(Scalar::ZERO, scalar(1)),
             &|style| match style {
-                value if value == red_style => Some(red),
-                value if value == blue_style => Some(blue),
+                value if value == red_style => Some(red.clone()),
+                value if value == blue_style => Some(blue.clone()),
                 _ => None,
             },
         )
@@ -2731,7 +2731,7 @@ fn styled_layout_resolves_per_span_paints_and_decorations() {
             &layout,
             &fonts,
             Point::new(Scalar::ZERO, Scalar::ZERO),
-            &|style| (style == red_style).then_some(red),
+            &|style| (style == red_style).then_some(red.clone()),
         )
         .expect_err("missing blue style must fail closed");
     assert_eq!(error.code(), SkiaErrorCode::InvalidResource);
@@ -2772,8 +2772,8 @@ fn styled_layout_resolves_per_span_paints_and_decorations() {
         )
         .expect("undecorated styled layout");
     let resolver = |style| match style {
-        value if value == red_style => Some(red),
-        value if value == blue_style => Some(blue),
+        value if value == red_style => Some(red.clone()),
+        value if value == blue_style => Some(blue.clone()),
         _ => None,
     };
     Surface::new(30, 24, SurfaceLimits::default())

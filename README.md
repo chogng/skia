@@ -284,6 +284,12 @@ left-to-right through `compose_path_effects` or nest through
 `SumPathEffect`. Input transforms are never reapplied between stages. Core owns
 the contract and resource ceilings, while the concrete transformation
 algorithms live in `skia-effects` and reuse `skia-tessellation`.
+`PathEffectHandle` gives a `Paint` shared, cloneable ownership of one such
+effect together with its resource limits. A paint holding a path effect is no
+longer `Copy`; it remains `Clone`, `Eq`, and `Hash`, with handle equality based
+on shared implementation identity and limits. CPU Canvas and DisplayList
+replay expand the effect before stroking; the generic GPU encoder expands it at
+recording time so hardware backends continue to receive an ordinary path.
 `skia-tessellation::stroke_to_path` produces a
 deterministic non-zero triangle-fill path.
 

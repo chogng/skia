@@ -1,9 +1,10 @@
 //! Built-in backend-neutral drawing effects.
 //!
 //! `skia-core` owns the stable effect value and extension contracts used by
-//! paints and display lists. This crate supplies concrete path effects and
-//! factory namespaces for the built-in shader and filter values. Execution
-//! remains in tessellation and the CPU/GPU backends.
+//! paints and display lists. Its [`PathEffectHandle`] gives a paint shared,
+//! cloneable ownership of one concrete path effect. This crate supplies those
+//! concrete path effects and factory namespaces for the built-in shader and
+//! filter values. Execution remains in tessellation and the CPU/GPU backends.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -18,5 +19,5 @@ pub use path_effect::{
 };
 pub use skia_core::{
     ColorFilter, ColorMatrix, Gradient, GradientGeometry, GradientStop, ImageFilter, PathEffect,
-    PathEffectLimits, TileMode, apply_path_effect, compose_path_effects,
+    PathEffectHandle, PathEffectLimits, TileMode, apply_path_effect, compose_path_effects,
 };

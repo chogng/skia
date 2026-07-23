@@ -12,6 +12,9 @@ mod clip;
 mod display_list;
 mod paint;
 mod path_effect;
+#[cfg(test)]
+#[path = "path_effect_tests.rs"]
+mod path_effect_tests;
 mod sampling;
 #[cfg(feature = "text")]
 mod text_geometry;
@@ -26,7 +29,9 @@ pub use paint::{
     BlendMode, Color, ColorFilter, ColorMatrix, Gradient, GradientGeometry, GradientStop,
     ImageFilter, Paint, SaveLayerOptions, TileMode,
 };
-pub use path_effect::{PathEffect, PathEffectLimits, apply_path_effect, compose_path_effects};
+pub use path_effect::{
+    PathEffect, PathEffectHandle, PathEffectLimits, apply_path_effect, compose_path_effects,
+};
 pub use sampling::{SamplingFilter, SamplingOptions};
 pub use skia_error::{SkiaError, SkiaErrorCode};
 pub use skia_geometry::{Point, Rect, Scalar, Transform};

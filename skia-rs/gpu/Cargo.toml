@@ -16,6 +16,7 @@ software = ["dep:skia-cpu"]
 [dev-dependencies]
 sha2 = { workspace = true }
 skia-codec = { workspace = true }
+skia-effects = { workspace = true }
 
 [[test]]
 name = "render_oracle"

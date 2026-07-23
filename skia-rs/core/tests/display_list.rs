@@ -32,7 +32,7 @@ fn display_list_owns_and_draws_a_glyph_run() {
     let paint = Paint::new(Color::rgba(10, 20, 30, 255));
 
     builder
-        .draw_glyph_run(run, paint)
+        .draw_glyph_run(run, paint.clone())
         .expect("record text command");
     let list = builder.finish();
 
@@ -77,7 +77,7 @@ fn display_list_owns_explicit_stroke_geometry() {
         .expect("dash options");
     let paint = Paint::new(Color::BLACK);
     builder
-        .stroke_path_with_options(path, options.clone(), paint)
+        .stroke_path_with_options(path, options.clone(), paint.clone())
         .expect("record stroke");
 
     assert_eq!(
@@ -120,7 +120,7 @@ fn display_list_records_direct_rectangle_fill() {
     let paint = Paint::new(Color::rgba(12, 34, 56, 255));
 
     builder
-        .fill_rect(rect, paint)
+        .fill_rect(rect, paint.clone())
         .expect("record rectangle fill");
 
     assert_eq!(
@@ -142,7 +142,7 @@ fn display_list_records_isolated_layer_boundaries() {
     .expect("rect");
     let paint = Paint::new(Color::RED);
     builder.save_layer(options).expect("save layer");
-    builder.fill_rect(rect, paint).expect("fill");
+    builder.fill_rect(rect, paint.clone()).expect("fill");
     builder.restore().expect("restore");
     assert_eq!(
         builder.finish().commands(),
@@ -169,7 +169,13 @@ fn display_list_records_explicit_image_sampling() {
     .expect("rect");
     let paint = Paint::new(Color::WHITE);
     builder
-        .draw_image_with_sampling(image, destination, 200, paint, SamplingOptions::LINEAR)
+        .draw_image_with_sampling(
+            image,
+            destination,
+            200,
+            paint.clone(),
+            SamplingOptions::LINEAR,
+        )
         .expect("record image");
 
     assert_eq!(

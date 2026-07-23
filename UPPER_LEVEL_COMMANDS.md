@@ -476,7 +476,7 @@ SourceOver-only 或缺少 layer 模型缩减这些命令。
 | `ConcatTransform` / `concat_transform` | `Transform` | 叠加变换。 |
 | `FillRect` / `fill_rect` | `Rect`、`Paint` | 填充逻辑矩形；回放时沿用当时的变换和裁剪状态。 |
 | `FillPath` / `fill_path` | `PathId`、`FillRule`、`Paint` | 填充已登记的路径。 |
-| `StrokePath` / `stroke_path`、`stroke_path_with_options` | `PathId`、`StrokeOptions`、`Paint` | 兼容入口生成 round/round options；显式入口保留完整 cap/join/miter/dash 几何。 |
+| `StrokePath` / `stroke_path`、`stroke_path_with_options` | `PathId`、`StrokeOptions`、`Paint` | 兼容入口生成 round/round options；显式入口保留完整 cap/join/miter/dash 几何。若 paint 持有 `PathEffectHandle`，回放会先展开 local path。 |
 | `DrawImage` / `draw_image`、`draw_image_with_sampling` | `ImageId`、目标 `Rect`、`u8` opacity、`Paint`、`SamplingOptions` | 兼容入口记录 Nearest；显式入口保留 Nearest/Linear，回放使用 paint alpha、color filter 与 blend mode。 |
 | `DrawGlyphRun` / `draw_glyph_run` | `GlyphRunId`、`Paint` | 绘制已登记的整形字形序列。 |
 | `DrawPositionedGlyphRun` / `draw_positioned_glyph_run` | `GlyphRunId`、baseline origin、每 glyph Q16.16 X offset、`Paint` | 保留 line/run origin 与 justification 位移；paragraph/layout 便利入口以它为执行原语。 |
@@ -509,7 +509,7 @@ SourceOver-only 或缺少 layer 模型缩减这些命令。
 | 裁剪 / `clip_rect`、`clip_rect_with_op`、`clip_path` | `Rect`/`GpuPathId`、`FillRule`、`ClipOp` | 轴对齐矩形交集走 target-space scissor；其余裁剪形成不可变、可共享的 `GpuClipId` 父链。 |
 | `FillRect` / `fill_rect` | `Rect`、`Paint` | 填充矩形。 |
 | `FillPath` / `fill_path` | `GpuPathId`、`FillRule`、`Paint` | 填充已登记路径。 |
-| `StrokePath` / `stroke_path` | `GpuPathId`、`StrokeOptions`、`Paint` | 描边已登记路径，并快照 alignment/cap/join/dash、transform、scissor 与复杂裁剪 ID。 |
+| `StrokePath` / `stroke_path` | `GpuPathId`、`StrokeOptions`、`Paint` | 描边已登记路径，并快照 alignment/cap/join/dash、transform、scissor 与复杂裁剪 ID。若 paint 持有 `PathEffectHandle`，encoder 会在记录期展开 path，提交命令不再保留动态 handle。 |
 | `DrawImage` / `draw_image`、`draw_image_with_sampling`、`draw_image_with_paint` | `GpuImageId`、目标 `Rect`、`u8` opacity、`Paint`、`SamplingOptions` | 兼容入口从 blend mode 构造白色 paint；完整入口快照 paint alpha、color filter、blend mode 与 Nearest/Linear 采样。 |
 | `DrawGlyphs` / `draw_glyph_batch` | `GpuGlyphAtlasId`、`Vec<GpuGlyphQuad>`、`Paint` | 一次绘制一个已登记 atlas 的定位 glyph quad。 |
 
