@@ -34,7 +34,7 @@ fn porter_duff_modes_cover_source_destination_and_alpha_edges() {
     let destination = Color::rgba(0, 0, 255, 255);
     assert_eq!(
         source.composite(destination, BlendMode::SourceOver),
-        Color::rgba(128, 0, 127, 255)
+        Color::rgba(188, 0, 187, 255)
     );
     assert_eq!(
         source.composite(destination, BlendMode::DestinationOver),
@@ -49,6 +49,13 @@ fn porter_duff_modes_cover_source_destination_and_alpha_edges() {
         source.composite(Color::TRANSPARENT, BlendMode::SourceOver),
         source
     );
+}
+
+#[test]
+fn source_over_blends_rgb_in_linear_light() {
+    let result = Color::rgba(255, 255, 255, 128).composite(Color::BLACK, BlendMode::SourceOver);
+
+    assert_eq!(result, Color::rgb(188, 188, 188));
 }
 
 #[test]
@@ -91,15 +98,15 @@ fn advanced_modes_are_defined_for_every_8_bit_input() {
     }
     assert_eq!(
         Color::rgb(100, 200, 50).composite(Color::rgb(200, 100, 250), BlendMode::Multiply),
-        Color::rgb(78, 78, 49)
+        Color::rgb(75, 75, 50)
     );
     assert_eq!(
         Color::rgb(100, 200, 50).composite(Color::rgb(200, 100, 250), BlendMode::Screen),
-        Color::rgb(222, 222, 251)
+        Color::rgb(208, 208, 250)
     );
     assert_eq!(
         Color::rgb(200, 100, 40).composite(Color::rgb(30, 80, 220), BlendMode::SoftLight),
-        Color::rgb(61, 68, 199)
+        Color::rgb(34, 42, 191)
     );
 }
 
@@ -191,7 +198,7 @@ fn radial_gradient_and_color_filters_are_deterministic() {
     });
     assert_eq!(
         filtered.source_color(center).expect("filter"),
-        Color::rgba(128, 0, 127, 255)
+        Color::rgba(188, 0, 187, 255)
     );
 }
 

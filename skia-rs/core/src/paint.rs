@@ -1066,9 +1066,10 @@ impl BlendMode {
 
     /// Composites `source` over `destination`.
     ///
-    /// Color values use straight alpha at the API boundary. Calculations use
-    /// rounded premultiplied 8-bit values, and transparent results are
-    /// canonicalized to transparent black.
+    /// Color values use straight sRGBA8 at the API boundary. RGB is decoded to
+    /// an eight-bit linear-light working representation before premultiplied
+    /// compositing, then encoded back to sRGB. Alpha remains linear throughout,
+    /// and transparent results are canonicalized to transparent black.
     pub fn composite(self, source: Color, destination: Color) -> Color {
         if matches!(self, Self::SourceOver) && destination.is_transparent() {
             return source.canonicalized();
@@ -1076,6 +1077,23 @@ impl BlendMode {
         if matches!(self, Self::SourceOver) && source.is_transparent() {
             return destination.canonicalized();
         }
+        if matches!(self, Self::Clear) {
+            return Color::TRANSPARENT;
+        }
+        if matches!(self, Self::Source) {
+            return source.canonicalized();
+        }
+        if matches!(self, Self::Destination) {
+            return destination.canonicalized();
+        }
+        let result = self.composite_linear(
+            source.map_rgb(srgb_to_linear_8),
+            destination.map_rgb(srgb_to_linear_8),
+        );
+        result.map_rgb(linear_to_srgb_8)
+    }
+
+    fn composite_linear(self, source: Color, destination: Color) -> Color {
         match self {
             Self::Clear => Color::TRANSPARENT,
             Self::Plus => plus(source, destination),
@@ -1708,6 +1726,38 @@ impl Color {
             self
         }
     }
+
+    fn map_rgb(self, transform: impl Fn(u8) -> u8) -> Self {
+        if self.alpha == 0 {
+            return Self::TRANSPARENT;
+        }
+        Self::rgba(
+            transform(self.red),
+            transform(self.green),
+            transform(self.blue),
+            self.alpha,
+        )
+    }
+}
+
+fn srgb_to_linear_8(channel: u8) -> u8 {
+    let encoded = f32::from(channel) / 255.0;
+    let linear = if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    };
+    (linear * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+fn linear_to_srgb_8(channel: u8) -> u8 {
+    let linear = f32::from(channel) / 255.0;
+    let encoded = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
 fn porter_duff(

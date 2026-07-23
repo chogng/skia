@@ -283,6 +283,96 @@ fn standard_pdf_blend_mode_is_native_and_porter_duff_is_explicit() {
 }
 
 #[test]
+fn linear_match_uses_cpu_fallback_for_pdf_transparency() {
+    let mut builder = DisplayListBuilder::new(1).expect("builder");
+    builder
+        .fill_rect(rect(0, 0, 10, 10), Paint::new(Color::rgba(255, 0, 0, 128)))
+        .expect("fill");
+    let list = builder.finish();
+
+    let strict_options = PdfOptions {
+        color_policy: PdfColorPolicy::LinearMatch,
+        ..PdfOptions::default()
+    };
+    let mut strict = PdfDocument::new(Vec::new(), strict_options).expect("document");
+    strict
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("begin");
+    strict.add_display_list(&list).expect("list");
+    assert_eq!(
+        strict
+            .end_page()
+            .expect_err("linear fallback required")
+            .code(),
+        DocumentErrorCode::Unsupported
+    );
+
+    let fallback_options = PdfOptions {
+        color_policy: PdfColorPolicy::LinearMatch,
+        unsupported_behavior: UnsupportedBehavior::RasterizePage,
+        raster_fallback: RasterFallback {
+            dpi: 72,
+            max_pixels: 8_000,
+            max_bytes: 32_000,
+        },
+        ..PdfOptions::default()
+    };
+    let mut fallback = PdfDocument::new(Vec::new(), fallback_options).expect("document");
+    fallback
+        .add_page(PageSpec::new(size(100, 80)), &list)
+        .expect("fallback page");
+    let text = String::from_utf8_lossy(&fallback.finish().expect("finish")).into_owned();
+    assert!(text.contains("/Subtype /Image"));
+    assert!(!text.contains("/BM /Multiply"));
+}
+
+#[test]
+fn linear_match_keeps_opaque_source_over_vectors_native() {
+    let mut builder = DisplayListBuilder::new(1).expect("builder");
+    builder
+        .fill_rect(rect(0, 0, 10, 10), Paint::new(Color::RED))
+        .expect("fill");
+    let options = PdfOptions {
+        color_policy: PdfColorPolicy::LinearMatch,
+        ..PdfOptions::default()
+    };
+    let mut document = PdfDocument::new(Vec::new(), options).expect("document");
+    document
+        .add_page(PageSpec::new(size(100, 80)), &builder.finish())
+        .expect("native vector page");
+    let text = String::from_utf8_lossy(&document.finish().expect("finish")).into_owned();
+    assert!(!text.contains("/Subtype /Image"));
+    assert!(text.contains("1 0 0 rg"));
+}
+
+#[test]
+fn linear_match_rejects_opaque_non_source_over_blending() {
+    let mut builder = DisplayListBuilder::new(1).expect("builder");
+    builder
+        .fill_rect(
+            rect(0, 0, 10, 10),
+            Paint::new(Color::RED).with_blend_mode(BlendMode::Multiply),
+        )
+        .expect("fill");
+    let options = PdfOptions {
+        color_policy: PdfColorPolicy::LinearMatch,
+        ..PdfOptions::default()
+    };
+    let mut document = PdfDocument::new(Vec::new(), options).expect("document");
+    document
+        .begin_page(PageSpec::new(size(100, 80)))
+        .expect("begin");
+    document.add_display_list(&builder.finish()).expect("list");
+    assert_eq!(
+        document
+            .end_page()
+            .expect_err("linear fallback required")
+            .code(),
+        DocumentErrorCode::Unsupported
+    );
+}
+
+#[test]
 fn deterministic_bytes_and_output_limit_are_enforced() {
     let first = pdf_for(&vector_list());
     let second = pdf_for(&vector_list());

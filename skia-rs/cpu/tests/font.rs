@@ -2518,7 +2518,7 @@ fn font_decorations_use_primary_metrics_across_fallback_and_alignment() {
         .expect("draw decorated layout");
     drop(canvas);
 
-    assert_eq!(pixel(&surface, 18, 10), color);
+    assert_eq!(pixel(&surface, 18, 10), [22, 50, 75, 255]);
     assert_eq!(pixel(&surface, 18, 18), color);
     assert_eq!(pixel(&surface, 2, 18), [0, 0, 0, 0]);
 }

@@ -403,8 +403,8 @@ fn gpu_layers_record_boundaries_and_replay_restore_compositing() {
         .unwrap();
     backend.submit(&mut surface, &commands).unwrap();
     assert_eq!(pixel(&surface, 0, 0), Color::BLUE.channels());
-    assert_eq!(pixel(&surface, 1, 0), [128, 0, 127, 255]);
-    assert_eq!(pixel(&surface, 2, 0), [128, 0, 127, 255]);
+    assert_eq!(pixel(&surface, 1, 0), [188, 0, 187, 255]);
+    assert_eq!(pixel(&surface, 2, 0), [188, 0, 187, 255]);
     assert_eq!(pixel(&surface, 3, 0), Color::BLUE.channels());
 }
 
@@ -442,8 +442,8 @@ fn gpu_layers_snapshot_boundary_transform_and_clip_state() {
         .unwrap();
     backend.submit(&mut surface, &commands).unwrap();
     assert_eq!(pixel(&surface, 0, 0), Color::BLUE.channels());
-    assert_eq!(pixel(&surface, 1, 0), [128, 0, 127, 255]);
-    assert_eq!(pixel(&surface, 2, 0), [128, 0, 127, 255]);
+    assert_eq!(pixel(&surface, 1, 0), [188, 0, 187, 255]);
+    assert_eq!(pixel(&surface, 2, 0), [188, 0, 187, 255]);
     assert_eq!(pixel(&surface, 3, 0), Color::BLUE.channels());
 }
 
@@ -703,7 +703,7 @@ fn glyph_atlas_batches_tint_masks_and_preserve_color_glyphs() {
         .create_surface(GpuSurfaceDescriptor::new(2, 1).unwrap())
         .unwrap();
     backend.submit(&mut surface, &commands).unwrap();
-    assert_eq!(pixel(&surface, 0, 0), [0, 0, 128, 255]);
+    assert_eq!(pixel(&surface, 0, 0), [0, 0, 188, 255]);
     assert_eq!(pixel(&surface, 1, 0), [255, 0, 0, 255]);
 }
 

@@ -10,8 +10,8 @@
 mod pdf;
 
 pub use pdf::{
-    PageSize, PageSpec, PdfDocument, PdfError, PdfErrorCode, PdfLimits, PdfMetadata, PdfOptions,
-    RasterFallback, UnsupportedBehavior,
+    PageSize, PageSpec, PdfColorPolicy, PdfDocument, PdfError, PdfErrorCode, PdfLimits,
+    PdfMetadata, PdfOptions, RasterFallback, UnsupportedBehavior,
 };
 
 #[cfg(test)]

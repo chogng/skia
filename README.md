@@ -152,11 +152,15 @@ conversion and applied only after conversion when requested.
 
 Current support is deliberately limited to interleaved eight-bit RGBA/BGRA.
 There is no RGB10, RGBA16F, planar YUV, HDR transfer function, CMYK rendering,
-arbitrary ICC CLUT, or renderer-selected wide-gamut target yet. Render targets
-also retain the existing encoded-sRGB compositing contract; full-scene
-linear-light blending is not yet exposed as a surface mode. Color-managed
-images are nevertheless converted before sampling and compositing, so samples
-from different declared spaces are never mixed as if they shared an encoding.
+arbitrary ICC CLUT, or renderer-selected wide-gamut target yet. Render-target
+storage and readback remain straight sRGBA8888, but every CPU, software-GPU,
+Metal, and Vulkan compositing operation decodes RGB to a bounded eight-bit
+linear-light working representation, performs premultiplied-alpha blending,
+and encodes RGB back to sRGB; alpha remains linear. This applies to all blend
+modes, layer restore, glyph masks, and blend color filters. Color-managed
+images are converted before sampling, so samples from different declared
+spaces enter that same compositing path instead of being mixed as if they
+shared an encoding.
 
 ## PDF output
 
@@ -169,6 +173,16 @@ stable `PdfErrorCode`; unsupported commands are never discarded.
 Serialization is delayed until `finish`, so command mapping is transactional
 and an error does not emit a misleading partial PDF. The destination can
 still fail during the final write, in which case the I/O category is retained.
+
+`PdfOptions::color_policy` defaults to `NativePdf`, preserving vectors through
+the standard PDF transparency and blend-mode operators, as SkPDF does. Select
+`LinearMatch` to retain this renderer's linear-light compositing contract:
+pages containing translucent paint or images, a non-`SourceOver` blend mode,
+a translucent clear, or a saved layer are routed through the existing CPU
+whole-page fallback. With `UnsupportedBehavior::Error`, those pages fail
+explicitly instead. Opaque `SourceOver` vector drawing remains native in either
+mode. This makes the vector-versus-pixel-fidelity trade-off explicit rather
+than relying on a PDF viewer's blend color space.
 
 The crate deliberately uses a small in-tree PDF writer rather than a general
 PDF object-model dependency. The required surface is narrow (new documents,
@@ -192,8 +206,8 @@ rectangle. The current mapping policy is:
 | Rectangle/path fill, even-odd/non-zero rule | Native; quadratic curves become exact cubic curves |
 | Center stroke, cap/join/miter, dash | Native |
 | Intersect rectangle/path clip | Native |
-| Solid sRGBA paint and alpha | Native color plus deduplicated ExtGState |
-| Multiply, Screen, Overlay, Darken, Lighten, ColorDodge, ColorBurn, HardLight, SoftLight, Difference, Exclusion, Hue, Saturation, Color, Luminosity | Native PDF blend mode |
+| Solid opaque sRGBA SourceOver paint | Native color |
+| Alpha, transparent image, or standard PDF blend mode | `NativePdf`: native color plus deduplicated ExtGState; `LinearMatch`: CPU page fallback or explicit error |
 | sRGB RGBA8 image, opacity, reuse | Native Image XObject; alpha uses SMask; sampling choice is retained as the interpolation policy |
 | Gradient/runtime shader, color filter, SaveLayer/image filter, difference clip, non-center stroke, path effect, non-PDF Porter-Duff mode, rational conic | Configurable whole-page CPU fallback, otherwise `Unsupported` |
 | ICC-tagged image | `UnsupportedColorProfile`; profiles are never silently treated as sRGB |

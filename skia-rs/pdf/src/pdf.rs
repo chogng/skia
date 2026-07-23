@@ -253,6 +253,19 @@ pub enum UnsupportedBehavior {
     RasterizePage,
 }
 
+/// Color-compositing policy for PDF output.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PdfColorPolicy {
+    /// Preserve PDF-native vector painting, matching the conventional SkPDF
+    /// strategy. PDF viewers choose the blend color space for transparency.
+    #[default]
+    NativePdf,
+    /// Require CPU raster fallback when a page needs source/destination color
+    /// compositing, preserving this crate's linear-light rendering contract.
+    /// Opaque source-over vector commands remain native.
+    LinearMatch,
+}
+
 /// PDF backend configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PdfOptions {
@@ -262,6 +275,8 @@ pub struct PdfOptions {
     pub limits: DocumentLimits,
     /// Unsupported drawing policy.
     pub unsupported_behavior: UnsupportedBehavior,
+    /// Color-compositing policy for native PDF content.
+    pub color_policy: PdfColorPolicy,
     /// Whole-page fallback policy used when enabled.
     pub raster_fallback: RasterFallback,
 }
@@ -272,6 +287,7 @@ impl Default for PdfOptions {
             metadata: DocumentMetadata::default(),
             limits: DocumentLimits::default(),
             unsupported_behavior: UnsupportedBehavior::Error,
+            color_policy: PdfColorPolicy::NativePdf,
             raster_fallback: RasterFallback::default(),
         }
     }
@@ -378,7 +394,13 @@ impl<W: Write> PdfDocument<W> {
             .as_ref()
             .ok_or(DocumentError::new(DocumentErrorCode::InvalidState))?;
         let mut resources = self.resources.clone();
-        let native = compile_native_page(active, &mut resources, self.options.limits);
+        let native = if self.options.color_policy == PdfColorPolicy::LinearMatch
+            && page_requires_linear_match_fallback(active)?
+        {
+            Err(DocumentError::new(DocumentErrorCode::Unsupported))
+        } else {
+            compile_native_page(active, &mut resources, self.options.limits)
+        };
         let page = match native {
             Ok(page) => page,
             Err(error)
@@ -438,6 +460,57 @@ impl<W: Write> PdfDocument<W> {
     pub fn abort(self) -> W {
         self.writer
     }
+}
+
+fn page_requires_linear_match_fallback(active: &ActivePage) -> Result<bool, DocumentError> {
+    for list in &active.lists {
+        for command in list.commands() {
+            match command {
+                DrawCommand::Clear(color) if color.alpha() != u8::MAX => return Ok(true),
+                DrawCommand::SaveLayer(_) => return Ok(true),
+                DrawCommand::FillRect { paint, .. }
+                | DrawCommand::FillPath { paint, .. }
+                | DrawCommand::StrokePath { paint, .. }
+                    if paint_requires_linear_match_fallback(paint) =>
+                {
+                    return Ok(true);
+                }
+                DrawCommand::DrawImage {
+                    image,
+                    opacity,
+                    paint,
+                    ..
+                } => {
+                    let image = list
+                        .image(*image)
+                        .ok_or(DocumentError::new(DocumentErrorCode::InvalidResource))?;
+                    if multiply_alpha(*opacity, paint.color().alpha()) != u8::MAX
+                        || paint.blend_mode() != BlendMode::SourceOver
+                        || image_has_transparency(image)
+                    {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn paint_requires_linear_match_fallback(paint: &Paint) -> bool {
+    paint.color().alpha() != u8::MAX || paint.blend_mode() != BlendMode::SourceOver
+}
+
+fn image_has_transparency(image: &Image) -> bool {
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            if image.pixel_at(x, y).is_none_or(|pixel| pixel[3] != u8::MAX) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn compile_native_page(

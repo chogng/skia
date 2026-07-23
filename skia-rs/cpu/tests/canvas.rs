@@ -47,8 +47,8 @@ fn clipped_source_over_rect_is_exact_and_save_restore_is_isolated() {
 
     assert_eq!(pixel(&surface, 0, 0), [0, 0, 0, 255]);
     assert_eq!(pixel(&surface, 1, 0), [255, 255, 255, 255]);
-    assert_eq!(pixel(&surface, 1, 1), [255, 127, 127, 255]);
-    assert_eq!(pixel(&surface, 2, 2), [255, 127, 127, 255]);
+    assert_eq!(pixel(&surface, 1, 1), [255, 187, 187, 255]);
+    assert_eq!(pixel(&surface, 2, 2), [255, 187, 187, 255]);
     assert_eq!(pixel(&surface, 3, 2), [255, 255, 255, 255]);
 }
 
@@ -134,8 +134,8 @@ fn save_layer_isolates_opacity_bounds_and_blur() {
     canvas.restore().expect("restore layer");
     drop(canvas);
     assert_eq!(pixel(&surface, 0, 0), Color::BLUE.channels());
-    assert_eq!(pixel(&surface, 1, 0), [128, 0, 127, 255]);
-    assert_eq!(pixel(&surface, 2, 0), [128, 0, 127, 255]);
+    assert_eq!(pixel(&surface, 1, 0), [188, 0, 187, 255]);
+    assert_eq!(pixel(&surface, 2, 0), [188, 0, 187, 255]);
 
     let mut blurred = Surface::new(3, 3, SurfaceLimits::default()).expect("blur surface");
     let mut canvas = blurred.canvas();
