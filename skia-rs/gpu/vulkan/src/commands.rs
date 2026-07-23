@@ -7,7 +7,7 @@ use skia_core::{
 use skia_gpu::{
     GpuClipGeometry, GpuClipId, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor,
     RUNTIME_SHADER_INSTRUCTION_WORDS, RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS,
-    RuntimeShaderPacketCache,
+    RuntimeShaderPacket, RuntimeShaderPacketCache,
 };
 use skia_tessellation::{DEFAULT_CURVE_STEPS, FlatteningLimits, PathFlattener, stroke_mesh};
 
@@ -32,8 +32,13 @@ const RUNTIME_SHADER_UNIFORM_BASE: usize = RUNTIME_SHADER_INSTRUCTION_BASE
     + RUNTIME_SHADER_MAX_INSTRUCTIONS * RUNTIME_SHADER_INSTRUCTION_WORDS;
 const PARAMETER_WORDS: usize = RUNTIME_SHADER_UNIFORM_BASE + RUNTIME_SHADER_MAX_UNIFORMS;
 
+struct DrawParams {
+    words: [u32; PARAMETER_WORDS],
+    runtime_shader: Option<RuntimeShaderPacket>,
+}
+
 pub(crate) fn submit(
-    renderer: &VulkanRenderer,
+    renderer: &mut VulkanRenderer,
     context: Arc<crate::context::VulkanContext>,
     surface: &mut VulkanSurface,
     commands: &GpuCommandBuffer,
@@ -89,7 +94,7 @@ pub(crate) fn submit(
                 );
                 set_scissor(&mut params, layer.scissor);
                 params[7] = u32::from(clip.is_some());
-                renderer.dispatch(target, Some(source), clip, &[], &params)?;
+                renderer.dispatch(target, Some(source), clip, &[], &params, None)?;
             }
             GpuCommand::FillRect {
                 rect,
@@ -106,7 +111,7 @@ pub(crate) fn submit(
                     *clip,
                     &mut clips,
                 )?;
-                let mut params = draw_params(
+                let mut draw = draw_params(
                     OP_SOLID,
                     descriptor,
                     paint,
@@ -114,9 +119,16 @@ pub(crate) fn submit(
                     *scissor,
                     runtime_shader_packets,
                 )?;
-                set_rect(&mut params, *rect);
-                params[7] = u32::from(clip.is_some());
-                renderer.dispatch(current_target(surface, &layers), None, clip, &[], &params)?;
+                set_rect(&mut draw.words, *rect);
+                draw.words[7] = u32::from(clip.is_some());
+                renderer.dispatch(
+                    current_target(surface, &layers),
+                    None,
+                    clip,
+                    &[],
+                    &draw.words,
+                    draw.runtime_shader.as_ref(),
+                )?;
             }
             GpuCommand::FillPath {
                 path,
@@ -138,7 +150,7 @@ pub(crate) fn submit(
                     *clip,
                     &mut clips,
                 )?;
-                let mut params = draw_params(
+                let mut draw = draw_params(
                     OP_PATH,
                     descriptor,
                     paint,
@@ -146,16 +158,17 @@ pub(crate) fn submit(
                     *scissor,
                     runtime_shader_packets,
                 )?;
-                params[4] = u32::try_from(edges.len() / 4)
+                draw.words[4] = u32::try_from(edges.len() / 4)
                     .map_err(|_| VulkanError::new(VulkanErrorCode::SubmissionFailed))?;
-                params[5] = u32::from(matches!(rule, FillRule::EvenOdd));
-                params[7] = u32::from(clip.is_some());
+                draw.words[5] = u32::from(matches!(rule, FillRule::EvenOdd));
+                draw.words[7] = u32::from(clip.is_some());
                 renderer.dispatch(
                     current_target(surface, &layers),
                     None,
                     clip,
                     &edges,
-                    &params,
+                    &draw.words,
+                    draw.runtime_shader.as_ref(),
                 )?;
             }
             GpuCommand::StrokePath {
@@ -188,7 +201,7 @@ pub(crate) fn submit(
                     *clip,
                     &mut clips,
                 )?;
-                let mut params = draw_params(
+                let mut draw = draw_params(
                     OP_TRIANGLES,
                     descriptor,
                     paint,
@@ -196,15 +209,16 @@ pub(crate) fn submit(
                     *scissor,
                     runtime_shader_packets,
                 )?;
-                params[4] = u32::try_from(mesh.vertices().len() / 3)
+                draw.words[4] = u32::try_from(mesh.vertices().len() / 3)
                     .map_err(|_| VulkanError::new(VulkanErrorCode::SubmissionFailed))?;
-                params[7] = u32::from(clip.is_some());
+                draw.words[7] = u32::from(clip.is_some());
                 renderer.dispatch(
                     current_target(surface, &layers),
                     None,
                     clip,
                     &triangles,
-                    &params,
+                    &draw.words,
+                    draw.runtime_shader.as_ref(),
                 )?;
             }
             GpuCommand::DrawImage {
@@ -230,7 +244,7 @@ pub(crate) fn submit(
                     *clip,
                     &mut clips,
                 )?;
-                let mut params = draw_params(
+                let mut draw = draw_params(
                     OP_IMAGE,
                     descriptor,
                     paint,
@@ -238,13 +252,14 @@ pub(crate) fn submit(
                     *scissor,
                     runtime_shader_packets,
                 )?;
-                params[32] = 0;
-                set_rect(&mut params, *destination);
-                params[4] = multiply_255(*opacity, paint.color().alpha());
-                params[13] = u32::from(matches!(sampling.filter(), SamplingFilter::Linear));
-                params[7] = u32::from(clip.is_some());
+                draw.words[32] = 0;
+                draw.runtime_shader = None;
+                set_rect(&mut draw.words, *destination);
+                draw.words[4] = multiply_255(*opacity, paint.color().alpha());
+                draw.words[13] = u32::from(matches!(sampling.filter(), SamplingFilter::Linear));
+                draw.words[7] = u32::from(clip.is_some());
                 set_image(
-                    &mut params,
+                    &mut draw.words,
                     image.width(),
                     image.height(),
                     0,
@@ -257,7 +272,8 @@ pub(crate) fn submit(
                     None,
                     clip,
                     &pixels,
-                    &params,
+                    &draw.words,
+                    None,
                 )?;
             }
             GpuCommand::DrawGlyphs {
@@ -282,7 +298,7 @@ pub(crate) fn submit(
                     &mut clips,
                 )?;
                 for glyph in glyphs {
-                    let mut params = draw_params(
+                    let mut draw = draw_params(
                         OP_GLYPH,
                         descriptor,
                         paint,
@@ -290,13 +306,13 @@ pub(crate) fn submit(
                         *scissor,
                         runtime_shader_packets,
                     )?;
-                    set_rect(&mut params, glyph.destination());
-                    params[4] = u32::from(paint.color().alpha());
-                    params[5] = u32::from(glyph.is_mask());
-                    params[7] = u32::from(clip.is_some());
+                    set_rect(&mut draw.words, glyph.destination());
+                    draw.words[4] = u32::from(paint.color().alpha());
+                    draw.words[5] = u32::from(glyph.is_mask());
+                    draw.words[7] = u32::from(clip.is_some());
                     let source = glyph.source();
                     set_image(
-                        &mut params,
+                        &mut draw.words,
                         image.width(),
                         image.height(),
                         source.x(),
@@ -309,7 +325,8 @@ pub(crate) fn submit(
                         None,
                         clip,
                         &pixels,
-                        &params,
+                        &draw.words,
+                        draw.runtime_shader.as_ref(),
                     )?;
                 }
             }
@@ -331,7 +348,7 @@ struct Layer {
 }
 
 fn filter_layer(
-    renderer: &VulkanRenderer,
+    renderer: &mut VulkanRenderer,
     context: Arc<crate::context::VulkanContext>,
     descriptor: GpuSurfaceDescriptor,
     layer: &Layer,
@@ -343,9 +360,9 @@ fn filter_layer(
             let vertical = PixelBuffer::new(context, descriptor)?;
             let mut params = base_params(OP_BLUR_X, descriptor);
             params[4] = u32::from(radius);
-            renderer.dispatch(&horizontal, Some(&layer.pixels), None, &[], &params)?;
+            renderer.dispatch(&horizontal, Some(&layer.pixels), None, &[], &params, None)?;
             params[0] = OP_BLUR_Y;
-            renderer.dispatch(&vertical, Some(&horizontal), None, &[], &params)?;
+            renderer.dispatch(&vertical, Some(&horizontal), None, &[], &params, None)?;
             Ok(Some(vertical))
         }
         Some(ImageFilter::Color(filter)) => {
@@ -357,14 +374,14 @@ fn filter_layer(
             set_transform(&mut params, Transform::IDENTITY)?;
             set_rect(&mut params, full_rect(descriptor));
             encode_color_filter(&mut params, filter);
-            renderer.dispatch(&output, Some(&layer.pixels), None, &[], &params)?;
+            renderer.dispatch(&output, Some(&layer.pixels), None, &[], &params, None)?;
             Ok(Some(output))
         }
     }
 }
 
 fn resolve_clip<'a>(
-    renderer: &VulkanRenderer,
+    renderer: &mut VulkanRenderer,
     context: Arc<crate::context::VulkanContext>,
     descriptor: GpuSurfaceDescriptor,
     commands: &GpuCommandBuffer,
@@ -377,7 +394,7 @@ fn resolve_clip<'a>(
 }
 
 fn ensure_clip(
-    renderer: &VulkanRenderer,
+    renderer: &mut VulkanRenderer,
     context: Arc<crate::context::VulkanContext>,
     descriptor: GpuSurfaceDescriptor,
     commands: &GpuCommandBuffer,
@@ -423,7 +440,7 @@ fn ensure_clip(
     params[7] = u32::from(matches!(node.op(), ClipOp::Difference));
     let mask = PixelBuffer::new(context, descriptor)?;
     let parent = node.parent().and_then(|parent| clips.get(&parent));
-    renderer.dispatch(&mask, parent, None, &edges, &params)?;
+    renderer.dispatch(&mask, parent, None, &edges, &params, None)?;
     clips.insert(id, mask);
     Ok(())
 }
@@ -449,13 +466,16 @@ fn draw_params(
     transform: Transform,
     scissor: Option<Rect>,
     runtime_shader_packets: &mut RuntimeShaderPacketCache,
-) -> Result<[u32; PARAMETER_WORDS], VulkanError> {
-    let mut params = base_params(operation, descriptor);
-    encode_paint(&mut params, paint, runtime_shader_packets);
-    params[12] = blend_mode(paint.blend_mode());
-    set_transform(&mut params, transform)?;
-    set_scissor(&mut params, scissor);
-    Ok(params)
+) -> Result<DrawParams, VulkanError> {
+    let mut words = base_params(operation, descriptor);
+    let runtime_shader = encode_paint(&mut words, paint, runtime_shader_packets);
+    words[12] = blend_mode(paint.blend_mode());
+    set_transform(&mut words, transform)?;
+    set_scissor(&mut words, scissor);
+    Ok(DrawParams {
+        words,
+        runtime_shader,
+    })
 }
 
 fn set_rect(params: &mut [u32; PARAMETER_WORDS], rect: Rect) {
@@ -656,18 +676,15 @@ fn encode_paint(
     params: &mut [u32; PARAMETER_WORDS],
     paint: &Paint,
     runtime_shader_packets: &mut RuntimeShaderPacketCache,
-) {
+) -> Option<RuntimeShaderPacket> {
     params[3] = color_word(paint.color());
-    if let Some(runtime) = runtime_shader_packets.packet(paint) {
+    let runtime_shader = if let Some(runtime) = runtime_shader_packets.packet(paint) {
         params[32] = 3;
         params[RUNTIME_SHADER_HEADER] = runtime.instruction_count();
-        for (index, instruction) in runtime.instructions().iter().enumerate() {
-            let offset = RUNTIME_SHADER_INSTRUCTION_BASE + index * RUNTIME_SHADER_INSTRUCTION_WORDS;
-            params[offset..offset + RUNTIME_SHADER_INSTRUCTION_WORDS].copy_from_slice(instruction);
-        }
         params[RUNTIME_SHADER_UNIFORM_BASE
             ..RUNTIME_SHADER_UNIFORM_BASE + RUNTIME_SHADER_MAX_UNIFORMS]
             .copy_from_slice(runtime.uniforms());
+        Some(runtime)
     } else if let Some(gradient) = paint.gradient() {
         match gradient.geometry() {
             GradientGeometry::Linear { start, end } => {
@@ -694,10 +711,14 @@ fn encode_paint(
             params[40 + index] = scalar_word(stop.offset());
             params[56 + index] = color_word(stop.color());
         }
-    }
+        None
+    } else {
+        None
+    };
     if let Some(filter) = paint.color_filter() {
         encode_color_filter(params, filter);
     }
+    runtime_shader
 }
 
 fn encode_color_filter(params: &mut [u32; PARAMETER_WORDS], filter: ColorFilter) {

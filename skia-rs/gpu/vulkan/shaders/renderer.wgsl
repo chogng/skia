@@ -24,12 +24,52 @@ const RUNTIME_SHADER_INSTRUCTION_BASE: u32 = RUNTIME_SHADER_HEADER + 2u;
 const RUNTIME_SHADER_UNIFORM_BASE: u32 =
     RUNTIME_SHADER_INSTRUCTION_BASE + RUNTIME_SHADER_MAX_INSTRUCTIONS * RUNTIME_SHADER_INSTRUCTION_WORDS;
 
+// RUNTIME_SHADER_SPECIALIZATION
+
 fn channel(color: u32, shift: u32) -> u32 {
     return (color >> shift) & 255u;
 }
 
 fn pack(r: u32, g: u32, b: u32, a: u32) -> u32 {
     return min(r, 255u) | (min(g, 255u) << 8u) | (min(b, 255u) << 16u) | (min(a, 255u) << 24u);
+}
+
+fn srgb_to_linear_channel(channel_value: u32) -> u32 {
+    let encoded = f32(channel_value) / 255.0;
+    let linear = select(
+        pow((encoded + 0.055) / 1.055, 2.4),
+        encoded / 12.92,
+        encoded <= 0.04045,
+    );
+    return u32(clamp(round(linear * 255.0), 0.0, 255.0));
+}
+
+fn linear_to_srgb_channel(channel_value: u32) -> u32 {
+    let linear = f32(channel_value) / 255.0;
+    let encoded = select(
+        1.055 * pow(linear, 1.0 / 2.4) - 0.055,
+        linear * 12.92,
+        linear <= 0.0031308,
+    );
+    return u32(clamp(round(encoded * 255.0), 0.0, 255.0));
+}
+
+fn to_linear_srgba(color: u32) -> u32 {
+    return pack(
+        srgb_to_linear_channel(channel(color, 0u)),
+        srgb_to_linear_channel(channel(color, 8u)),
+        srgb_to_linear_channel(channel(color, 16u)),
+        channel(color, 24u),
+    );
+}
+
+fn to_encoded_srgba(color: u32) -> u32 {
+    return pack(
+        linear_to_srgb_channel(channel(color, 0u)),
+        linear_to_srgb_channel(channel(color, 8u)),
+        linear_to_srgb_channel(channel(color, 16u)),
+        channel(color, 24u),
+    );
 }
 
 fn div255(value: u32) -> u32 {
@@ -165,7 +205,7 @@ fn nonseparable(src: u32, dst: u32, mode: u32) -> u32 {
     return unpremul(out.x, out.y, out.z, oa);
 }
 
-fn blend(src: u32, dst: u32, mode: u32) -> u32 {
+fn blend_linear(src: u32, dst: u32, mode: u32) -> u32 {
     let sa = channel(src, 24u);
     let da = channel(dst, 24u);
     switch mode {
@@ -202,6 +242,17 @@ fn blend(src: u32, dst: u32, mode: u32) -> u32 {
     }
 }
 
+fn blend(src: u32, dst: u32, mode: u32) -> u32 {
+    let sa = channel(src, 24u);
+    let da = channel(dst, 24u);
+    if mode == 0u { return 0u; }
+    if mode == 1u { return canonical(src); }
+    if mode == 2u { return canonical(dst); }
+    if mode == 3u && da == 0u { return canonical(src); }
+    if mode == 3u && sa == 0u { return canonical(dst); }
+    return to_encoded_srgba(blend_linear(to_linear_srgba(src), to_linear_srgba(dst), mode));
+}
+
 fn apply_color_filter(color: u32) -> u32 {
     let kind = params.values[64u];
     if kind == 0u { return color; }
@@ -224,6 +275,9 @@ fn tile_parameter(value: f32, mode: u32) -> f32 {
 }
 
 fn runtime_instruction_word(instruction: u32, word: u32) -> u32 {
+    if runtime_pipeline_specialized {
+        return specialized_runtime_instruction_word(instruction, word);
+    }
     return params.values[
         RUNTIME_SHADER_INSTRUCTION_BASE + instruction * RUNTIME_SHADER_INSTRUCTION_WORDS + word
     ];
@@ -252,7 +306,14 @@ fn runtime_coordinate(point: f32, start_bits: u32, end_bits: u32) -> f32 {
 fn evaluate_runtime_paint(point: vec2<f32>) -> u32 {
     var registers: array<vec4<f32>, 16>;
     var source = vec4<f32>(0.0);
-    let count = min(params.values[RUNTIME_SHADER_HEADER], RUNTIME_SHADER_MAX_INSTRUCTIONS);
+    let count = min(
+        select(
+            params.values[RUNTIME_SHADER_HEADER],
+            runtime_specialized_instruction_count,
+            runtime_pipeline_specialized,
+        ),
+        RUNTIME_SHADER_MAX_INSTRUCTIONS,
+    );
     for (var index = 0u; index < count; index++) {
         let opcode = runtime_instruction_word(index, 0u);
         let destination = runtime_instruction_word(index, 1u);

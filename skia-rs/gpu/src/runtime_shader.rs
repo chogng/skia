@@ -15,19 +15,52 @@ const DEFAULT_RUNTIME_SHADER_PACKET_CACHE_CAPACITY: usize = 64;
 
 /// Backend-neutral fixed-size encoding of one validated runtime shader.
 ///
-/// Both hardware backends upload this packet to their precompiled shader VM, so
-/// program recording never needs a runtime source compiler or pipeline build.
+/// Hardware backends use this packet for the generic paint VM and as the key
+/// and constant payload for their bounded native pipeline variants.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RuntimeShaderPacket {
-    instruction_count: u32,
-    instructions: [[u32; RUNTIME_SHADER_INSTRUCTION_WORDS]; RUNTIME_SHADER_MAX_INSTRUCTIONS],
+    program: RuntimeShaderProgramPacket,
     uniforms: [u32; RUNTIME_SHADER_MAX_UNIFORMS],
 }
 
-#[derive(Clone, Debug)]
-struct RuntimeShaderProgramPacket {
+/// Fixed-width program portion of a [`RuntimeShaderPacket`].
+///
+/// This value excludes per-draw color uniforms, so hardware backends can use
+/// it as the key for a native specialized-pipeline cache.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RuntimeShaderProgramPacket {
     instruction_count: u32,
     instructions: [[u32; RUNTIME_SHADER_INSTRUCTION_WORDS]; RUNTIME_SHADER_MAX_INSTRUCTIONS],
+}
+
+impl RuntimeShaderProgramPacket {
+    /// Returns the number of active instructions.
+    pub const fn instruction_count(&self) -> u32 {
+        self.instruction_count
+    }
+
+    /// Borrows fixed-width encoded instructions.
+    pub fn instructions(
+        &self,
+    ) -> &[[u32; RUNTIME_SHADER_INSTRUCTION_WORDS]; RUNTIME_SHADER_MAX_INSTRUCTIONS] {
+        &self.instructions
+    }
+
+    /// Returns the function/specialization-constant values for this program.
+    ///
+    /// Element zero is the instruction count; the remaining values are the
+    /// fixed-width instruction words in execution order.
+    pub fn specialization_words(
+        &self,
+    ) -> [u32; 1 + RUNTIME_SHADER_MAX_INSTRUCTIONS * RUNTIME_SHADER_INSTRUCTION_WORDS] {
+        let mut words = [0; 1 + RUNTIME_SHADER_MAX_INSTRUCTIONS * RUNTIME_SHADER_INSTRUCTION_WORDS];
+        words[0] = self.instruction_count;
+        for (index, instruction) in self.instructions.iter().enumerate() {
+            let offset = 1 + index * RUNTIME_SHADER_INSTRUCTION_WORDS;
+            words[offset..offset + RUNTIME_SHADER_INSTRUCTION_WORDS].copy_from_slice(instruction);
+        }
+        words
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -70,10 +103,9 @@ impl RuntimeShaderPacketCacheStats {
 
 /// Bounded program-hash cache for reusable runtime shader instruction packets.
 ///
-/// The existing Metal and Vulkan paint pipelines interpret all programs through
-/// one precompiled VM, so this cache stores encoded instruction streams rather
-/// than redundant per-program native pipelines. Uniform values are bound fresh
-/// for every returned [`RuntimeShaderPacket`].
+/// This cache stores reusable packet encodings independently of backend-native
+/// pipeline caches. Uniform values are bound fresh for every returned
+/// [`RuntimeShaderPacket`].
 #[derive(Debug)]
 pub struct RuntimeShaderPacketCache {
     capacity: usize,
@@ -128,7 +160,7 @@ impl RuntimeShaderPacketCache {
             .or_default()
             .push(CachedRuntimeShaderProgram {
                 program: runtime.program().clone(),
-                packet: packet.clone(),
+                packet,
                 last_used,
             });
         self.entry_count = self.entry_count.saturating_add(1);
@@ -185,14 +217,19 @@ impl Default for RuntimeShaderPacketCache {
 impl RuntimeShaderPacket {
     /// Returns the number of active instructions.
     pub const fn instruction_count(&self) -> u32 {
-        self.instruction_count
+        self.program.instruction_count()
     }
 
     /// Borrows fixed-width encoded instructions.
     pub fn instructions(
         &self,
     ) -> &[[u32; RUNTIME_SHADER_INSTRUCTION_WORDS]; RUNTIME_SHADER_MAX_INSTRUCTIONS] {
-        &self.instructions
+        self.program.instructions()
+    }
+
+    /// Borrows the program portion used for native pipeline specialization.
+    pub const fn program(&self) -> &RuntimeShaderProgramPacket {
+        &self.program
     }
 
     /// Borrows packed straight-RGBA color uniforms.
@@ -228,8 +265,7 @@ fn bind_runtime_shader_packet(
     runtime: &RuntimeShader,
 ) -> RuntimeShaderPacket {
     let mut packet = RuntimeShaderPacket {
-        instruction_count: program.instruction_count,
-        instructions: program.instructions,
+        program: *program,
         uniforms: [0; RUNTIME_SHADER_MAX_UNIFORMS],
     };
     for (output, color) in packet.uniforms.iter_mut().zip(runtime.uniforms()) {

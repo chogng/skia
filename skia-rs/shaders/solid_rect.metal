@@ -27,9 +27,31 @@ struct PaintUniforms {
     uint runtime_uniforms[16];
 };
 
+// RUNTIME_SHADER_SPECIALIZATION
+
 float4 from_premul(float4 value) {
     if (value.a <= 0.0) return float4(0.0);
     return float4(clamp(value.rgb / value.a, 0.0, 1.0), clamp(value.a, 0.0, 1.0));
+}
+
+float3 quantize_unorm8(float3 value) {
+    return round(clamp(value, 0.0, 1.0) * 255.0) / 255.0;
+}
+
+float3 srgb_to_linear_8(float3 encoded) {
+    float3 linear = select(
+        pow((encoded + 0.055) / 1.055, float3(2.4)),
+        encoded / 12.92,
+        encoded <= 0.04045);
+    return quantize_unorm8(linear);
+}
+
+float3 linear_to_srgb_8(float3 linear) {
+    float3 encoded = select(
+        1.055 * pow(linear, float3(1.0 / 2.4)) - 0.055,
+        linear * 12.92,
+        linear <= 0.0031308);
+    return quantize_unorm8(encoded);
 }
 
 float luminance(float3 color) {
@@ -98,7 +120,7 @@ float3 nonseparable_blend(float3 source, float3 destination, uint mode) {
     return set_luminance(destination, luminance(source));
 }
 
-float4 composite(float4 source, float4 destination, uint mode) {
+float4 composite_linear(float4 source, float4 destination, uint mode) {
     float4 sp = float4(source.rgb * source.a, source.a);
     float4 dp = float4(destination.rgb * destination.a, destination.a);
     if (mode == 0) return float4(0.0);
@@ -130,6 +152,18 @@ float4 composite(float4 source, float4 destination, uint mode) {
     return from_premul(float4(premul, alpha));
 }
 
+float4 composite(float4 source, float4 destination, uint mode) {
+    if (mode == 0) return float4(0.0);
+    if (mode == 1) return source.a <= 0.0 ? float4(0.0) : source;
+    if (mode == 2) return destination.a <= 0.0 ? float4(0.0) : destination;
+    if (mode == 3 && destination.a <= 0.0) return source.a <= 0.0 ? float4(0.0) : source;
+    if (mode == 3 && source.a <= 0.0) return destination.a <= 0.0 ? float4(0.0) : destination;
+    float4 linear_source = float4(srgb_to_linear_8(source.rgb), source.a);
+    float4 linear_destination = float4(srgb_to_linear_8(destination.rgb), destination.a);
+    float4 result = composite_linear(linear_source, linear_destination, mode);
+    return float4(linear_to_srgb_8(result.rgb), result.a);
+}
+
 float4 apply_filter(float4 source, constant PaintUniforms& paint) {
     if (paint.modes.w == 1) {
         return clamp(float4(
@@ -154,6 +188,9 @@ float tiled_parameter(float parameter, uint mode) {
 }
 
 uint runtime_instruction_word(constant PaintUniforms& paint, uint instruction, uint word) {
+    if (runtime_pipeline_specialized) {
+        return specialized_runtime_instruction_word(instruction, word);
+    }
     return paint.runtime_instructions[instruction * 6 + word];
 }
 
@@ -174,7 +211,9 @@ float runtime_coordinate(float point, uint start_bits, uint end_bits) {
 float4 evaluate_runtime_paint(float2 local_position, constant PaintUniforms& paint) {
     float4 registers[16] = {};
     float4 source = float4(0.0);
-    uint count = min(paint.runtime_header.x, 64u);
+    uint count = min(
+        runtime_pipeline_specialized ? runtime_specialized_instruction_count : paint.runtime_header.x,
+        64u);
     for (uint index = 0; index < count; ++index) {
         uint opcode = runtime_instruction_word(paint, index, 0);
         uint destination = runtime_instruction_word(paint, index, 1);

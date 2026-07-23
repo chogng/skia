@@ -16,6 +16,37 @@ pub struct VulkanBackend {
     runtime_shader_packets: RuntimeShaderPacketCache,
 }
 
+/// Observable native runtime-shader pipeline-cache counters.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct VulkanRuntimeShaderPipelineCacheStats {
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    entries: usize,
+}
+
+impl VulkanRuntimeShaderPipelineCacheStats {
+    /// Returns the number of program-specialized pipelines reused across draws.
+    pub const fn hits(self) -> u64 {
+        self.hits
+    }
+
+    /// Returns the number of specialized pipelines created for new programs.
+    pub const fn misses(self) -> u64 {
+        self.misses
+    }
+
+    /// Returns the number of least-recently-used specialized pipelines evicted.
+    pub const fn evictions(self) -> u64 {
+        self.evictions
+    }
+
+    /// Returns the number of retained specialized pipelines.
+    pub const fn entries(self) -> usize {
+        self.entries
+    }
+}
+
 impl VulkanBackend {
     /// Opens the system Vulkan loader and selects one compute-capable device.
     pub fn new() -> Result<Self, VulkanError> {
@@ -41,6 +72,17 @@ impl VulkanBackend {
     /// Returns whether the Khronos validation layer was enabled at creation.
     pub fn validation_enabled(&self) -> bool {
         self.context.validation_enabled()
+    }
+
+    /// Returns reuse and capacity counters for runtime shader native pipelines.
+    pub fn runtime_shader_pipeline_cache_stats(&self) -> VulkanRuntimeShaderPipelineCacheStats {
+        let (hits, misses, evictions, entries) = self.renderer.specialized_pipeline_stats();
+        VulkanRuntimeShaderPipelineCacheStats {
+            hits,
+            misses,
+            evictions,
+            entries,
+        }
     }
 }
 
@@ -71,7 +113,7 @@ impl GpuBackend for VulkanBackend {
             return Err(VulkanError::new(VulkanErrorCode::UnsupportedCommand));
         }
         commands::submit(
-            &self.renderer,
+            &mut self.renderer,
             self.context.clone(),
             surface,
             commands,

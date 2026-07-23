@@ -135,7 +135,13 @@ fn vulkan_backend_executes_runtime_shaders() {
         .fill_rect(rect(0, 0, 4, 1), paint)
         .expect("runtime fill");
     let descriptor = GpuSurfaceDescriptor::new(4, 1).expect("surface descriptor");
-    assert_matches_reference(&mut backend, descriptor, &encoder.finish());
+    let commands = encoder.finish();
+    assert_matches_reference(&mut backend, descriptor, &commands);
+    assert_matches_reference(&mut backend, descriptor, &commands);
+    let stats = backend.runtime_shader_pipeline_cache_stats();
+    assert_eq!(stats.entries(), 1);
+    assert_eq!(stats.misses(), 1);
+    assert_eq!(stats.hits(), 1);
 }
 
 #[test]

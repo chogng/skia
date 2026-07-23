@@ -1,7 +1,8 @@
 use skia_core::{
     BlendMode, ClipOp, Color, ColorFilter, ColorMatrix, FillRule, Gradient, GradientStop,
-    ImageFilter, Paint, PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar,
-    StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, TileMode, Transform,
+    ImageFilter, Paint, PathBuilder, Point, Rect, RuntimeShader, RuntimeShaderInstruction,
+    RuntimeShaderLimits, RuntimeShaderProgram, SamplingOptions, SaveLayerOptions, Scalar,
+    ShaderHandle, StrokeAlign, StrokeCap, StrokeJoin, StrokeOptions, TileMode, Transform,
 };
 use skia_gpu::{
     GpuAtlasRect, GpuBackend, GpuCommandBuffer, GpuCommandEncoder, GpuGlyphAtlas, GpuGlyphAtlasKey,
@@ -25,6 +26,59 @@ fn metal_backend_allocates_a_native_surface_and_submits_a_clear() {
     let pixels = surface.read_rgba8().unwrap();
     assert_eq!(&pixels[0..4], &[10, 20, 30, 255]);
     assert_eq!(&pixels[60..64], &[10, 20, 30, 255]);
+}
+
+#[test]
+fn metal_backend_specializes_runtime_shader_pipelines() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let program = RuntimeShaderProgram::new(
+        &[
+            RuntimeShaderInstruction::ConstantColor {
+                destination: 0,
+                color: Color::RED,
+            },
+            RuntimeShaderInstruction::UniformColor {
+                destination: 1,
+                uniform: 0,
+            },
+            RuntimeShaderInstruction::LocalX {
+                destination: 2,
+                start: Scalar::ZERO,
+                end: Scalar::from_i32(4).unwrap(),
+            },
+            RuntimeShaderInstruction::Mix {
+                destination: 3,
+                first: 0,
+                second: 1,
+                factor: 2,
+            },
+            RuntimeShaderInstruction::Return { source: 3 },
+        ],
+        1,
+        RuntimeShaderLimits::default(),
+    )
+    .unwrap();
+    let paint = Paint::new(Color::WHITE).with_shader(ShaderHandle::from_runtime(
+        RuntimeShader::new(program, &[Color::BLUE]).unwrap(),
+    ));
+    let mut encoder = GpuCommandEncoder::new(2).unwrap();
+    encoder.clear(Color::BLACK).unwrap();
+    encoder.fill_rect(rect(0, 0, 4, 1), paint).unwrap();
+    let commands = encoder.finish();
+    let descriptor = GpuSurfaceDescriptor::new(4, 1).unwrap();
+    for _ in 0..2 {
+        let mut surface = backend.create_surface(descriptor).unwrap();
+        backend.submit(&mut surface, &commands).unwrap();
+        let pixels = surface.read_rgba8().unwrap();
+        assert_pixel_near(pixel(&pixels, 4, 0, 0), [223, 0, 32, 255], 1, "first pixel");
+        assert_pixel_near(pixel(&pixels, 4, 3, 0), [32, 0, 223, 255], 1, "last pixel");
+    }
+    let stats = backend.runtime_shader_pipeline_cache_stats();
+    assert_eq!(stats.entries(), 1);
+    assert_eq!(stats.misses(), 1);
+    assert_eq!(stats.hits(), 1);
 }
 
 #[test]

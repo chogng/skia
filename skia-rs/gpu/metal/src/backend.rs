@@ -15,10 +15,11 @@ mod clip_geometry;
 use std::{cell::RefCell, collections::HashMap, fmt, mem::size_of};
 
 use metal::{
-    CommandQueue, Device, MTLClearColor, MTLCommandBufferStatus, MTLLoadAction, MTLOrigin,
-    MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLScissorRect, MTLSize,
-    MTLStorageMode, MTLStoreAction, MTLTextureUsage, RenderPassDescriptor,
-    RenderPipelineDescriptor, RenderPipelineState, Texture, TextureDescriptor,
+    CommandQueue, Device, FunctionConstantValues, Library, MTLClearColor, MTLCommandBufferStatus,
+    MTLDataType, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion,
+    MTLResourceOptions, MTLScissorRect, MTLSize, MTLStorageMode, MTLStoreAction, MTLTextureUsage,
+    RenderPassDescriptor, RenderPipelineDescriptor, RenderPipelineState, Texture,
+    TextureDescriptor,
 };
 use skia_core::{
     BlendMode, Color, ColorFilter, GradientGeometry, ImageFilter, Paint, Point, Rect,
@@ -27,7 +28,8 @@ use skia_core::{
 use skia_gpu::{
     GpuBackend, GpuCapabilities, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphAtlasKey,
     GpuGlyphQuad, GpuSurfaceDescriptor, RUNTIME_SHADER_INSTRUCTION_WORDS,
-    RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS, RuntimeShaderPacketCache,
+    RUNTIME_SHADER_MAX_INSTRUCTIONS, RUNTIME_SHADER_MAX_UNIFORMS, RuntimeShaderPacket,
+    RuntimeShaderPacketCache, RuntimeShaderProgramPacket,
 };
 use skia_image::Image;
 
@@ -36,6 +38,7 @@ use self::clip::ClipRenderer;
 const DEFAULT_ATLAS_CACHE_CAPACITY: usize = 8;
 const DEFAULT_ATLAS_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TEXTURE_DIMENSION_2D: u32 = 16_384;
+const RUNTIME_SHADER_PIPELINE_CACHE_CAPACITY: usize = 64;
 
 /// Stable machine-readable Metal backend failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -130,6 +133,7 @@ impl MetalSurface {
 pub struct MetalBackend {
     device: Device,
     queue: CommandQueue,
+    library: Library,
     solid_rect_pipeline: RenderPipelineState,
     glyph_pipeline: RenderPipelineState,
     image_pipeline: RenderPipelineState,
@@ -144,6 +148,22 @@ pub struct MetalBackend {
     atlas_uploads: u64,
     atlas_evictions: u64,
     runtime_shader_packets: RefCell<RuntimeShaderPacketCache>,
+    runtime_shader_pipelines: RefCell<RuntimeShaderPipelineCache>,
+}
+
+struct CachedRuntimeShaderPipelines {
+    solid: RenderPipelineState,
+    glyph: RenderPipelineState,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct RuntimeShaderPipelineCache {
+    clock: u64,
+    entries: HashMap<RuntimeShaderProgramPacket, CachedRuntimeShaderPipelines>,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
 }
 
 /// Observable native glyph-atlas texture cache counters.
@@ -183,6 +203,37 @@ impl MetalAtlasCacheStats {
     }
 }
 
+/// Observable native runtime-shader pipeline-cache counters.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct MetalRuntimeShaderPipelineCacheStats {
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    entries: usize,
+}
+
+impl MetalRuntimeShaderPipelineCacheStats {
+    /// Returns the number of program-specialized pipelines reused across draws.
+    pub const fn hits(self) -> u64 {
+        self.hits
+    }
+
+    /// Returns the number of specialized pipelines created for new programs.
+    pub const fn misses(self) -> u64 {
+        self.misses
+    }
+
+    /// Returns the number of least-recently-used specialized pipelines evicted.
+    pub const fn evictions(self) -> u64 {
+        self.evictions
+    }
+
+    /// Returns the number of retained specialized pipelines.
+    pub const fn entries(self) -> usize {
+        self.entries
+    }
+}
+
 impl MetalBackend {
     fn allocate_surface(
         &self,
@@ -212,40 +263,20 @@ impl MetalBackend {
         let library = device
             .new_library_with_file(env!("SKIA_METAL_LIBRARY"))
             .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
-        let vertex = library
-            .get_function("skia_solid_rect_vertex", None)
-            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
-        let fragment = library
-            .get_function("skia_solid_rect_fragment", None)
-            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
-        let descriptor = RenderPipelineDescriptor::new();
-        descriptor.set_vertex_function(Some(&vertex));
-        descriptor.set_fragment_function(Some(&fragment));
-        let solid_attachment = descriptor
-            .color_attachments()
-            .object_at(0)
-            .ok_or(MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
-        solid_attachment.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
-        let solid_rect_pipeline = device
-            .new_render_pipeline_state(&descriptor)
-            .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
-        let glyph_vertex = library
-            .get_function("skia_glyph_vertex", None)
-            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
-        let glyph_fragment = library
-            .get_function("skia_glyph_fragment", None)
-            .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
-        let glyph_descriptor = RenderPipelineDescriptor::new();
-        glyph_descriptor.set_vertex_function(Some(&glyph_vertex));
-        glyph_descriptor.set_fragment_function(Some(&glyph_fragment));
-        let glyph_attachment = glyph_descriptor
-            .color_attachments()
-            .object_at(0)
-            .ok_or(MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
-        glyph_attachment.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
-        let glyph_pipeline = device
-            .new_render_pipeline_state(&glyph_descriptor)
-            .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+        let solid_rect_pipeline = create_paint_pipeline(
+            &device,
+            &library,
+            "skia_solid_rect_vertex",
+            "skia_solid_rect_fragment",
+            None,
+        )?;
+        let glyph_pipeline = create_paint_pipeline(
+            &device,
+            &library,
+            "skia_glyph_vertex",
+            "skia_glyph_fragment",
+            None,
+        )?;
         let image_vertex = library
             .get_function("skia_image_vertex", None)
             .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
@@ -284,6 +315,7 @@ impl MetalBackend {
         Ok(Self {
             device,
             queue,
+            library,
             solid_rect_pipeline,
             glyph_pipeline,
             image_pipeline,
@@ -298,6 +330,7 @@ impl MetalBackend {
             atlas_uploads: 0,
             atlas_evictions: 0,
             runtime_shader_packets: RefCell::new(RuntimeShaderPacketCache::default()),
+            runtime_shader_pipelines: RefCell::new(RuntimeShaderPipelineCache::default()),
         })
     }
 
@@ -340,6 +373,143 @@ impl MetalBackend {
             retained_bytes: self.atlas_cache_bytes,
         }
     }
+
+    /// Returns reuse and capacity counters for runtime shader native pipelines.
+    pub fn runtime_shader_pipeline_cache_stats(&self) -> MetalRuntimeShaderPipelineCacheStats {
+        self.runtime_shader_pipelines.borrow().stats()
+    }
+
+    fn runtime_shader_packet(&self, paint: &Paint) -> Option<RuntimeShaderPacket> {
+        self.runtime_shader_packets.borrow_mut().packet(paint)
+    }
+
+    fn runtime_shader_pipelines(
+        &self,
+        runtime_shader: &RuntimeShaderPacket,
+    ) -> Result<(RenderPipelineState, RenderPipelineState), MetalError> {
+        let program = *runtime_shader.program();
+        {
+            let mut cache = self.runtime_shader_pipelines.borrow_mut();
+            cache.clock = cache.clock.wrapping_add(1);
+            let last_used = cache.clock;
+            let cached = cache.entry_for_mut(program).map(|entry| {
+                entry.last_used = last_used;
+                (entry.solid.clone(), entry.glyph.clone())
+            });
+            if let Some(pipelines) = cached {
+                cache.hits = cache.hits.saturating_add(1);
+                return Ok(pipelines);
+            }
+        }
+        let solid = create_paint_pipeline(
+            &self.device,
+            &self.library,
+            "skia_solid_rect_vertex",
+            "skia_solid_rect_fragment",
+            Some(&program),
+        )?;
+        let glyph = create_paint_pipeline(
+            &self.device,
+            &self.library,
+            "skia_glyph_vertex",
+            "skia_glyph_fragment",
+            Some(&program),
+        )?;
+        let mut cache = self.runtime_shader_pipelines.borrow_mut();
+        cache.misses = cache.misses.saturating_add(1);
+        if cache.entries.len() >= RUNTIME_SHADER_PIPELINE_CACHE_CAPACITY {
+            cache.evict_least_recently_used();
+        }
+        let last_used = cache.clock;
+        cache.entries.insert(
+            program,
+            CachedRuntimeShaderPipelines {
+                solid: solid.clone(),
+                glyph: glyph.clone(),
+                last_used,
+            },
+        );
+        Ok((solid, glyph))
+    }
+}
+
+impl RuntimeShaderPipelineCache {
+    fn entry_for_mut(
+        &mut self,
+        program: RuntimeShaderProgramPacket,
+    ) -> Option<&mut CachedRuntimeShaderPipelines> {
+        self.entries.get_mut(&program)
+    }
+
+    fn evict_least_recently_used(&mut self) {
+        let candidate = self
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(program, _)| *program);
+        if let Some(program) = candidate {
+            self.entries.remove(&program);
+            self.evictions = self.evictions.saturating_add(1);
+        }
+    }
+
+    fn stats(&self) -> MetalRuntimeShaderPipelineCacheStats {
+        MetalRuntimeShaderPipelineCacheStats {
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
+            entries: self.entries.len(),
+        }
+    }
+}
+
+fn create_paint_pipeline(
+    device: &Device,
+    library: &Library,
+    vertex_name: &str,
+    fragment_name: &str,
+    runtime_program: Option<&RuntimeShaderProgramPacket>,
+) -> Result<RenderPipelineState, MetalError> {
+    let vertex = library
+        .get_function(vertex_name, None)
+        .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
+    let fragment = library
+        .get_function(
+            fragment_name,
+            Some(runtime_shader_function_constants(runtime_program)),
+        )
+        .map_err(|_| MetalError::new(MetalErrorCode::ShaderLibraryFailed))?;
+    let descriptor = RenderPipelineDescriptor::new();
+    descriptor.set_vertex_function(Some(&vertex));
+    descriptor.set_fragment_function(Some(&fragment));
+    let attachment = descriptor
+        .color_attachments()
+        .object_at(0)
+        .ok_or(MetalError::new(MetalErrorCode::PipelineCreationFailed))?;
+    attachment.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+    device
+        .new_render_pipeline_state(&descriptor)
+        .map_err(|_| MetalError::new(MetalErrorCode::PipelineCreationFailed))
+}
+
+fn runtime_shader_function_constants(
+    runtime_program: Option<&RuntimeShaderProgramPacket>,
+) -> FunctionConstantValues {
+    let values = FunctionConstantValues::new();
+    let specialized = runtime_program.is_some();
+    values.set_constant_value_at_index((&raw const specialized).cast(), MTLDataType::Bool, 0);
+    let words = runtime_program.map_or(
+        [0; 1 + RUNTIME_SHADER_MAX_INSTRUCTIONS * RUNTIME_SHADER_INSTRUCTION_WORDS],
+        RuntimeShaderProgramPacket::specialization_words,
+    );
+    for (index, value) in words.iter().enumerate() {
+        values.set_constant_value_at_index(
+            (&raw const *value).cast(),
+            MTLDataType::UInt,
+            (index + 1) as _,
+        );
+    }
+    values
 }
 
 impl GpuBackend for MetalBackend {
@@ -770,12 +940,21 @@ impl MetalBackend {
         let descriptor = render_pass(surface, MTLLoadAction::Load)?;
         let destination = self.snapshot_texture(command_buffer, surface)?;
         let encoder = command_buffer.new_render_command_encoder(descriptor);
-        encoder.set_render_pipeline_state(&self.solid_rect_pipeline);
+        let runtime_shader = self.runtime_shader_packet(&paint);
+        let pipelines = runtime_shader
+            .as_ref()
+            .map(|runtime_shader| self.runtime_shader_pipelines(runtime_shader))
+            .transpose()?;
+        encoder.set_render_pipeline_state(
+            pipelines
+                .as_ref()
+                .map_or(&self.solid_rect_pipeline, |pipelines| &pipelines.0),
+        );
         encoder.set_scissor_rect(scissor);
         encoder.set_vertex_buffer(0, Some(&vertex_buffer), 0);
         let viewport = viewport_size(surface.descriptor);
         encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
-        let paint = paint_uniforms(paint, Some(&mut self.runtime_shader_packets.borrow_mut()));
+        let paint = paint_uniforms(paint, runtime_shader.as_ref());
         encoder.set_fragment_bytes(
             0,
             size_of_val(&paint) as u64,
@@ -1101,12 +1280,21 @@ impl MetalBackend {
         let descriptor = render_pass(surface, MTLLoadAction::Load)?;
         let destination = self.snapshot_texture(command_buffer, surface)?;
         let encoder = command_buffer.new_render_command_encoder(descriptor);
-        encoder.set_render_pipeline_state(&self.glyph_pipeline);
+        let runtime_shader = self.runtime_shader_packet(&paint);
+        let pipelines = runtime_shader
+            .as_ref()
+            .map(|runtime_shader| self.runtime_shader_pipelines(runtime_shader))
+            .transpose()?;
+        encoder.set_render_pipeline_state(
+            pipelines
+                .as_ref()
+                .map_or(&self.glyph_pipeline, |pipelines| &pipelines.1),
+        );
         encoder.set_scissor_rect(scissor);
         encoder.set_vertex_buffer(0, Some(&vertex_buffer), 0);
         let viewport = viewport_size(surface.descriptor);
         encoder.set_vertex_bytes(1, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
-        let paint = paint_uniforms(paint, Some(&mut self.runtime_shader_packets.borrow_mut()));
+        let paint = paint_uniforms(paint, runtime_shader.as_ref());
         encoder.set_fragment_bytes(
             0,
             size_of_val(&paint) as u64,
@@ -1443,10 +1631,7 @@ fn image_paint_uniforms(paint: Paint) -> PaintUniforms {
     uniforms
 }
 
-fn paint_uniforms(
-    paint: Paint,
-    runtime_shader_packets: Option<&mut RuntimeShaderPacketCache>,
-) -> PaintUniforms {
+fn paint_uniforms(paint: Paint, runtime_shader: Option<&RuntimeShaderPacket>) -> PaintUniforms {
     let mut uniforms = PaintUniforms {
         color: paint_color(paint.color()),
         gradient_colors: [[0.0; 4]; 8],
@@ -1462,14 +1647,9 @@ fn paint_uniforms(
             * RUNTIME_SHADER_INSTRUCTION_WORDS],
         runtime_uniforms: [0; RUNTIME_SHADER_MAX_UNIFORMS],
     };
-    if let Some(runtime) = runtime_shader_packets.and_then(|cache| cache.packet(&paint)) {
+    if let Some(runtime) = runtime_shader {
         uniforms.modes[0] = 3;
         uniforms.runtime_header[0] = runtime.instruction_count();
-        for (index, instruction) in runtime.instructions().iter().enumerate() {
-            let offset = index * RUNTIME_SHADER_INSTRUCTION_WORDS;
-            uniforms.runtime_instructions[offset..offset + RUNTIME_SHADER_INSTRUCTION_WORDS]
-                .copy_from_slice(instruction);
-        }
         uniforms
             .runtime_uniforms
             .copy_from_slice(runtime.uniforms());

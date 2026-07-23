@@ -10,6 +10,7 @@ ash = { workspace = true, features = ["loaded", "std"] }
 skia-core = { workspace = true }
 skia-gpu = { workspace = true }
 skia-tessellation = { workspace = true }
+naga = { workspace = true, features = ["spv-out", "wgsl-in"] }
 
 [dev-dependencies]
 skia-cpu = { workspace = true }

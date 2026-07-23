@@ -1,6 +1,7 @@
-use std::{io::Cursor, sync::Arc};
+use std::{collections::HashMap, fmt::Write, io::Cursor, sync::Arc};
 
 use ash::vk;
+use skia_gpu::{RuntimeShaderPacket, RuntimeShaderProgramPacket};
 
 use crate::{
     VulkanError, VulkanErrorCode,
@@ -13,8 +14,23 @@ pub(crate) struct VulkanRenderer {
     descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    specialized_pipelines: HashMap<RuntimeShaderProgramPacket, CachedRuntimeShaderPipeline>,
+    specialization_clock: u64,
+    specialized_pipeline_hits: u64,
+    specialized_pipeline_misses: u64,
+    specialized_pipeline_evictions: u64,
     dummy: PixelBuffer,
 }
+
+struct CachedRuntimeShaderPipeline {
+    pipeline: vk::Pipeline,
+    last_used: u64,
+}
+
+const RUNTIME_SHADER_PIPELINE_CACHE_CAPACITY: usize = 64;
+const RUNTIME_SHADER_SPECIALIZATION_MARKER: &str = "// RUNTIME_SHADER_SPECIALIZATION";
+const RUNTIME_SHADER_INSTRUCTION_COUNT: usize = 64;
+const RUNTIME_SHADER_INSTRUCTION_WORDS: usize = 6;
 
 impl VulkanRenderer {
     pub(crate) fn new(context: Arc<VulkanContext>) -> Result<Self, VulkanError> {
@@ -115,18 +131,90 @@ impl VulkanRenderer {
             descriptor_set_layout,
             pipeline_layout,
             pipeline,
+            specialized_pipelines: HashMap::new(),
+            specialization_clock: 0,
+            specialized_pipeline_hits: 0,
+            specialized_pipeline_misses: 0,
+            specialized_pipeline_evictions: 0,
             dummy,
         })
     }
 
-    pub(crate) fn dispatch(
+    fn pipeline_for(
+        &mut self,
+        runtime_shader: Option<&RuntimeShaderPacket>,
+    ) -> Result<vk::Pipeline, VulkanError> {
+        let Some(runtime_shader) = runtime_shader else {
+            return Ok(self.pipeline);
+        };
+        self.specialization_clock = self.specialization_clock.wrapping_add(1);
+        let last_used = self.specialization_clock;
+        let program = *runtime_shader.program();
+        if let Some(entry) = self.specialized_pipelines.get_mut(&program) {
+            self.specialized_pipeline_hits = self.specialized_pipeline_hits.saturating_add(1);
+            entry.last_used = last_used;
+            return Ok(entry.pipeline);
+        }
+        self.specialized_pipeline_misses = self.specialized_pipeline_misses.saturating_add(1);
+        if self.specialized_pipelines.len() >= RUNTIME_SHADER_PIPELINE_CACHE_CAPACITY {
+            self.evict_specialized_pipeline();
+        }
+        let pipeline = self.create_specialized_pipeline(&program)?;
+        self.specialized_pipelines.insert(
+            program,
+            CachedRuntimeShaderPipeline {
+                pipeline,
+                last_used,
+            },
+        );
+        Ok(pipeline)
+    }
+
+    pub(crate) fn specialized_pipeline_stats(&self) -> (u64, u64, u64, usize) {
+        (
+            self.specialized_pipeline_hits,
+            self.specialized_pipeline_misses,
+            self.specialized_pipeline_evictions,
+            self.specialized_pipelines.len(),
+        )
+    }
+
+    fn create_specialized_pipeline(
         &self,
+        program: &RuntimeShaderProgramPacket,
+    ) -> Result<vk::Pipeline, VulkanError> {
+        let words = specialized_runtime_shader_words(program)?;
+        create_compute_pipeline(&self.context, self.pipeline_layout, &words)
+    }
+
+    fn evict_specialized_pipeline(&mut self) {
+        let candidate = self
+            .specialized_pipelines
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(program, _)| *program);
+        let Some(program) = candidate else {
+            return;
+        };
+        let entry = self
+            .specialized_pipelines
+            .remove(&program)
+            .expect("specialized pipeline candidate remains present");
+        // SAFETY: submissions complete synchronously before cache eviction.
+        unsafe { self.context.device().destroy_pipeline(entry.pipeline, None) };
+        self.specialized_pipeline_evictions = self.specialized_pipeline_evictions.saturating_add(1);
+    }
+
+    pub(crate) fn dispatch(
+        &mut self,
         output: &PixelBuffer,
         source: Option<&PixelBuffer>,
         clip: Option<&PixelBuffer>,
         payload_words: &[u32],
         parameter_words: &[u32],
+        runtime_shader: Option<&RuntimeShaderPacket>,
     ) -> Result<(), VulkanError> {
+        let pipeline = self.pipeline_for(runtime_shader)?;
         let payload = HostBuffer::from_words(self.context.clone(), payload_words)?;
         let parameters = HostBuffer::from_words(self.context.clone(), parameter_words)?;
         let source = source.unwrap_or(&self.dummy);
@@ -231,7 +319,7 @@ impl VulkanRenderer {
                     self.context.device().cmd_bind_pipeline(
                         command_buffer,
                         vk::PipelineBindPoint::COMPUTE,
-                        self.pipeline,
+                        pipeline,
                     );
                     self.context.device().cmd_bind_descriptor_sets(
                         command_buffer,
@@ -255,11 +343,131 @@ impl VulkanRenderer {
     }
 }
 
+fn specialized_runtime_shader_words(
+    program: &RuntimeShaderProgramPacket,
+) -> Result<Vec<u32>, VulkanError> {
+    let values = program.specialization_words();
+    let generated = runtime_shader_specialization_source(&values);
+    let source = include_str!("../shaders/renderer.wgsl");
+    if !source.contains(RUNTIME_SHADER_SPECIALIZATION_MARKER) {
+        return Err(VulkanError::new(VulkanErrorCode::ShaderModuleFailed));
+    }
+    let source = source.replace(RUNTIME_SHADER_SPECIALIZATION_MARKER, &generated);
+    let module = naga::front::wgsl::parse_str(&source)
+        .map_err(|_| VulkanError::new(VulkanErrorCode::ShaderModuleFailed))?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .map_err(|_| VulkanError::new(VulkanErrorCode::ShaderModuleFailed))?;
+    let options = naga::back::spv::Options::default();
+    let pipeline = naga::back::spv::PipelineOptions {
+        shader_stage: naga::ShaderStage::Compute,
+        entry_point: "main".to_owned(),
+    };
+    naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline))
+        .map_err(|_| VulkanError::new(VulkanErrorCode::ShaderModuleFailed))
+}
+
+fn runtime_shader_specialization_source(
+    values: &[u32; 1 + RUNTIME_SHADER_INSTRUCTION_COUNT * RUNTIME_SHADER_INSTRUCTION_WORDS],
+) -> String {
+    let mut output = String::new();
+    writeln!(output, "const runtime_pipeline_specialized: bool = true;")
+        .expect("write specialization mode");
+    writeln!(
+        output,
+        "const runtime_specialized_instruction_count: u32 = {}u;",
+        values[0]
+    )
+    .expect("write instruction count specialization");
+    for (index, value) in values[1..].iter().enumerate() {
+        writeln!(
+            output,
+            "const runtime_specialized_word_{index}: u32 = {value}u;"
+        )
+        .expect("write instruction specialization");
+    }
+    writeln!(
+        output,
+        "fn specialized_runtime_instruction_word(instruction: u32, word: u32) -> u32 {{\n    switch (instruction) {{"
+    )
+    .expect("write specialization function");
+    for instruction in 0..RUNTIME_SHADER_INSTRUCTION_COUNT {
+        writeln!(
+            output,
+            "        case {instruction}u: {{\n            switch (word) {{"
+        )
+        .expect("write instruction switch");
+        for word in 0..RUNTIME_SHADER_INSTRUCTION_WORDS {
+            let index = instruction * RUNTIME_SHADER_INSTRUCTION_WORDS + word;
+            writeln!(
+                output,
+                "                case {word}u: {{ return runtime_specialized_word_{index}; }}"
+            )
+            .expect("write word switch");
+        }
+        writeln!(
+            output,
+            "                default: {{ return 0u; }}\n            }}\n        }}"
+        )
+        .expect("write instruction switch end");
+    }
+    writeln!(output, "        default: {{ return 0u; }}\n    }}\n}}")
+        .expect("write specialization function end");
+    output
+}
+
+fn create_compute_pipeline(
+    context: &VulkanContext,
+    pipeline_layout: vk::PipelineLayout,
+    words: &[u32],
+) -> Result<vk::Pipeline, VulkanError> {
+    let shader_info = vk::ShaderModuleCreateInfo::default().code(words);
+    // SAFETY: SPIR-V was generated from the internal, validated shader template.
+    let shader = unsafe { context.device().create_shader_module(&shader_info, None) }
+        .map_err(|_| VulkanError::new(VulkanErrorCode::ShaderModuleFailed))?;
+    let entry = c"main";
+    let stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::COMPUTE)
+        .module(shader)
+        .name(entry);
+    let pipeline_info = [vk::ComputePipelineCreateInfo::default()
+        .stage(stage)
+        .layout(pipeline_layout)];
+    // SAFETY: shader module and pipeline layout belong to this device.
+    let result = unsafe {
+        context
+            .device()
+            .create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
+    };
+    // SAFETY: pipeline creation no longer needs the shader module.
+    unsafe { context.device().destroy_shader_module(shader, None) };
+    match result {
+        Ok(mut pipelines) => pipelines
+            .pop()
+            .ok_or(VulkanError::new(VulkanErrorCode::PipelineCreationFailed)),
+        Err((pipelines, _)) => {
+            // SAFETY: failed batch pipelines, if any, are not submitted or retained.
+            unsafe {
+                for pipeline in pipelines {
+                    context.device().destroy_pipeline(pipeline, None);
+                }
+            }
+            Err(VulkanError::new(VulkanErrorCode::PipelineCreationFailed))
+        }
+    }
+}
+
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
         // SAFETY: submissions are synchronous and handles are owned here.
         unsafe {
             self.context.device().destroy_pipeline(self.pipeline, None);
+            for entry in self.specialized_pipelines.values() {
+                self.context.device().destroy_pipeline(entry.pipeline, None);
+            }
             self.context
                 .device()
                 .destroy_pipeline_layout(self.pipeline_layout, None);

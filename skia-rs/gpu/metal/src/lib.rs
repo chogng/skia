@@ -5,4 +5,7 @@
 
 mod backend;
 
-pub use backend::{MetalAtlasCacheStats, MetalBackend, MetalError, MetalErrorCode, MetalSurface};
+pub use backend::{
+    MetalAtlasCacheStats, MetalBackend, MetalError, MetalErrorCode,
+    MetalRuntimeShaderPipelineCacheStats, MetalSurface,
+};
