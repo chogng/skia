@@ -13,6 +13,8 @@ mod display_list;
 mod paint;
 mod sampling;
 #[cfg(feature = "text")]
+mod text_geometry;
+#[cfg(feature = "text")]
 mod text_path;
 
 pub use clip::ClipOp;
@@ -41,6 +43,11 @@ pub use skia_text::{
     TextDecorationStyle, TextDirection, TextError, TextErrorCode, TextHitResult, TextJustification,
     TextLayout, TextLayoutOptions, TextOverflow, TextPosition, TextSelectionRect, TextStyleId,
     TextStyleSpan, TextUnit, TextWordBreak, TextWordBreakKind, text_decoration_rects,
+};
+#[cfg(feature = "text")]
+pub use text_geometry::{
+    TextDecorationBatch, TextLayoutEvent, TextOutlineBatch, layout_decoration_batches,
+    layout_outline_batches, text_layout_events, text_layout_glyph_events,
 };
 #[cfg(feature = "text")]
 pub use text_path::glyph_outline_path;

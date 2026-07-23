@@ -11,8 +11,8 @@ use skia_cpu::{Canvas, ClipRect, Surface, SurfaceLimits};
 use skia_image::Image;
 
 use crate::{
-    GpuBackend, GpuClipGeometry, GpuClipId, GpuCommand, GpuCommandBuffer, GpuGlyphQuad,
-    GpuSurfaceDescriptor,
+    GpuBackend, GpuCapabilities, GpuClipGeometry, GpuClipId, GpuCommand, GpuCommandBuffer,
+    GpuGlyphQuad, GpuSurfaceDescriptor,
 };
 
 /// Source-redacted failure from deterministic command replay.
@@ -50,10 +50,26 @@ impl GpuBackend for SoftwareGpuBackend {
     type Surface = Surface;
     type Error = SoftwareGpuError;
 
+    fn capabilities(&self) -> GpuCapabilities {
+        let addressable_bytes = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
+        GpuCapabilities::new(
+            u32::MAX,
+            u32::MAX,
+            self.limits
+                .max_bytes()
+                .min(self.limits.max_pixels().saturating_mul(4))
+                .min(addressable_bytes),
+        )
+        .expect("CPU SurfaceLimits are positive")
+    }
+
     fn create_surface(
         &mut self,
         descriptor: GpuSurfaceDescriptor,
     ) -> Result<Self::Surface, Self::Error> {
+        if !self.capabilities().supports_surface(descriptor) {
+            return Err(SoftwareGpuError);
+        }
         Surface::new(descriptor.width(), descriptor.height(), self.limits).map_err(map_error)
     }
 

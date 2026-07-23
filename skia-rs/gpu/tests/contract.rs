@@ -6,9 +6,9 @@ use skia_core::{
     StrokeJoin, StrokeOptions, TileMode, Transform,
 };
 use skia_gpu::{
-    GpuAtlasRect, GpuBackend, GpuClipGeometry, GpuCommand, GpuCommandEncoder, GpuCommandErrorCode,
-    GpuCommandLimits, GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad, GpuSurfaceDescriptor,
-    software::SoftwareGpuBackend,
+    GpuAtlasRect, GpuBackend, GpuCapabilities, GpuClipGeometry, GpuCommand, GpuCommandEncoder,
+    GpuCommandErrorCode, GpuCommandLimits, GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad,
+    GpuSurfaceDescriptor, software::SoftwareGpuBackend,
 };
 use skia_image::Image;
 
@@ -43,6 +43,10 @@ struct RecordingBackend {
 impl GpuBackend for RecordingBackend {
     type Surface = GpuSurfaceDescriptor;
     type Error = BackendError;
+
+    fn capabilities(&self) -> GpuCapabilities {
+        GpuCapabilities::new(u32::MAX, u32::MAX, u64::MAX).unwrap()
+    }
 
     fn create_surface(
         &mut self,
@@ -110,6 +114,32 @@ fn gpu_commands_own_resources_and_preserve_submission_order() {
         panic!("expected path command");
     };
     assert_eq!(transform.map_point(point(1, 1)).unwrap(), point(2, 3));
+}
+
+#[test]
+fn gpu_capabilities_bound_surface_shape_and_storage() {
+    let capabilities = GpuCapabilities::new(16, 8, 128).expect("capabilities");
+
+    assert!(capabilities.supports_surface(GpuSurfaceDescriptor::new(8, 4).unwrap()));
+    assert!(!capabilities.supports_surface(GpuSurfaceDescriptor::new(17, 1).unwrap()));
+    assert!(!capabilities.supports_surface(GpuSurfaceDescriptor::new(1, 9).unwrap()));
+    assert!(!capabilities.supports_surface(GpuSurfaceDescriptor::new(8, 5).unwrap()));
+    assert_eq!(capabilities.max_surface_width(), 16);
+    assert_eq!(capabilities.max_surface_height(), 8);
+    assert_eq!(capabilities.max_surface_bytes(), 128);
+    assert_eq!(
+        GpuCapabilities::new(0, 8, 128).unwrap_err().code(),
+        GpuCommandErrorCode::InvalidLimits
+    );
+    assert_eq!(
+        GpuCapabilities::new(16, 8, 0).unwrap_err().code(),
+        GpuCommandErrorCode::InvalidLimits
+    );
+    assert!(
+        !GpuCapabilities::new(16, 8, 1)
+            .expect("sub-pixel storage ceiling")
+            .supports_surface(GpuSurfaceDescriptor::new(1, 1).unwrap())
+    );
 }
 
 #[test]

@@ -6,16 +6,16 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-skia-core = { path = "../core", default-features = false }
-skia-cpu = { path = "../cpu", optional = true }
-skia-image = { path = "../image" }
+skia-core = { workspace = true }
+skia-cpu = { workspace = true, optional = true }
+skia-image = { workspace = true }
 
 [features]
 software = ["dep:skia-cpu"]
 
 [dev-dependencies]
-sha2 = "0.10"
-skia-codec = { path = "../codec" }
+sha2 = { workspace = true }
+skia-codec = { workspace = true }
 
 [[test]]
 name = "render_oracle"

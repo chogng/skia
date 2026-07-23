@@ -19,9 +19,11 @@ flowchart LR
   api --> cpu["Skia CPU executor"]
   api --> gpu["Skia GPU executor"]
   gpu --> metal["Metal backend"]
+  gpu --> vulkan["Vulkan backend"]
   path --> tessellation["Shared tessellation"]
   tessellation --> cpu
   tessellation --> metal
+  tessellation --> vulkan
   text --> gpu_text["GPU text adapter"]
   gpu_text --> gpu
 ```
@@ -53,10 +55,12 @@ flowchart LR
 - `skia-rs/tessellation` owns backend-neutral path-to-polyline and path-to-mesh
   algorithms. Its bounded fixed-step curve flattener is shared by CPU and
   hardware backends; backend crates own only their raster or GPU buffer format.
-- `skia-rs/gpu` owns only generic GPU resources, atlas quads, commands, and backend
-  submission. `skia-rs/gpu/text` is the one-way adapter from font/layout data to
-  those primitives. Hardware backends depend on `skia-gpu`, never on the text
-  adapter, so adding Vulkan or WebGPU does not duplicate shaping or atlas policy.
+- `skia-rs/gpu` owns only generic GPU resources, atlas quads, commands, surface
+  formats, device capabilities, limits, and backend submission. `skia-rs/gpu/text`
+  is the one-way adapter from font/layout data to GPU atlases and glyph quads;
+  portable outline and decoration geometry remains in `skia-core`. Hardware
+  backends depend on `skia-gpu`, never on the text adapter, so adding Vulkan or
+  WebGPU does not duplicate shaping or atlas policy.
 - `skia-rs/gpu/metal` and `skia-rs/gpu/vulkan` are platform execution adapters. The
   Vulkan adapter dynamically loads the platform loader and owns a real instance,
   device, graphics queue, compute pipeline, and offscreen RGBA8 storage target.
@@ -153,17 +157,18 @@ back to three periods without consuming source bytes.
 System-font discovery, generic-family mapping, and language-preferred family
 selection are available through the separate `skia-system-fonts` adapter;
 variable-font instance policy and broader paragraph formatting remain upper
-text-layout responsibilities. GPU vector and
-atlas text adaptation are available through the separate `skia-gpu-text` adapter.
-`layout_outline_batches` converts positioned outlines into ordinary target-space
-paths for generic `fill_path` commands. For bitmap text,
+text-layout responsibilities. Portable `layout_outline_batches` and
+`layout_decoration_batches` conversion lives in `skia-core`, producing ordinary
+target-space paths and rectangles for any renderer. Its ordered
+`text_layout_events` traversal is shared by CPU and DisplayList, while the GPU
+atlas adapter uses the glyph-only traversal so decoration work cannot affect
+atlas construction. GPU atlas text adaptation is available through the separate
+`skia-gpu-text` adapter. For bitmap text,
 `TextAtlasBuilder` rasterizes and packs a `TextLayout`, and `TextAtlas` converts
 layout positions into owned generic quads without borrowing an encoder. The
 caller then explicitly registers `into_gpu_atlas()` and records the quads with
-`skia-gpu`. `layout_decoration_batches` independently converts resolved
-underline and strike-through patterns into per-style target-space rectangles;
-callers record those through generic `fill_rect` commands. This keeps text data
-adaptation separate from command ordering and hardware backends. The Metal
+`skia-gpu`. This keeps portable text geometry and GPU resource adaptation
+separate from command ordering and hardware backends. The Metal
 backend draws transformed/scissored solid rectangles, path-fill masks, Alpha8 masks, and color
 glyphs through real shader pipelines; rectangle and glyph draws can sample
 parent-linked R8 complex-clip masks rendered on the GPU. Destination snapshots
@@ -203,7 +208,7 @@ graphics-state operations. Backend-neutral `StrokeOptions` defines
 center/inside/outside alignment, butt/round/square caps, miter/round/bevel
 joins, miter limits, and canonical dash patterns. Non-center alignment is
 defined only for closed, non-degenerate contours and follows contour winding.
-CPU Canvas and Metal consume the same expanded triangle mesh; DisplayList and
+CPU Canvas, Metal, and Vulkan consume the same expanded triangle mesh; DisplayList and
 generic GPU commands preserve the options, and software replay introduces no
 backend-specific stroke policy.
 Backend-neutral `SamplingOptions` similarly preserves nearest or bilinear
@@ -224,7 +229,7 @@ clips use deterministic masks, while generic GPU commands retain immutable
 parent-linked `GpuClipId` nodes. The software reference backend replays those
 nodes through CPU masks, and Metal materializes only used nodes as transient R8
 textures shared by subsequent rectangle, path-fill, and glyph draws in the submission.
-CPU fill/stroke/clip and Metal clip-edge generation consume the same bounded,
+CPU fill/stroke/clip plus Metal and Vulkan clip-edge generation consume the same bounded,
 deterministic fixed-step curve flattener from `skia-tessellation`. Stroke
 normalization, dashing, and cap/join/miter coverage also live there; CPU keeps
 only device-pixel bounds and raster iteration, while backend-specific mask and
@@ -260,3 +265,19 @@ Backend consumers must not add their own Bézier flattening. The reusable
 `PathFlattener`, output ceilings, and flattened contour representation live in
 `skia-rs/tessellation/src/flatten.rs`, ready for Metal, Vulkan, WebGPU, and CPU
 consumers without exposing backend command or buffer types.
+
+## GPU implementation layout
+
+`skia-rs/gpu` is the public renderer-integration SPI, not the ordinary drawing
+facade. Its thin `src/lib.rs` router re-exports contracts grouped by responsibility:
+
+- `backend.rs` owns the backend trait and operational error boundary.
+- `surface.rs` owns portable target descriptors and formats.
+- `limits.rs` owns command ceilings and device-reported capabilities.
+- `resource.rs` owns command-local IDs, atlas resources, glyph quads, and clip nodes.
+- `command.rs` owns immutable commands and command buffers.
+- `encoder.rs` owns stateful, bounded command recording.
+- `software.rs` is the feature-gated conformance oracle, not a hardware backend.
+
+Native handles, descriptor layouts, shaders, queues, and backend caches remain
+inside `gpu/metal` or `gpu/vulkan`; they are not part of this SPI.

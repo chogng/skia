@@ -16,6 +16,11 @@ fn vulkan_backend_clears_and_reads_an_offscreen_surface() {
         return;
     };
     assert!(!backend.device_name().is_empty());
+    assert!(
+        backend
+            .capabilities()
+            .supports_surface(GpuSurfaceDescriptor::new(4, 3).expect("descriptor"))
+    );
     eprintln!("Vulkan device: {}", backend.device_name());
     if std::env::var_os("SKIA_VULKAN_VALIDATION").is_some() {
         assert!(backend.validation_enabled());

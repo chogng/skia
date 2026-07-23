@@ -25,8 +25,8 @@ use skia_core::{
     SamplingFilter, SamplingOptions, SaveLayerOptions, Scalar, TileMode, Transform,
 };
 use skia_gpu::{
-    GpuBackend, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphAtlasKey, GpuGlyphQuad,
-    GpuSurfaceDescriptor,
+    GpuBackend, GpuCapabilities, GpuCommand, GpuCommandBuffer, GpuGlyphAtlas, GpuGlyphAtlasKey,
+    GpuGlyphQuad, GpuSurfaceDescriptor,
 };
 use skia_image::Image;
 
@@ -185,6 +185,9 @@ impl MetalBackend {
         &self,
         descriptor: GpuSurfaceDescriptor,
     ) -> Result<MetalSurface, MetalError> {
+        if !self.capabilities().supports_surface(descriptor) {
+            return Err(MetalError::new(MetalErrorCode::SurfaceAllocationFailed));
+        }
         let texture_descriptor = TextureDescriptor::new();
         texture_descriptor.set_width(u64::from(descriptor.width()));
         texture_descriptor.set_height(u64::from(descriptor.height()));
@@ -338,6 +341,15 @@ impl MetalBackend {
 impl GpuBackend for MetalBackend {
     type Surface = MetalSurface;
     type Error = MetalError;
+
+    fn capabilities(&self) -> GpuCapabilities {
+        let dimension = self.device.max_2d_texture_size();
+        let max_bytes = u64::from(dimension)
+            .saturating_mul(u64::from(dimension))
+            .saturating_mul(4);
+        GpuCapabilities::new(dimension, dimension, max_bytes)
+            .expect("Metal reports a positive 2D texture limit")
+    }
 
     fn create_surface(
         &mut self,

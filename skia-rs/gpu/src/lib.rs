@@ -7,15 +7,25 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod backend;
 mod command;
+mod encoder;
+mod error;
+mod limits;
+mod resource;
+mod surface;
 
 /// Deterministic CPU replay backend for GPU command conformance tests.
 #[cfg(feature = "software")]
 pub mod software;
 
-pub use command::{
-    GpuAtlasRect, GpuBackend, GpuBackendError, GpuClipGeometry, GpuClipId, GpuClipNode, GpuCommand,
-    GpuCommandBuffer, GpuCommandEncoder, GpuCommandError, GpuCommandErrorCode, GpuCommandLimits,
-    GpuGlyphAtlas, GpuGlyphAtlasId, GpuGlyphAtlasKey, GpuGlyphQuad, GpuImageId, GpuPathId,
-    GpuSurfaceDescriptor,
+pub use backend::{GpuBackend, GpuBackendError};
+pub use command::{GpuCommand, GpuCommandBuffer};
+pub use encoder::GpuCommandEncoder;
+pub use error::{GpuCommandError, GpuCommandErrorCode};
+pub use limits::{GpuCapabilities, GpuCommandLimits};
+pub use resource::{
+    GpuAtlasRect, GpuClipGeometry, GpuClipId, GpuClipNode, GpuGlyphAtlas, GpuGlyphAtlasId,
+    GpuGlyphAtlasKey, GpuGlyphQuad, GpuImageId, GpuPathId,
 };
+pub use surface::{GpuSurfaceDescriptor, GpuSurfaceFormat};

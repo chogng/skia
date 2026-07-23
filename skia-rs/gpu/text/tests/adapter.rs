@@ -1,18 +1,21 @@
+#[path = "../../../core/tests/support/mod.rs"]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod support;
 
 use std::sync::Arc;
 
 use skia_core::{
-    Color, FillRule, FontCollection, FontCollectionLimits, FontFace, FontId, Paint, Point, Scalar,
-    TextDecoration, TextDecorationStyle, TextLayoutOptions, TextStyleId, TextStyleSpan,
+    Color, FontCollection, FontCollectionLimits, FontFace, FontId, Paint, Point, Scalar,
+    TextLayoutOptions, TextStyleId, TextStyleSpan,
 };
+#[cfg(target_os = "macos")]
+use skia_core::{TextDecoration, layout_decoration_batches};
 use skia_gpu::{GpuBackend, GpuCommand, GpuCommandEncoder, GpuSurfaceDescriptor};
-use skia_gpu_text::{
-    TextAtlasBuilder, TextAtlasCache, TextAtlasCacheLimits, TextGlyphKey,
-    layout_decoration_batches, layout_outline_batches,
-};
+use skia_gpu_text::{TextAtlasBuilder, TextAtlasCache, TextAtlasCacheLimits, TextGlyphKey};
 
-use support::{toy_font, toy_font_with_decorations};
+use support::toy_font;
+#[cfg(target_os = "macos")]
+use support::toy_font_with_decorations;
 
 #[test]
 fn text_adapter_shapes_packs_and_replays_layout_glyphs() {
@@ -96,150 +99,6 @@ fn text_adapter_shapes_packs_and_replays_layout_glyphs() {
             .chunks_exact(4)
             .any(|pixel| pixel[2] > 0 && pixel[3] > 0)
     );
-}
-
-#[test]
-fn text_adapter_emits_vector_outlines_as_generic_paths() {
-    let face = FontFace::from_bytes(FontId::new(95), toy_font('A')).expect("load toy font");
-    let mut fonts = FontCollection::new(FontCollectionLimits::default());
-    fonts.add_face(face).expect("register face");
-    let layout = fonts
-        .layout_text(
-            "AA",
-            12 << 16,
-            TextLayoutOptions::new(32 << 16).expect("layout options"),
-        )
-        .expect("layout text");
-    let batches = layout_outline_batches(&layout, &fonts, Point::new(Scalar::ZERO, Scalar::ZERO))
-        .expect("outline batches");
-    assert_eq!(batches.len(), 1);
-    assert_eq!(batches[0].style_id(), TextStyleId::DEFAULT);
-    assert_eq!(batches[0].paths().len(), 2);
-
-    let mut encoder = GpuCommandEncoder::new(4).expect("encoder");
-    encoder.clear(Color::TRANSPARENT).expect("clear");
-    for batch in batches {
-        assert_eq!(batch.style_id(), TextStyleId::DEFAULT);
-        for path in batch.into_paths() {
-            let path = encoder.add_path(path).expect("register glyph path");
-            encoder
-                .fill_path(path, FillRule::NonZero, Paint::new(Color::BLUE))
-                .expect("record glyph path");
-        }
-    }
-    let commands = encoder.finish();
-    assert_eq!(
-        commands
-            .commands()
-            .iter()
-            .filter(|command| matches!(command, GpuCommand::FillPath { .. }))
-            .count(),
-        2
-    );
-
-    let mut backend = skia_gpu::software::SoftwareGpuBackend::default();
-    let mut surface = backend
-        .create_surface(GpuSurfaceDescriptor::new(32, 16).expect("surface descriptor"))
-        .expect("surface");
-    backend.submit(&mut surface, &commands).expect("replay");
-    assert!(
-        surface
-            .pixels()
-            .chunks_exact(4)
-            .any(|pixel| pixel[2] > 0 && pixel[3] > 0)
-    );
-}
-
-#[test]
-fn text_adapter_emits_per_style_decoration_rectangles() {
-    let mut fonts = FontCollection::new(FontCollectionLimits::default());
-    fonts
-        .add_face(
-            FontFace::from_bytes(FontId::new(92), toy_font_with_decorations('A'))
-                .expect("decorated font"),
-        )
-        .expect("register face");
-    let underline_style = TextStyleId::new(11);
-    let strike_style = TextStyleId::new(12);
-    let layout = fonts
-        .layout_styled_text(
-            "AA",
-            &[
-                TextStyleSpan::new(0, 1, FontId::new(92), 20 << 16)
-                    .expect("underline span")
-                    .with_style_id(underline_style)
-                    .with_decoration(TextDecoration::Underline),
-                TextStyleSpan::new(1, 2, FontId::new(92), 20 << 16)
-                    .expect("strike span")
-                    .with_style_id(strike_style)
-                    .with_decoration(TextDecoration::StrikeThrough),
-            ],
-            TextLayoutOptions::new(30 << 16).expect("layout options"),
-        )
-        .expect("styled layout");
-    let origin = Point::new(Scalar::from_i32(3).unwrap(), Scalar::from_i32(5).unwrap());
-    let batches = layout_decoration_batches(&layout, origin).expect("decoration batches");
-
-    assert_eq!(batches.len(), 2);
-    assert_eq!(batches[0].style_id(), underline_style);
-    assert_eq!(batches[1].style_id(), strike_style);
-    assert_eq!(batches[0].rects().len(), 1);
-    assert_eq!(batches[1].rects().len(), 1);
-
-    let line = &layout.lines()[0];
-    let line_x = origin.x().bits() + line.offset_x_bits();
-    let baseline = origin.y().bits() + line.baseline_y_bits();
-    assert_rect_bits(
-        batches[0].rects()[0],
-        [
-            line_x,
-            baseline + (1 << 16),
-            line_x + (12 << 16),
-            baseline + (3 << 16),
-        ],
-    );
-    assert_rect_bits(
-        batches[1].rects()[0],
-        [
-            line_x + (12 << 16),
-            baseline - (7 << 16),
-            line_x + (24 << 16),
-            baseline - (5 << 16),
-        ],
-    );
-}
-
-#[test]
-fn text_adapter_expands_all_decoration_patterns() {
-    let mut fonts = FontCollection::new(FontCollectionLimits::default());
-    fonts
-        .add_face(
-            FontFace::from_bytes(FontId::new(94), toy_font_with_decorations('A'))
-                .expect("decorated font"),
-        )
-        .expect("register face");
-
-    for (style, expected_rects) in [
-        (TextDecorationStyle::Solid, 1),
-        (TextDecorationStyle::Dashed, 2),
-        (TextDecorationStyle::Dotted, 3),
-        (TextDecorationStyle::Wavy, 6),
-    ] {
-        let layout = fonts
-            .layout_text(
-                "A",
-                20 << 16,
-                TextLayoutOptions::new(20 << 16)
-                    .expect("options")
-                    .with_decoration(TextDecoration::Underline)
-                    .with_decoration_style(style),
-            )
-            .expect("decorated layout");
-        let batches = layout_decoration_batches(&layout, Point::new(Scalar::ZERO, Scalar::ZERO))
-            .expect("decoration batches");
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].rects().len(), expected_rects, "{style:?}");
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -389,18 +248,6 @@ fn atlas_cache_reuses_supersets_and_evicts_least_recently_used_entries() {
     assert!(Arc::ptr_eq(&superset, &subset));
     superset_cache.clear();
     assert_eq!(superset_cache.stats().entries(), 0);
-}
-
-fn assert_rect_bits(rect: skia_core::Rect, expected: [i32; 4]) {
-    assert_eq!(
-        [
-            rect.left().bits(),
-            rect.top().bits(),
-            rect.right().bits(),
-            rect.bottom().bits(),
-        ],
-        expected
-    );
 }
 
 #[cfg(target_os = "macos")]

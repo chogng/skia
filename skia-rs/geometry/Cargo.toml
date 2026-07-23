@@ -6,4 +6,4 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-skia-error = { path = "../error" }
+skia-error = { workspace = true }

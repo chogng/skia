@@ -6,6 +6,6 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-skia-core = { path = "../core" }
-skia-image = { path = "../image" }
-skia-tessellation = { path = "../tessellation" }
+skia-core = { workspace = true, features = ["text"] }
+skia-image = { workspace = true }
+skia-tessellation = { workspace = true }

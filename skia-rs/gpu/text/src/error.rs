@@ -59,23 +59,21 @@ impl From<GpuCommandError> for TextGpuError {
     }
 }
 
-impl From<SkiaError> for TextGpuError {
-    fn from(error: SkiaError) -> Self {
-        let code = match error.code() {
-            SkiaErrorCode::NumericOverflow => TextGpuErrorCode::NumericOverflow,
-            SkiaErrorCode::ResourceLimit => TextGpuErrorCode::ResourceLimit,
-            SkiaErrorCode::AllocationFailed => TextGpuErrorCode::AllocationFailed,
-            _ => TextGpuErrorCode::InvalidResource,
-        };
-        Self::new(code)
-    }
-}
-
 pub(crate) fn map_text_error(error: TextError) -> TextGpuError {
     let code = match error.code() {
         TextErrorCode::AllocationFailed => TextGpuErrorCode::AllocationFailed,
         TextErrorCode::NumericOverflow => TextGpuErrorCode::NumericOverflow,
         TextErrorCode::ResourceLimit => TextGpuErrorCode::ResourceLimit,
+        _ => TextGpuErrorCode::InvalidResource,
+    };
+    TextGpuError::new(code)
+}
+
+pub(crate) fn map_skia_error(error: SkiaError) -> TextGpuError {
+    let code = match error.code() {
+        SkiaErrorCode::NumericOverflow => TextGpuErrorCode::NumericOverflow,
+        SkiaErrorCode::ResourceLimit => TextGpuErrorCode::ResourceLimit,
+        SkiaErrorCode::AllocationFailed => TextGpuErrorCode::AllocationFailed,
         _ => TextGpuErrorCode::InvalidResource,
     };
     TextGpuError::new(code)

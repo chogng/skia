@@ -6,15 +6,15 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-ash = { version = "0.38.0", default-features = false, features = ["loaded", "std"] }
-skia-core = { path = "../../core", default-features = false }
-skia-gpu = { path = ".." }
-skia-tessellation = { path = "../../tessellation" }
+ash = { workspace = true, features = ["loaded", "std"] }
+skia-core = { workspace = true }
+skia-gpu = { workspace = true }
+skia-tessellation = { workspace = true }
 
 [dev-dependencies]
-skia-cpu = { path = "../../cpu" }
-skia-gpu = { path = "..", features = ["software"] }
-skia-image = { path = "../../image" }
+skia-cpu = { workspace = true }
+skia-gpu = { workspace = true, features = ["software"] }
+skia-image = { workspace = true }
 
 [build-dependencies]
-naga = { version = "30.0.0", default-features = false, features = ["spv-out", "wgsl-in"] }
+naga = { workspace = true, features = ["spv-out", "wgsl-in"] }

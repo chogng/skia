@@ -15,7 +15,7 @@ mod surface;
 
 use std::fmt;
 
-use skia_gpu::{GpuBackend, GpuCommandBuffer, GpuSurfaceDescriptor};
+use skia_gpu::{GpuBackend, GpuCapabilities, GpuCommandBuffer, GpuSurfaceDescriptor};
 
 use crate::context::VulkanContext;
 use crate::renderer::VulkanRenderer;
@@ -30,7 +30,7 @@ pub enum VulkanErrorCode {
     InstanceCreationFailed,
     /// Validation was required but `VK_LAYER_KHRONOS_validation` is unavailable.
     ValidationUnavailable,
-    /// No physical device with a graphics-capable queue was available.
+    /// No physical device with a compute-capable queue was available.
     DeviceUnavailable,
     /// Logical-device, queue, or command-pool creation failed.
     DeviceCreationFailed,
@@ -82,7 +82,7 @@ pub struct VulkanBackend {
 }
 
 impl VulkanBackend {
-    /// Opens the system Vulkan loader and selects one graphics-capable device.
+    /// Opens the system Vulkan loader and selects one compute-capable device.
     pub fn new() -> Result<Self, VulkanError> {
         let context = std::sync::Arc::new(VulkanContext::new()?);
         let renderer = VulkanRenderer::new(context.clone())?;
@@ -94,7 +94,7 @@ impl VulkanBackend {
         self.context.device_name()
     }
 
-    /// Returns the graphics queue-family index used by submissions.
+    /// Returns the compute queue-family index used by submissions.
     pub fn queue_family_index(&self) -> u32 {
         self.context.queue_family_index()
     }
@@ -109,10 +109,17 @@ impl GpuBackend for VulkanBackend {
     type Surface = VulkanSurface;
     type Error = VulkanError;
 
+    fn capabilities(&self) -> GpuCapabilities {
+        self.context.capabilities()
+    }
+
     fn create_surface(
         &mut self,
         descriptor: GpuSurfaceDescriptor,
     ) -> Result<Self::Surface, Self::Error> {
+        if !self.capabilities().supports_surface(descriptor) {
+            return Err(VulkanError::new(VulkanErrorCode::SurfaceAllocationFailed));
+        }
         VulkanSurface::new(self.context.clone(), descriptor)
     }
 

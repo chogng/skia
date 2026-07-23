@@ -1,15 +1,12 @@
-#[cfg(feature = "text")]
-use crate::Point;
 use crate::{
     ClipOp, Color, FillRule, Paint, Path, Rect, SamplingOptions, SaveLayerOptions, Scalar,
     SkiaError, SkiaErrorCode, StrokeCap, StrokeJoin, StrokeOptions, Transform,
 };
+#[cfg(feature = "text")]
+use crate::{Point, TextLayoutEvent, text_layout_events};
 use skia_image::Image;
 #[cfg(feature = "text")]
-use skia_text::{
-    GlyphRun, ShapedParagraph, TextDecorationMetrics, TextDecorationStyle, TextErrorCode,
-    TextLayout, TextStyleId, text_decoration_rects,
-};
+use skia_text::{GlyphRun, ShapedParagraph, TextLayout, TextStyleId};
 
 /// Command-buffer-local identifier for an immutable path resource.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -376,75 +373,30 @@ impl DisplayListBuilder {
         origin: Point,
         paint_for_style: &impl Fn(TextStyleId) -> Option<Paint>,
     ) -> Result<(), SkiaError> {
+        let events = text_layout_events(layout, origin)?;
         self.record_text_transaction(|builder| {
-            for line in layout.lines() {
-                let Some(paragraph) = line.paragraph() else {
-                    continue;
-                };
-                let line_x = origin
-                    .x()
-                    .bits()
-                    .checked_add(line.offset_x_bits())
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                let baseline_y = origin
-                    .y()
-                    .bits()
-                    .checked_add(line.baseline_y_bits())
-                    .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                builder.record_shaped_paragraph(
-                    paragraph,
-                    Point::new(Scalar::from_bits(line_x), Scalar::from_bits(baseline_y)),
-                    paint_for_style,
-                )?;
-                if line.advance_x_bits() <= 0 {
-                    continue;
-                }
-                if line.decoration_segments().is_empty() {
-                    let metrics = [line.underline_metrics(), line.strike_through_metrics()];
-                    if metrics.iter().all(Option::is_none) {
-                        continue;
-                    }
-                    let paint = paint_for_style(TextStyleId::DEFAULT)
-                        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    let right = line_x
-                        .checked_add(line.advance_x_bits())
-                        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                    for metrics in metrics.into_iter().flatten() {
-                        builder.record_decoration_rects(
-                            line_x,
-                            right,
-                            baseline_y,
-                            metrics,
-                            line.decoration_style(),
-                            paint,
-                        )?;
-                    }
-                } else {
-                    for segment in line.decoration_segments() {
-                        let paint = paint_for_style(segment.style_id())
+            for event in events {
+                match event {
+                    TextLayoutEvent::GlyphRun {
+                        style_id,
+                        run,
+                        origin,
+                        offsets_x_bits,
+                    } => {
+                        let paint = paint_for_style(style_id)
                             .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                        let left = line_x
-                            .checked_add(segment.left_bits())
-                            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                        let right = line_x
-                            .checked_add(segment.right_bits())
-                            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                        for metrics in [
-                            segment.underline_metrics(),
-                            segment.strike_through_metrics(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        {
-                            builder.record_decoration_rects(
-                                left,
-                                right,
-                                baseline_y,
-                                metrics,
-                                segment.decoration_style(),
-                                paint,
-                            )?;
-                        }
+                        let mut offsets = Vec::new();
+                        offsets
+                            .try_reserve_exact(offsets_x_bits.len())
+                            .map_err(|_| SkiaError::new(SkiaErrorCode::AllocationFailed))?;
+                        offsets.extend_from_slice(offsets_x_bits);
+                        let run = builder.add_glyph_run(run.clone())?;
+                        builder.draw_positioned_glyph_run(run, origin, offsets, paint)?;
+                    }
+                    TextLayoutEvent::Decoration { style_id, rect } => {
+                        let paint = paint_for_style(style_id)
+                            .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+                        builder.fill_rect(rect, paint)?;
                     }
                 }
             }
@@ -496,37 +448,6 @@ impl DisplayListBuilder {
                 run,
                 Point::new(Scalar::from_bits(run_x), origin.y()),
                 offsets_x_bits,
-                paint,
-            )?;
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "text")]
-    fn record_decoration_rects(
-        &mut self,
-        left_bits: i32,
-        right_bits: i32,
-        baseline_bits: i32,
-        metrics: TextDecorationMetrics,
-        style: TextDecorationStyle,
-        paint: Paint,
-    ) -> Result<(), SkiaError> {
-        for rect in text_decoration_rects(left_bits, right_bits, baseline_bits, metrics, style)
-            .map_err(|error| match error.code() {
-                TextErrorCode::NumericOverflow => SkiaError::new(SkiaErrorCode::NumericOverflow),
-                TextErrorCode::ResourceLimit => SkiaError::new(SkiaErrorCode::ResourceLimit),
-                TextErrorCode::AllocationFailed => SkiaError::new(SkiaErrorCode::AllocationFailed),
-                _ => SkiaError::new(SkiaErrorCode::InvalidResource),
-            })?
-        {
-            self.fill_rect(
-                Rect::new(
-                    Scalar::from_bits(rect.left_bits()),
-                    Scalar::from_bits(rect.top_bits()),
-                    Scalar::from_bits(rect.right_bits()),
-                    Scalar::from_bits(rect.bottom_bits()),
-                )?,
                 paint,
             )?;
         }

@@ -1,7 +1,7 @@
 # Vulkan backend
 
 `skia-vulkan` is the cross-platform Vulkan execution adapter for `skia-gpu`.
-It dynamically loads the system Vulkan loader, selects a graphics-capable
+It dynamically loads the system Vulkan loader, selects a compute-capable
 device and queue, and renders into a device-owned RGBA8 storage target.
 
 ## Current implementation

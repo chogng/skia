@@ -4,7 +4,8 @@ use skia_core::{
     BlendMode, ClipOp, Color, DisplayList, DrawCommand, FillRule, GlyphOutlineProvider, GlyphRun,
     ImageFilter, Paint, Path, Point, PositionedGlyph, Rect, SamplingFilter, SamplingOptions,
     SaveLayerOptions, Scalar, ShapedParagraph, SkiaError, SkiaErrorCode, StrokeCap, StrokeJoin,
-    StrokeOptions, TextLayout, TextStyleId, Transform, glyph_outline_path, text_decoration_rects,
+    StrokeOptions, TextLayout, TextLayoutEvent, TextStyleId, Transform, glyph_outline_path,
+    text_layout_events,
 };
 use skia_image::Image;
 use skia_tessellation::{
@@ -16,16 +17,6 @@ use crate::{
     clip::{apply_clip, mask_index},
     stroke::stroke_bounds,
 };
-
-fn map_text_decoration_error(error: skia_core::TextError) -> SkiaError {
-    let code = match error.code() {
-        skia_core::TextErrorCode::NumericOverflow => SkiaErrorCode::NumericOverflow,
-        skia_core::TextErrorCode::ResourceLimit => SkiaErrorCode::ResourceLimit,
-        skia_core::TextErrorCode::AllocationFailed => SkiaErrorCode::AllocationFailed,
-        _ => SkiaErrorCode::TextResolverFailed,
-    };
-    SkiaError::new(code)
-}
 
 /// Limits for one CPU-owned RGBA8 surface and Canvas state stack.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +37,21 @@ impl SurfaceLimits {
             max_bytes,
             max_save_depth,
         })
+    }
+
+    /// Returns the largest permitted pixel count.
+    pub const fn max_pixels(self) -> u64 {
+        self.max_pixels
+    }
+
+    /// Returns the largest permitted surface allocation in bytes.
+    pub const fn max_bytes(self) -> u64 {
+        self.max_bytes
+    }
+
+    /// Returns the largest permitted Canvas save depth.
+    pub const fn max_save_depth(self) -> usize {
+        self.max_save_depth
     }
 }
 
@@ -692,104 +698,24 @@ impl Canvas<'_> {
         origin: Point,
         paint_for_style: &impl Fn(TextStyleId) -> Option<Paint>,
     ) -> Result<(), SkiaError> {
-        for line in layout.lines() {
-            let Some(paragraph) = line.paragraph() else {
-                continue;
-            };
-            let baseline_bits = origin
-                .y()
-                .bits()
-                .checked_add(line.baseline_y_bits())
-                .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-            let line_origin_bits = origin
-                .x()
-                .bits()
-                .checked_add(line.offset_x_bits())
-                .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-            self.draw_shaped_paragraph_resolved(
-                paragraph,
-                provider,
-                Point::new(
-                    Scalar::from_bits(line_origin_bits),
-                    Scalar::from_bits(baseline_bits),
-                ),
-                paint_for_style,
-            )?;
-            if line.advance_x_bits() <= 0 {
-                continue;
-            }
-            if line.decoration_segments().is_empty() {
-                let metrics = [line.underline_metrics(), line.strike_through_metrics()];
-                if metrics.iter().all(Option::is_none) {
-                    continue;
-                }
-                let paint = paint_for_style(TextStyleId::DEFAULT)
-                    .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                for metrics in metrics.into_iter().flatten() {
-                    self.draw_decoration_line(
-                        line_origin_bits,
-                        line_origin_bits
-                            .checked_add(line.advance_x_bits())
-                            .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?,
-                        baseline_bits,
-                        metrics,
-                        line.decoration_style(),
-                        paint,
-                    )?;
-                }
-            } else {
-                for segment in line.decoration_segments() {
-                    let paint = paint_for_style(segment.style_id())
+        for event in text_layout_events(layout, origin)? {
+            match event {
+                TextLayoutEvent::GlyphRun {
+                    style_id,
+                    run,
+                    origin,
+                    offsets_x_bits,
+                } => {
+                    let paint = paint_for_style(style_id)
                         .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
-                    let left_bits = line_origin_bits
-                        .checked_add(segment.left_bits())
-                        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                    let right_bits = line_origin_bits
-                        .checked_add(segment.right_bits())
-                        .ok_or(SkiaError::new(SkiaErrorCode::NumericOverflow))?;
-                    for metrics in [
-                        segment.underline_metrics(),
-                        segment.strike_through_metrics(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    {
-                        self.draw_decoration_line(
-                            left_bits,
-                            right_bits,
-                            baseline_bits,
-                            metrics,
-                            segment.decoration_style(),
-                            paint,
-                        )?;
-                    }
+                    self.draw_positioned_glyph_run(run, offsets_x_bits, origin, provider, paint)?;
+                }
+                TextLayoutEvent::Decoration { style_id, rect } => {
+                    let paint = paint_for_style(style_id)
+                        .ok_or(SkiaError::new(SkiaErrorCode::InvalidResource))?;
+                    self.fill_rect(rect, paint)?;
                 }
             }
-        }
-        Ok(())
-    }
-
-    fn draw_decoration_line(
-        &mut self,
-        left_bits: i32,
-        right_bits: i32,
-        baseline_bits: i32,
-        metrics: skia_core::TextDecorationMetrics,
-        style: skia_core::TextDecorationStyle,
-        paint: Paint,
-    ) -> Result<(), SkiaError> {
-        for rect in text_decoration_rects(left_bits, right_bits, baseline_bits, metrics, style)
-            .map_err(map_text_decoration_error)?
-        {
-            self.fill_rect(
-                Rect::new(
-                    Scalar::from_bits(rect.left_bits()),
-                    Scalar::from_bits(rect.top_bits()),
-                    Scalar::from_bits(rect.right_bits()),
-                    Scalar::from_bits(rect.bottom_bits()),
-                )?,
-                paint,
-            )?;
         }
         Ok(())
     }

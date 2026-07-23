@@ -6,11 +6,11 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-skia-error = { path = "../error" }
-skia-geometry = { path = "../geometry" }
-skia-image = { path = "../image" }
-skia-path = { path = "../path" }
-skia-text = { path = "../text", optional = true }
+skia-error = { workspace = true }
+skia-geometry = { workspace = true }
+skia-image = { workspace = true }
+skia-path = { workspace = true }
+skia-text = { workspace = true, optional = true }
 
 [features]
 default = ["text"]

@@ -6,13 +6,13 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-skia-core = { path = "../../core" }
-skia-gpu = { path = ".." }
-skia-image = { path = "../../image" }
+skia-core = { workspace = true, features = ["text"] }
+skia-gpu = { workspace = true }
+skia-image = { workspace = true }
 
 [dev-dependencies]
-skia-cpu = { path = "../../cpu" }
-skia-gpu = { path = "..", features = ["software"] }
+skia-cpu = { workspace = true }
+skia-gpu = { workspace = true, features = ["software"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-skia-metal = { path = "../metal" }
+skia-metal = { workspace = true }

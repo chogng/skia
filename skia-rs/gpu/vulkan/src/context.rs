@@ -4,6 +4,7 @@ use std::{
 };
 
 use ash::{Entry, vk};
+use skia_gpu::GpuCapabilities;
 
 use crate::{VulkanError, VulkanErrorCode};
 
@@ -15,6 +16,7 @@ pub(crate) struct VulkanContext {
     queue_family_index: u32,
     command_pool: vk::CommandPool,
     memory_properties: vk::PhysicalDeviceMemoryProperties,
+    capabilities: GpuCapabilities,
     device_name: String,
     validation_enabled: bool,
     queue_lock: Mutex<()>,
@@ -60,12 +62,24 @@ impl VulkanContext {
         let instance = unsafe { entry.create_instance(&instance_info, None) }
             .map_err(|_| VulkanError::new(VulkanErrorCode::InstanceCreationFailed))?;
         let selected = select_device(&instance);
-        let (physical_device, queue_family_index, device_name) = match selected {
+        let (physical_device, queue_family_index, device_name, device_limits) = match selected {
             Ok(selected) => selected,
             Err(error) => {
                 // SAFETY: instance was created above and has no child device.
                 unsafe { instance.destroy_instance(None) };
                 return Err(error);
+            }
+        };
+        let capabilities = match GpuCapabilities::new(
+            device_limits.max_compute_work_group_count[0].saturating_mul(8),
+            device_limits.max_compute_work_group_count[1].saturating_mul(8),
+            u64::from(device_limits.max_storage_buffer_range),
+        ) {
+            Ok(capabilities) => capabilities,
+            Err(_) => {
+                // SAFETY: instance was created above and has no child device.
+                unsafe { instance.destroy_instance(None) };
+                return Err(VulkanError::new(VulkanErrorCode::DeviceUnavailable));
             }
         };
         let priorities = [1.0_f32];
@@ -110,6 +124,7 @@ impl VulkanContext {
             queue_family_index,
             command_pool,
             memory_properties,
+            capabilities,
             device_name,
             validation_enabled,
             queue_lock: Mutex::new(()),
@@ -130,6 +145,10 @@ impl VulkanContext {
 
     pub(crate) const fn validation_enabled(&self) -> bool {
         self.validation_enabled
+    }
+
+    pub(crate) const fn capabilities(&self) -> GpuCapabilities {
+        self.capabilities
     }
 
     pub(crate) fn memory_type(
@@ -228,7 +247,7 @@ impl Drop for VulkanContext {
 
 fn select_device(
     instance: &ash::Instance,
-) -> Result<(vk::PhysicalDevice, u32, String), VulkanError> {
+) -> Result<(vk::PhysicalDevice, u32, String, vk::PhysicalDeviceLimits), VulkanError> {
     // SAFETY: instance is valid and enumeration writes into ash-owned storage.
     let devices = unsafe { instance.enumerate_physical_devices() }
         .map_err(|_| VulkanError::new(VulkanErrorCode::DeviceUnavailable))?;
@@ -241,7 +260,7 @@ fn select_device(
             let queue_family = queues
                 .iter()
                 .position(|queue| {
-                    queue.queue_count > 0 && queue.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                    queue.queue_count > 0 && queue.queue_flags.contains(vk::QueueFlags::COMPUTE)
                 })
                 .and_then(|index| u32::try_from(index).ok())?;
             // SAFETY: physical_device was returned by this instance.
@@ -257,9 +276,15 @@ fn select_device(
             let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
                 .to_string_lossy()
                 .into_owned();
-            Some((score, physical_device, queue_family, name))
+            Some((
+                score,
+                physical_device,
+                queue_family,
+                name,
+                properties.limits,
+            ))
         })
-        .max_by_key(|(score, _, _, _)| *score)
-        .map(|(_, device, queue, name)| (device, queue, name))
+        .max_by_key(|(score, _, _, _, _)| *score)
+        .map(|(_, device, queue, name, limits)| (device, queue, name, limits))
         .ok_or(VulkanError::new(VulkanErrorCode::DeviceUnavailable))
 }
