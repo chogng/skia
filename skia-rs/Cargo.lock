@@ -857,6 +857,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "skia-xps"
+version = "0.1.0"
+dependencies = [
+ "skia-codec",
+ "skia-core",
+ "skia-cpu",
+ "skia-image",
+]
+
+[[package]]
 name = "skrifa"
 version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

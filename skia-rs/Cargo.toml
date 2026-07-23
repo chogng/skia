@@ -16,6 +16,7 @@ members = [
     "tessellation",
     "text",
     "text/system",
+    "xps",
 ]
 resolver = "3"
 
@@ -42,6 +43,7 @@ skia-system-fonts = { path = "text/system" }
 skia-tessellation = { path = "tessellation" }
 skia-text = { path = "text" }
 skia-vulkan = { path = "gpu/vulkan" }
+skia-xps = { path = "xps" }
 
 # External
 ash = { version = "0.38.0", default-features = false }

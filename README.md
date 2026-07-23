@@ -29,6 +29,8 @@ flowchart LR
   api --> effects["Built-in effects"]
   api --> cpu["Skia CPU executor"]
   api --> gpu["Skia GPU executor"]
+  api --> pdf["PDF document writer"]
+  api --> xps["XPS / OpenXPS writer"]
   gpu --> metal["Metal backend"]
   gpu --> vulkan["Vulkan backend"]
   path --> tessellation["Shared tessellation"]
@@ -49,7 +51,7 @@ availability; there is no separate `portable` platform, crate, or feature.
 
 | Capability | Windows | Linux | macOS |
 | --- | --- | --- | --- |
-| Portable crates, CPU, text, codecs, and shared GPU contracts | Yes | Yes | Yes |
+| Portable crates, CPU, text, codecs, document writers, and shared GPU contracts | Yes | Yes | Yes |
 | Vulkan backend | Yes | Yes | No |
 | Metal backend | No | No | Yes |
 
@@ -63,8 +65,8 @@ at the application composition boundary; Bazel expresses the same boundary with
 - `skia-rs/Cargo.toml` is a virtual workspace manifest, not a package. There is
   no root facade crate: consumers depend directly on the public responsibility
   crates they use, such as `skia-core`, `skia-effects`, `skia-cpu`,
-  `skia-codec`, or `skia-gpu`. Skia crates may depend on each other, but never
-  on a caller-specific document crate or semantic type.
+  `skia-codec`, `skia-pdf`, `skia-xps`, or `skia-gpu`. Skia crates may depend
+  on each other, but never on a caller-specific document crate or semantic type.
 - The application composition root may additionally depend on `skia-rs/gpu`,
   `skia-rs/gpu/text`, and one selected platform executor such as `skia-rs/gpu/metal` or
   `skia-rs/gpu/vulkan`. These crates form the public renderer-integration SPI: they own device
@@ -226,10 +228,32 @@ searchable PDF text requires complete font subsetting, metrics, CID mapping,
 and ToUnicode support and will not be added piecemeal.
 
 PDF/A, tagged/structured PDF, outlines/bookmarks, encryption, and signatures
-are not current features. XPS may later share a small multi-page lifecycle
-crate with PDF once a second implementation proves that abstraction useful.
-SVG remains a separate single-canvas output responsibility rather than being
-forced into this multi-page API.
+are not current features. SVG remains a separate single-canvas output
+responsibility rather than being forced into this multi-page API.
+
+## XPS and OpenXPS output
+
+`skia-xps::XpsDocument` emits both Microsoft XPS 1.0 (`.xps`) and ECMA-388
+OpenXPS (`.oxps`) from the same platform-independent implementation. The
+default is `XpsFormat::OpenXps`; selecting `XpsFormat::Xps10` changes the fixed
+payload namespace and relationship types without changing drawing behavior.
+All internal references are relative, satisfying OpenXPS while remaining valid
+for XPS 1.0.
+
+The writer mirrors the explicit transactional page lifecycle of the PDF crate
+without introducing a shared lifecycle crate prematurely. It serializes a
+deterministic OPC package with stable part order, classic ZIP bounds, zeroed
+timestamps, fixed-document sequence/document/page parts, and required-resource
+relationships. No Windows XPS Object Model or COM runtime is required.
+
+The first native mapping covers an initial clear, solid rectangle and path
+fills, quadratic and cubic geometry, affine transforms, solid center strokes,
+and sRGB images encoded as PNG-backed `ImageBrush` resources. Page content
+boxes become fixed-page canvas clips. Command clips, layers, effects, dashes,
+non-source-over blending, conics, and other unsupported semantics either fail
+explicitly or use the configured bounded whole-page CPU fallback. Glyph runs
+remain `UnsupportedText` until the API owns a complete font embedding,
+obfuscation, glyph-index, and licensing policy; text is never silently omitted.
 
 ## Text implementation boundary
 
