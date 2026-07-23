@@ -1,7 +1,7 @@
-use skia_error::{SkiaError, SkiaErrorCode};
-use skia_geometry::{Point, Rect, Scalar, Transform};
-use skia_path::{Path, PathBuilder, PathVerb};
-use skia_tessellation::{
+use skia_core::{
+    Path, PathBuilder, PathVerb, Point, Rect, Scalar, SkiaError, SkiaErrorCode, Transform,
+};
+use skia_effects::{
     ComposePathEffect, CornerPathEffect, DashPathEffect, DiscretePathEffect, PathEffect,
     PathEffectLimits, SumPathEffect, TrimPathEffect, apply_path_effect, compose_path_effects,
     corner_path, dash_path, discrete_path, trim_path,

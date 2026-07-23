@@ -3,6 +3,7 @@ members = [
     "codec",
     "core",
     "cpu",
+    "effects",
     "error",
     "geometry",
     "gpu",
@@ -27,6 +28,7 @@ rust-version = "1.89"
 skia-codec = { path = "codec" }
 skia-core = { path = "core", default-features = false }
 skia-cpu = { path = "cpu" }
+skia-effects = { path = "effects" }
 skia-error = { path = "error" }
 skia-geometry = { path = "geometry" }
 skia-gpu = { path = "gpu" }

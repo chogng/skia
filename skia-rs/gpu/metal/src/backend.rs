@@ -30,10 +30,11 @@ use skia_gpu::{
 };
 use skia_image::Image;
 
-use crate::clip::ClipRenderer;
+use self::clip::ClipRenderer;
 
 const DEFAULT_ATLAS_CACHE_CAPACITY: usize = 8;
 const DEFAULT_ATLAS_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TEXTURE_DIMENSION_2D: u32 = 16_384;
 
 /// Stable machine-readable Metal backend failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -343,12 +344,15 @@ impl GpuBackend for MetalBackend {
     type Error = MetalError;
 
     fn capabilities(&self) -> GpuCapabilities {
-        let dimension = self.device.max_2d_texture_size();
-        let max_bytes = u64::from(dimension)
-            .saturating_mul(u64::from(dimension))
+        let max_bytes = u64::from(MAX_TEXTURE_DIMENSION_2D)
+            .saturating_mul(u64::from(MAX_TEXTURE_DIMENSION_2D))
             .saturating_mul(4);
-        GpuCapabilities::new(dimension, dimension, max_bytes)
-            .expect("Metal reports a positive 2D texture limit")
+        GpuCapabilities::new(
+            MAX_TEXTURE_DIMENSION_2D,
+            MAX_TEXTURE_DIMENSION_2D,
+            max_bytes,
+        )
+        .expect("Metal reports a positive 2D texture limit")
     }
 
     fn create_surface(

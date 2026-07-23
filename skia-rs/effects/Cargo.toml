@@ -1,0 +1,10 @@
+[package]
+name = "skia-effects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+skia-core = { workspace = true }
+skia-tessellation = { workspace = true }

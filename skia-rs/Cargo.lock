@@ -735,6 +735,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "skia-effects"
+version = "0.1.0"
+dependencies = [
+ "skia-core",
+ "skia-tessellation",
+]
+
+[[package]]
 name = "skia-error"
 version = "0.1.0"
 

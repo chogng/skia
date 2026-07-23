@@ -26,11 +26,14 @@ flowchart LR
   api --> image["Image resources"]
   api --> codec["Image codecs"]
   api --> core["Skia core semantics"]
+  api --> effects["Built-in effects"]
   api --> cpu["Skia CPU executor"]
   api --> gpu["Skia GPU executor"]
   gpu --> metal["Metal backend"]
   gpu --> vulkan["Vulkan backend"]
   path --> tessellation["Shared tessellation"]
+  core --> effects
+  tessellation --> effects
   tessellation --> cpu
   tessellation --> metal
   tessellation --> vulkan
@@ -59,9 +62,9 @@ at the application composition boundary; Bazel expresses the same boundary with
 
 - `skia-rs/Cargo.toml` is a virtual workspace manifest, not a package. There is
   no root facade crate: consumers depend directly on the public responsibility
-  crates they use, such as `skia-core`, `skia-cpu`, `skia-codec`, or `skia-gpu`.
-  Skia crates may depend on each other, but never on a caller-specific document
-  crate or semantic type.
+  crates they use, such as `skia-core`, `skia-effects`, `skia-cpu`,
+  `skia-codec`, or `skia-gpu`. Skia crates may depend on each other, but never
+  on a caller-specific document crate or semantic type.
 - The application composition root may additionally depend on `skia-rs/gpu`,
   `skia-rs/gpu/text`, and one selected platform executor such as `skia-rs/gpu/metal` or
   `skia-rs/gpu/vulkan`. These crates form the public renderer-integration SPI: they own device
@@ -78,6 +81,12 @@ at the application composition boundary; Bazel expresses the same boundary with
   graphics API, caller-specific parser, document model, or Scene. Its default
   `text` feature adds glyph-run display-list resources; GPU crates disable that
   feature because generic atlas submission does not need shaping types.
+- `skia-rs/effects` contains the built-in effect implementation and factory
+  surface. `skia-core` owns stable effect value and extension contracts so it
+  never depends on concrete effects; `skia-effects` depends one-way on core and
+  shared tessellation. It currently provides dash, trim, corner, discrete,
+  compose, and sum path effects together with built-in gradient, color-filter,
+  and image-filter factories.
 - `skia-rs/tessellation` owns backend-neutral path-to-polyline and path-to-mesh
   algorithms. Its bounded fixed-step curve flattener is shared by CPU and
   hardware backends; backend crates own only their raster or GPU buffer format.
@@ -263,15 +272,18 @@ edge formats remain local.
 `path_boolean` exposes bounded union, intersection, difference, and XOR over
 flattened Q16.16 contours, including holes and self-intersections; empty set
 results are represented as `None`, while non-empty output uses non-zero fill.
-`trim_path`, `corner_path`, `discrete_path`, and `dash_path` provide bounded path
-effects for normalized arc-length trimming, deterministic quadratic corner
-rounding, seeded fixed-point contour perturbation, and dashed centerlines. Trim
+`skia-effects` provides `trim_path`, `corner_path`, `discrete_path`, and
+`dash_path` as bounded path effects for normalized arc-length trimming,
+deterministic quadratic corner rounding, seeded fixed-point contour
+perturbation, and dashed centerlines. Trim
 supports wrap-around intervals; corner radii are clamped to half of each
 adjacent edge; discrete resampling keeps open endpoints and closed seams stable.
-All implement the extensible `PathEffect` contract and can run left-to-right
-through `compose_path_effects` or nest through `ComposePathEffect`; parallel
-results can be concatenated with `SumPathEffect`. Input transforms are never
-reapplied between stages.
+All implement the extensible `skia-core::PathEffect` contract and can run
+left-to-right through `compose_path_effects` or nest through
+`ComposePathEffect`; parallel results can be concatenated with
+`SumPathEffect`. Input transforms are never reapplied between stages. Core owns
+the contract and resource ceilings, while the concrete transformation
+algorithms live in `skia-effects` and reuse `skia-tessellation`.
 `skia-tessellation::stroke_to_path` produces a
 deterministic non-zero triangle-fill path.
 

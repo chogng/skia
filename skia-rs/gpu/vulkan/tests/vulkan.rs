@@ -389,7 +389,9 @@ fn backend_or_skip() -> Option<VulkanBackend> {
         Err(error)
             if matches!(
                 error.code(),
-                VulkanErrorCode::LoaderUnavailable | VulkanErrorCode::DeviceUnavailable
+                VulkanErrorCode::LoaderUnavailable
+                    | VulkanErrorCode::InstanceCreationFailed
+                    | VulkanErrorCode::DeviceUnavailable
             ) && std::env::var_os("SKIA_REQUIRE_VULKAN_DEVICE").is_none() =>
         {
             None

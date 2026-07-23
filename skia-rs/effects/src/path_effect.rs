@@ -1,10 +1,10 @@
-use skia_error::{SkiaError, SkiaErrorCode};
-use skia_geometry::{Point, Scalar, Transform};
-use skia_path::{Path, PathBuilder, StrokeOptions};
-
-use crate::{
-    DEFAULT_CURVE_STEPS, FlattenedContour, FlatteningLimits, PathFlattener, TessellationError,
-    TessellationErrorCode, interpolate_stroke_segment, stroke_segment_length_bits,
+use skia_core::{
+    Path, PathBuilder, PathEffect, PathEffectLimits, Point, Scalar, SkiaError, SkiaErrorCode,
+    StrokeOptions, Transform, apply_path_effect,
+};
+use skia_tessellation::{
+    FlattenedContour, FlatteningLimits, PathFlattener, TessellationError, TessellationErrorCode,
+    interpolate_stroke_segment, stroke_segment_length_bits,
 };
 
 const UNIT_BITS: i32 = 1 << 16;
@@ -54,21 +54,6 @@ pub struct ComposePathEffect<'a> {
 pub struct SumPathEffect<'a> {
     first: &'a dyn PathEffect,
     second: &'a dyn PathEffect,
-}
-
-/// Extensible operation that maps one path to another bounded path.
-///
-/// Implementations receive the transform only for the path entering that
-/// operation. A composed pipeline applies its transform to the first stage and
-/// passes identity to later stages because their inputs are already mapped.
-pub trait PathEffect {
-    /// Applies this effect and returns `None` when it removes all geometry.
-    fn apply(
-        &self,
-        path: &Path,
-        transform: Transform,
-        limits: PathEffectLimits,
-    ) -> Result<Option<Path>, SkiaError>;
 }
 
 impl DashPathEffect {
@@ -247,92 +232,6 @@ impl PathEffect for SumPathEffect<'_> {
     }
 }
 
-/// Resource ceilings for one path-effect operation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct PathEffectLimits {
-    max_contours: usize,
-    max_points: usize,
-    max_output_verbs: usize,
-    curve_steps: u32,
-}
-
-impl PathEffectLimits {
-    /// Creates positive flattening and output ceilings.
-    pub fn new(
-        max_contours: usize,
-        max_points: usize,
-        max_output_verbs: usize,
-        curve_steps: u32,
-    ) -> Result<Self, SkiaError> {
-        if max_contours == 0 || max_points == 0 || max_output_verbs == 0 || curve_steps == 0 {
-            return Err(SkiaError::new(SkiaErrorCode::InvalidLimits));
-        }
-        Ok(Self {
-            max_contours,
-            max_points,
-            max_output_verbs,
-            curve_steps,
-        })
-    }
-}
-
-impl Default for PathEffectLimits {
-    fn default() -> Self {
-        Self {
-            max_contours: 4_096,
-            max_points: 1_048_576,
-            max_output_verbs: 1_048_576,
-            curve_steps: DEFAULT_CURVE_STEPS,
-        }
-    }
-}
-
-/// Applies one effect through the shared path-effect contract.
-pub fn apply_path_effect(
-    path: &Path,
-    effect: &dyn PathEffect,
-    transform: Transform,
-    limits: PathEffectLimits,
-) -> Result<Option<Path>, SkiaError> {
-    let output = effect.apply(path, transform, limits)?;
-    if output
-        .as_ref()
-        .is_some_and(|path| path.verbs().len() > limits.max_output_verbs)
-    {
-        return Err(SkiaError::new(SkiaErrorCode::ResourceLimit));
-    }
-    Ok(output)
-}
-
-/// Applies effects from left to right with the same per-stage resource limits.
-///
-/// The transform is consumed by the first stage only. An empty effect slice is
-/// an identity pipeline: it returns a transformed path while still enforcing
-/// `max_output_verbs`.
-pub fn compose_path_effects(
-    path: &Path,
-    effects: &[&dyn PathEffect],
-    transform: Transform,
-    limits: PathEffectLimits,
-) -> Result<Option<Path>, SkiaError> {
-    let Some((first, rest)) = effects.split_first() else {
-        if path.verbs().len() > limits.max_output_verbs {
-            return Err(SkiaError::new(SkiaErrorCode::ResourceLimit));
-        }
-        return path.transformed(transform).map(Some);
-    };
-    let Some(mut current) = apply_path_effect(path, *first, transform, limits)? else {
-        return Ok(None);
-    };
-    for effect in rest {
-        let Some(next) = apply_path_effect(&current, *effect, Transform::IDENTITY, limits)? else {
-            return Ok(None);
-        };
-        current = next;
-    }
-    Ok(Some(current))
-}
-
 /// Splits every transformed contour into visible dash centerline pieces.
 ///
 /// Curves are flattened with the configured fixed resolution. Closed seams
@@ -343,14 +242,17 @@ pub fn dash_path(
     transform: Transform,
     limits: PathEffectLimits,
 ) -> Result<Option<Path>, SkiaError> {
-    let flattening =
-        FlatteningLimits::new(limits.max_contours, limits.max_points, limits.curve_steps)
-            .map_err(map_tessellation_error)?;
+    let flattening = FlatteningLimits::new(
+        limits.max_contours(),
+        limits.max_points(),
+        limits.curve_steps(),
+    )
+    .map_err(map_tessellation_error)?;
     let contours = PathFlattener::new(flattening)
         .flatten(path, transform)
         .map_err(map_tessellation_error)?;
-    let pieces = crate::stroke_pieces(contours.contours(), &effect.options)?;
-    let mut builder = PathBuilder::new(limits.max_output_verbs)?;
+    let pieces = skia_tessellation::stroke_pieces(contours.contours(), &effect.options)?;
+    let mut builder = PathBuilder::new(limits.max_output_verbs())?;
     let mut emitted = false;
     for piece in pieces {
         let Some(first) = piece.points().first().copied() else {
@@ -380,7 +282,7 @@ fn concatenate_effect_outputs(
     if first.is_none() && second.is_none() {
         return Ok(None);
     }
-    let mut builder = PathBuilder::new(limits.max_output_verbs)?;
+    let mut builder = PathBuilder::new(limits.max_output_verbs())?;
     if let Some(path) = first {
         builder.append_path(path)?;
     }
@@ -404,9 +306,12 @@ pub fn trim_path(
     if effect.start == effect.end {
         return Ok(None);
     }
-    let flattening =
-        FlatteningLimits::new(limits.max_contours, limits.max_points, limits.curve_steps)
-            .map_err(map_tessellation_error)?;
+    let flattening = FlatteningLimits::new(
+        limits.max_contours(),
+        limits.max_points(),
+        limits.curve_steps(),
+    )
+    .map_err(map_tessellation_error)?;
     let contours = PathFlattener::new(flattening)
         .flatten(path, transform)
         .map_err(map_tessellation_error)?;
@@ -426,7 +331,7 @@ pub fn trim_path(
             .and_then(|value| value.checked_add(usize::from(piece.closed)))
             .ok_or(SkiaError::new(SkiaErrorCode::ResourceLimit))
     })?;
-    if verb_count == 0 || verb_count > limits.max_output_verbs {
+    if verb_count == 0 || verb_count > limits.max_output_verbs() {
         return Err(SkiaError::new(SkiaErrorCode::ResourceLimit));
     }
     let mut builder = PathBuilder::new(verb_count)?;
@@ -454,13 +359,16 @@ pub fn corner_path(
     transform: Transform,
     limits: PathEffectLimits,
 ) -> Result<Option<Path>, SkiaError> {
-    let flattening =
-        FlatteningLimits::new(limits.max_contours, limits.max_points, limits.curve_steps)
-            .map_err(map_tessellation_error)?;
+    let flattening = FlatteningLimits::new(
+        limits.max_contours(),
+        limits.max_points(),
+        limits.curve_steps(),
+    )
+    .map_err(map_tessellation_error)?;
     let contours = PathFlattener::new(flattening)
         .flatten(path, transform)
         .map_err(map_tessellation_error)?;
-    let mut builder = PathBuilder::new(limits.max_output_verbs)?;
+    let mut builder = PathBuilder::new(limits.max_output_verbs())?;
     let mut emitted = false;
     for contour in contours.contours() {
         let points = normalized_points(contour.points(), contour.is_closed())?;
@@ -500,13 +408,16 @@ pub fn discrete_path(
     transform: Transform,
     limits: PathEffectLimits,
 ) -> Result<Option<Path>, SkiaError> {
-    let flattening =
-        FlatteningLimits::new(limits.max_contours, limits.max_points, limits.curve_steps)
-            .map_err(map_tessellation_error)?;
+    let flattening = FlatteningLimits::new(
+        limits.max_contours(),
+        limits.max_points(),
+        limits.curve_steps(),
+    )
+    .map_err(map_tessellation_error)?;
     let contours = PathFlattener::new(flattening)
         .flatten(path, transform)
         .map_err(map_tessellation_error)?;
-    let mut builder = PathBuilder::new(limits.max_output_verbs)?;
+    let mut builder = PathBuilder::new(limits.max_output_verbs())?;
     let mut emitted_verbs = 0_usize;
     let mut emitted = false;
     for (contour_index, contour) in contours.contours().iter().enumerate() {
@@ -534,7 +445,7 @@ pub fn discrete_path(
         emitted_verbs = emitted_verbs
             .checked_add(required_verbs)
             .ok_or(SkiaError::new(SkiaErrorCode::ResourceLimit))?;
-        if emitted_verbs > limits.max_output_verbs {
+        if emitted_verbs > limits.max_output_verbs() {
             return Err(SkiaError::new(SkiaErrorCode::ResourceLimit));
         }
 

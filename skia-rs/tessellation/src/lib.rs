@@ -11,18 +11,12 @@
 
 mod boolean;
 mod flatten;
-mod path_effect;
 mod stroke;
 mod tessellator;
 
 pub use boolean::{PathBooleanLimits, PathBooleanOp, path_boolean};
 pub use flatten::{
     DEFAULT_CURVE_STEPS, FlattenedContour, FlattenedPath, FlatteningLimits, PathFlattener,
-};
-pub use path_effect::{
-    ComposePathEffect, CornerPathEffect, DashPathEffect, DiscretePathEffect, PathEffect,
-    PathEffectLimits, SumPathEffect, TrimPathEffect, apply_path_effect, compose_path_effects,
-    corner_path, dash_path, discrete_path, trim_path,
 };
 pub use stroke::{
     StrokeMesh, StrokePiece, interpolate_stroke_segment, stroke_contains, stroke_contours_to_path,
