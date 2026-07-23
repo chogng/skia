@@ -427,7 +427,7 @@ impl GpuBackend for MetalBackend {
                     encode_clear(command_buffer, &layer_surface, Color::TRANSPARENT)?;
                     layers.push(MetalLayer {
                         surface: layer_surface,
-                        options: *options,
+                        options: options.clone(),
                         transform: *transform,
                         scissor: *scissor,
                         clip: *clip,

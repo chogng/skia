@@ -91,7 +91,7 @@ impl GpuBackend for SoftwareGpuBackend {
                     canvas.save().map_err(map_error)?;
                     if let Err(error) =
                         apply_state(&mut canvas, commands, *transform, *scissor, *clip)
-                            .and_then(|()| canvas.save_layer(*options))
+                            .and_then(|()| canvas.save_layer(options.clone()))
                     {
                         let _ = canvas.restore();
                         return Err(map_error(error));

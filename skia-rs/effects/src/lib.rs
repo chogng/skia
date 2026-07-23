@@ -18,6 +18,7 @@ pub use path_effect::{
     TrimPathEffect, corner_path, dash_path, discrete_path, trim_path,
 };
 pub use skia_core::{
-    ColorFilter, ColorMatrix, Gradient, GradientGeometry, GradientStop, ImageFilter, PathEffect,
-    PathEffectHandle, PathEffectLimits, TileMode, apply_path_effect, compose_path_effects,
+    ColorFilter, ColorFilterHandle, ColorMatrix, Gradient, GradientGeometry, GradientStop,
+    ImageFilter, ImageFilterHandle, PathEffect, PathEffectHandle, PathEffectLimits, TileMode,
+    apply_path_effect, compose_path_effects,
 };

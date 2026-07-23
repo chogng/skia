@@ -1,6 +1,6 @@
 /// Built-in color-filter factories.
 pub mod color_filters {
-    use skia_core::{BlendMode, Color, ColorFilter, ColorMatrix};
+    use skia_core::{BlendMode, Color, ColorFilter, ColorFilterHandle, ColorMatrix};
 
     /// Creates a fixed-point 4×5 straight-RGBA matrix filter.
     pub const fn matrix(matrix: ColorMatrix) -> ColorFilter {
@@ -11,11 +11,16 @@ pub mod color_filters {
     pub const fn blend(color: Color, mode: BlendMode) -> ColorFilter {
         ColorFilter::Blend { color, mode }
     }
+
+    /// Wraps a built-in filter for shared paint or display-list ownership.
+    pub fn handle(filter: ColorFilter) -> ColorFilterHandle {
+        ColorFilterHandle::new(filter)
+    }
 }
 
 /// Built-in whole-layer image-filter factories.
 pub mod image_filters {
-    use skia_core::{ColorFilter, ImageFilter, SkiaError};
+    use skia_core::{ColorFilter, ImageFilter, ImageFilterHandle, SkiaError};
 
     /// Creates a per-pixel color-filter image effect.
     pub const fn color(filter: ColorFilter) -> ImageFilter {
@@ -25,6 +30,11 @@ pub mod image_filters {
     /// Creates a separable transparent-edge box blur.
     pub const fn box_blur(radius: u8) -> Result<ImageFilter, SkiaError> {
         ImageFilter::box_blur(radius)
+    }
+
+    /// Wraps a built-in filter for shared layer or display-list ownership.
+    pub fn handle(filter: ImageFilter) -> ImageFilterHandle {
+        ImageFilterHandle::new(filter)
     }
 }
 

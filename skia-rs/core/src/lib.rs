@@ -10,6 +10,9 @@
 
 mod clip;
 mod display_list;
+#[cfg(test)]
+#[path = "effect_handle_tests.rs"]
+mod effect_handle_tests;
 mod paint;
 mod path_effect;
 #[cfg(test)]
@@ -26,8 +29,8 @@ pub use clip::ClipOp;
 pub use display_list::GlyphRunId;
 pub use display_list::{DisplayList, DisplayListBuilder, DrawCommand, ImageId, PathId};
 pub use paint::{
-    BlendMode, Color, ColorFilter, ColorMatrix, Gradient, GradientGeometry, GradientStop,
-    ImageFilter, Paint, SaveLayerOptions, TileMode,
+    BlendMode, Color, ColorFilter, ColorFilterHandle, ColorMatrix, Gradient, GradientGeometry,
+    GradientStop, ImageFilter, ImageFilterHandle, Paint, SaveLayerOptions, TileMode,
 };
 pub use path_effect::{
     PathEffect, PathEffectHandle, PathEffectLimits, apply_path_effect, compose_path_effects,

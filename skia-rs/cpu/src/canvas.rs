@@ -154,7 +154,7 @@ impl Surface {
             match command {
                 DrawCommand::Clear(color) => canvas.clear(*color),
                 DrawCommand::Save => canvas.save()?,
-                DrawCommand::SaveLayer(options) => canvas.save_layer(*options)?,
+                DrawCommand::SaveLayer(options) => canvas.save_layer(options.clone())?,
                 DrawCommand::Restore => canvas.restore()?,
                 DrawCommand::ClipRect { rect, op } => {
                     canvas.clip_rect_with_op(ClipRect::new(*rect), *op)?
@@ -249,7 +249,7 @@ struct State {
     mask: Option<Arc<[u8]>>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct ActiveLayer {
     options: SaveLayerOptions,
     bounds: DeviceRect,

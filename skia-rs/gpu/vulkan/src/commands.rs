@@ -56,7 +56,7 @@ pub(crate) fn submit(
                 pixels.clear(Color::TRANSPARENT)?;
                 layers.push(Layer {
                     pixels,
-                    options: *options,
+                    options: options.clone(),
                     transform: *transform,
                     scissor: *scissor,
                     clip: *clip,

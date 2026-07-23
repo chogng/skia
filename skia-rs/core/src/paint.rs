@@ -1,6 +1,7 @@
 use crate::PathEffectHandle;
 use skia_error::{SkiaError, SkiaErrorCode};
 use skia_geometry::{Point, Scalar};
+use std::sync::Arc;
 
 const GRADIENT_SCALE: i128 = 1 << 16;
 
@@ -445,6 +446,36 @@ impl ColorFilter {
     }
 }
 
+/// Shared, immutable ownership of one built-in [`ColorFilter`].
+///
+/// The handle lets paints and display lists share one filter allocation while
+/// preserving the value filter that CPU and GPU backends already understand.
+/// It also reserves a stable ownership boundary for future non-value filters.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ColorFilterHandle {
+    filter: Arc<ColorFilter>,
+}
+
+impl ColorFilterHandle {
+    /// Wraps one built-in color filter in shared ownership.
+    pub fn new(filter: ColorFilter) -> Self {
+        Self {
+            filter: Arc::new(filter),
+        }
+    }
+
+    /// Returns the backend-neutral filter value.
+    pub fn filter(&self) -> ColorFilter {
+        *self.filter
+    }
+}
+
+impl From<ColorFilter> for ColorFilterHandle {
+    fn from(filter: ColorFilter) -> Self {
+        Self::new(filter)
+    }
+}
+
 /// Whole-layer image processing performed before restore compositing.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ImageFilter {
@@ -467,13 +498,42 @@ impl ImageFilter {
     }
 }
 
+/// Shared, immutable ownership of one built-in [`ImageFilter`].
+///
+/// Layers can retain this handle inside a display list without requiring their
+/// callers to keep the original filter value alive.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ImageFilterHandle {
+    filter: Arc<ImageFilter>,
+}
+
+impl ImageFilterHandle {
+    /// Wraps one built-in image filter in shared ownership.
+    pub fn new(filter: ImageFilter) -> Self {
+        Self {
+            filter: Arc::new(filter),
+        }
+    }
+
+    /// Returns the backend-neutral filter value.
+    pub fn filter(&self) -> ImageFilter {
+        *self.filter
+    }
+}
+
+impl From<ImageFilter> for ImageFilterHandle {
+    fn from(filter: ImageFilter) -> Self {
+        Self::new(filter)
+    }
+}
+
 /// Restore-time compositing policy for one isolated layer.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SaveLayerOptions {
     bounds: Option<skia_geometry::Rect>,
     opacity: u8,
     blend_mode: BlendMode,
-    filter: Option<ImageFilter>,
+    filter: Option<ImageFilterHandle>,
 }
 
 impl SaveLayerOptions {
@@ -506,29 +566,40 @@ impl SaveLayerOptions {
     }
 
     /// Selects one restore-time image filter.
-    pub const fn with_filter(mut self, filter: ImageFilter) -> Self {
+    pub fn with_filter(mut self, filter: ImageFilter) -> Self {
+        self.filter = Some(ImageFilterHandle::new(filter));
+        self
+    }
+
+    /// Selects a shared restore-time image filter.
+    pub fn with_filter_handle(mut self, filter: ImageFilterHandle) -> Self {
         self.filter = Some(filter);
         self
     }
 
     /// Returns optional logical layer bounds.
-    pub const fn bounds(self) -> Option<skia_geometry::Rect> {
+    pub const fn bounds(&self) -> Option<skia_geometry::Rect> {
         self.bounds
     }
 
     /// Returns restore-time source opacity.
-    pub const fn opacity(self) -> u8 {
+    pub const fn opacity(&self) -> u8 {
         self.opacity
     }
 
     /// Returns restore-time compositing mode.
-    pub const fn blend_mode(self) -> BlendMode {
+    pub const fn blend_mode(&self) -> BlendMode {
         self.blend_mode
     }
 
     /// Returns the optional restore-time filter.
-    pub const fn filter(self) -> Option<ImageFilter> {
-        self.filter
+    pub fn filter(&self) -> Option<ImageFilter> {
+        self.filter.as_ref().map(ImageFilterHandle::filter)
+    }
+
+    /// Borrows the optional shared restore-time image filter.
+    pub fn filter_handle(&self) -> Option<&ImageFilterHandle> {
+        self.filter.as_ref()
     }
 }
 
@@ -643,7 +714,7 @@ pub struct Paint {
     color: Color,
     blend_mode: BlendMode,
     gradient: Option<Gradient>,
-    color_filter: Option<ColorFilter>,
+    color_filter: Option<ColorFilterHandle>,
     path_effect: Option<PathEffectHandle>,
 }
 
@@ -707,13 +778,19 @@ impl Paint {
     }
 
     /// Selects a pre-compositing color filter.
-    pub const fn with_color_filter(mut self, color_filter: ColorFilter) -> Self {
+    pub fn with_color_filter(mut self, color_filter: ColorFilter) -> Self {
+        self.color_filter = Some(ColorFilterHandle::new(color_filter));
+        self
+    }
+
+    /// Selects a shared pre-compositing color filter.
+    pub fn with_color_filter_handle(mut self, color_filter: ColorFilterHandle) -> Self {
         self.color_filter = Some(color_filter);
         self
     }
 
     /// Removes the pre-compositing color filter.
-    pub const fn without_color_filter(mut self) -> Self {
+    pub fn without_color_filter(mut self) -> Self {
         self.color_filter = None;
         self
     }
@@ -749,8 +826,13 @@ impl Paint {
     }
 
     /// Returns the optional pre-compositing color filter.
-    pub const fn color_filter(&self) -> Option<ColorFilter> {
-        self.color_filter
+    pub fn color_filter(&self) -> Option<ColorFilter> {
+        self.color_filter.as_ref().map(ColorFilterHandle::filter)
+    }
+
+    /// Borrows the optional shared pre-compositing color filter.
+    pub fn color_filter_handle(&self) -> Option<&ColorFilterHandle> {
+        self.color_filter.as_ref()
     }
 
     /// Borrows the optional logical path transformation.
@@ -771,7 +853,8 @@ impl Paint {
     /// Applies only this paint's color filter to an externally supplied source.
     pub fn filter_color(&self, source: Color) -> Color {
         self.color_filter
-            .map_or(source, |filter| filter.apply(source))
+            .as_ref()
+            .map_or(source, |filter| filter.filter().apply(source))
     }
 }
 
