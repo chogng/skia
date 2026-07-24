@@ -7,11 +7,11 @@ use skia_core::{
     layout_decoration_batches, layout_outline_batches, text_layout_events,
 };
 
-use support::{toy_font, toy_font_with_decorations};
+use support::{BASIC_A, DECORATED_A, font_bytes};
 
 #[test]
 fn layout_outline_batches_emit_portable_paths() {
-    let face = FontFace::from_bytes(FontId::new(95), toy_font('A')).expect("load toy font");
+    let face = FontFace::from_bytes(FontId::new(95), font_bytes(BASIC_A)).expect("load toy font");
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts.add_face(face).expect("register face");
     let layout = fonts
@@ -35,8 +35,7 @@ fn layout_events_keep_glyphs_before_per_style_decorations() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(92), toy_font_with_decorations('A'))
-                .expect("decorated font"),
+            FontFace::from_bytes(FontId::new(92), font_bytes(DECORATED_A)).expect("decorated font"),
         )
         .expect("register face");
     let underline_style = TextStyleId::new(11);
@@ -112,8 +111,7 @@ fn layout_decoration_batches_expand_all_patterns() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(94), toy_font_with_decorations('A'))
-                .expect("decorated font"),
+            FontFace::from_bytes(FontId::new(94), font_bytes(DECORATED_A)).expect("decorated font"),
         )
         .expect("register face");
 

@@ -4,3 +4,12 @@ skia_rust_crate(
     name = "text",
     crate_name = "skia_text",
 )
+
+filegroup(
+    name = "font-test-fixtures",
+    srcs = glob([
+        "tests/fonts/skia/resources/fonts/**",
+        "tests/fonts/synthetic/**",
+    ]),
+    visibility = ["//visibility:public"],
+)

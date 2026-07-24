@@ -19,10 +19,12 @@ conformance tests are intentionally external, checksum pinned downloads; run
 the repository root, followed by the command in
 `skia-rs/text/tests/data/unicode/SOURCES.md`.
 
-Known gaps are a checked-in/rendered pixel-golden harness, a versioned media
-fixture manifest, cross-backend scene comparison, property/fuzz targets,
-sanitizer jobs, a required-Metal CI pool, and an automated license/provenance
-gate for binary test assets.  System-font discovery tests also necessarily
+Known gaps are a checked-in/rendered pixel-golden harness, a versioned
+non-font media fixture manifest, cross-backend scene comparison, property/fuzz
+targets, sanitizer jobs, a required-Metal CI pool, and an automated
+license/provenance gate for binary test assets. The text tests have admitted a
+small pinned set of upstream Skia fonts with per-file hashes and licenses under
+`skia-rs/text/tests/fonts/skia`. System-font discovery tests also necessarily
 exercise the host and are not a portable text-layout oracle.
 
 ## What upstream Skia uses
@@ -65,7 +67,7 @@ and [its Puppeteer performance harness](https://skia.googlesource.com/skia/+/ref
 | `gm/` C++ render scenes | Test code / scene ideas | **Adapter/translation only.** Select a small Rust scene vocabulary and render it through CPU, software GPU, and Metal. | Same BSD-3-Clause source condition; do not import a GM plus its transitive resources without individual provenance. |
 | DM source/sink matrix and raw-pixel checksums | Test infrastructure design | **Directly reuse the design, not code.** Our equivalent is a Rust scene manifest plus backend runners. | No data copied. |
 | Gold baselines, digests, and triage results | Golden images/metadata | **Do not copy.** Generate repository-owned, reproducible baselines only after an explicit review workflow exists. | Gold baseline content is external to Git and configuration-specific. It is neither a stable API nor a redistribution-ready corpus. |
-| `resources/`, CanvasKit assets, fonts, images, SVGs | Binary third-party data | **Do not bulk copy.** Admit an individual item only through a manifest recording URL/revision, SHA-256, SPDX/license text, purpose, and size. | Skia's own `LICENSE` explicitly contains resource exceptions (including Openclipart/public-domain material); the tree is not uniformly BSD-3-Clause. |
+| `resources/`, CanvasKit assets, fonts, images, SVGs | Binary third-party data | **Do not bulk copy.** Admit an individual item only through a manifest recording URL/revision, SHA-256, SPDX/license text, purpose, and size. The selected Skia font fixtures under `skia-rs/text/tests/fonts/skia` are the first admitted subset. | Skia's own `LICENSE` explicitly contains resource exceptions (including Openclipart/public-domain material); the tree is not uniformly BSD-3-Clause. |
 | downloaded SKPs / CIPD assets | Large recordings/data | **Do not vendor; CI-download only if a future SKP reader exists.** Current Rust API neither reads SKP nor shares Skia serialization. | Upstream ignores local `skps/`; retain upstream package provenance and do not assume every recording has a redistribution grant. |
 | `fuzz/` and OSS-Fuzz harnesses | Test code | **Design reference / adapter.** Add Rust `cargo-fuzz` targets against this crate's decode, path, display-list, and text boundaries. | Do not treat an OSS-Fuzz public corpus URL as a versioned, licensed vendoring source; keep only locally minimized, provenance-reviewed reproducers. |
 | CanvasKit Jasmine/Karma/Puppeteer tests | JS/WASM test code | **Design reference only** until a Rust WASM/CanvasKit API is introduced. | The API, build toolchain, and browser image semantics differ. |
@@ -140,11 +142,13 @@ relations for boolean results, no panics, output-limit failure, and CPU versus
 software-replay equivalence.  Translate selected upstream PathOps failure
 shapes one-by-one rather than importing the C++ data tables.
 
-For text, retain the Unicode suite and add controlled, licensed test fonts
-only after their licence is recorded.  Separate deterministic embedded-font
-tests from host system-font discovery.  Cover shaping/fallback/bidi/layout,
-language tags, dictionary boundaries, variable axes, and color/bitmap glyphs
-with known fonts; never make system-font glyph pixels a portable golden.
+For text, retain the Unicode suite, the repository-authored synthetic fonts,
+and the pinned licensed subset of upstream Skia fonts. Separate deterministic
+embedded-font tests from host system-font discovery. Cover
+shaping/fallback/bidi/layout, language tags, dictionary boundaries, variable
+axes, and color/bitmap glyphs with known fonts; never make system-font glyph
+pixels a portable golden. Larger SkParagraph font corpora remain
+manifest-driven downloads under `target/`.
 
 For PNG/JPEG/WebP, keep the current `codec/src/api/png.rs` work untouched.  Add
 decode limits, metadata, malformed/truncated input, and encode/decode

@@ -1,16 +1,30 @@
 use skia_core::{
-    Color, DisplayListBuilder, FontCollection, FontCollectionLimits, FontFace, FontId, FontStyle,
-    GlyphId, GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode,
-    TextAffinity, TextAlignment, TextDecoration, TextDecorationStyle, TextDirection, TextError,
-    TextErrorCode, TextLayoutOptions, TextPosition, TextStyleId, TextStyleSpan, TextWordBreak,
-    TextWordBreakKind, Transform,
+    Color, DisplayListBuilder, FontCollection, FontCollectionLimits, FontFace, FontId, GlyphId,
+    GlyphOutline, GlyphOutlineProvider, Paint, Point, Rect, Scalar, SkiaErrorCode, TextAffinity,
+    TextAlignment, TextBreakProvider, TextDecoration, TextDecorationStyle, TextDirection,
+    TextError, TextErrorCode, TextLayoutOptions, TextPosition, TextStyleId, TextStyleSpan,
+    TextWordBreak, TextWordBreakKind, Transform,
 };
 use skia_cpu::{Surface, SurfaceLimits};
 
-#[path = "../../test-support/font.rs"]
-mod font_support;
+#[path = "support/font_fixtures.rs"]
+mod font_fixtures;
 
-use font_support::*;
+use font_fixtures::*;
+
+struct FixedBreakProvider {
+    language: &'static str,
+    opportunities: Vec<TextWordBreak>,
+}
+
+impl TextBreakProvider for FixedBreakProvider {
+    fn opportunities(&self, _word: &str, language: &str) -> Result<Vec<TextWordBreak>, TextError> {
+        if language != self.language {
+            return Err(TextError::new(TextErrorCode::InvalidLanguage));
+        }
+        Ok(self.opportunities.clone())
+    }
+}
 
 struct FailingProvider;
 
@@ -26,7 +40,7 @@ impl GlyphOutlineProvider for FailingProvider {
 
 #[test]
 fn utf8_text_shapes_and_draws_through_the_cpu_pipeline() {
-    let face = FontFace::from_bytes(FontId::new(7), toy_font('A')).expect("load toy font");
+    let face = FontFace::from_bytes(FontId::new(7), bytes(BASIC_A)).expect("load toy font");
     let run = face.shape("AA", 10 << 16).expect("shape UTF-8 text");
 
     assert_eq!(run.glyphs().len(), 2);
@@ -57,15 +71,12 @@ fn utf8_text_shapes_and_draws_through_the_cpu_pipeline() {
 fn styled_paragraphs_select_fonts_sizes_and_grapheme_safe_fallback() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(150), toy_font('A')).expect("A font"))
+        .add_face(FontFace::from_bytes(FontId::new(150), bytes(BASIC_A)).expect("A font"))
         .expect("add A font");
     fonts
         .add_face(
-            FontFace::from_bytes(
-                FontId::new(151),
-                toy_font_for(&['A', '\u{0301}', '\u{05d0}']),
-            )
-            .expect("fallback font"),
+            FontFace::from_bytes(FontId::new(151), bytes(COVERAGE_CPU_FALLBACK))
+                .expect("fallback font"),
         )
         .expect("add fallback font");
     let text = "A\u{05d0}A";
@@ -142,10 +153,10 @@ fn styled_paragraphs_select_fonts_sizes_and_grapheme_safe_fallback() {
 fn ordered_fallback_shapes_and_draws_multiple_faces() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(10), toy_font('A')).expect("A font"))
+        .add_face(FontFace::from_bytes(FontId::new(10), bytes(BASIC_A)).expect("A font"))
         .expect("add A font");
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(11), toy_font('B')).expect("B font"))
+        .add_face(FontFace::from_bytes(FontId::new(11), bytes(BASIC_B)).expect("B font"))
         .expect("add B font");
 
     let paragraph = fonts
@@ -181,7 +192,7 @@ fn ordered_fallback_shapes_and_draws_multiple_faces() {
 fn paragraph_draw_restores_canvas_state_after_provider_failure() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(40), toy_font('A')).expect("A font"))
+        .add_face(FontFace::from_bytes(FontId::new(40), bytes(BASIC_A)).expect("A font"))
         .expect("add font");
     let paragraph = fonts.shape_paragraph("A", 10 << 16).expect("shape");
     let mut surface = Surface::new(10, 10, SurfaceLimits::default()).expect("surface");
@@ -214,7 +225,8 @@ fn paragraph_draw_restores_canvas_state_after_provider_failure() {
 
 #[test]
 fn font_metrics_and_unicode_soft_wrap_position_lines() {
-    let face = FontFace::from_bytes(FontId::new(50), toy_font_for(&[' ', 'A'])).expect("text font");
+    let face =
+        FontFace::from_bytes(FontId::new(50), bytes(COVERAGE_LATIN_SPACE)).expect("text font");
     let metrics = face.metrics(10 << 16).expect("font metrics");
     assert_eq!(metrics.ascent_bits(), 8 << 16);
     assert_eq!(metrics.descent_bits(), 2 << 16);
@@ -283,11 +295,8 @@ fn dictionary_hyphenation_wraps_ltr_text_and_draws_synthetic_glyphs() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(
-                FontId::new(65),
-                toy_font_for(&['-', 'a', 'e', 'h', 'i', 'n', 'o', 'p', 't', 'y']),
-            )
-            .expect("hyphenation font"),
+            FontFace::from_bytes(FontId::new(65), bytes(COVERAGE_HYPHENATION))
+                .expect("hyphenation font"),
         )
         .expect("add font");
     let provider = FixedBreakProvider {
@@ -375,7 +384,7 @@ fn dictionary_hyphenation_wraps_ltr_text_and_draws_synthetic_glyphs() {
 fn physical_and_logical_alignment_position_ltr_and_rtl_lines() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(80), toy_font('A')).expect("A font"))
+        .add_face(FontFace::from_bytes(FontId::new(80), bytes(BASIC_A)).expect("A font"))
         .expect("add font");
 
     let layout = |alignment, direction| {
@@ -408,7 +417,7 @@ fn physical_and_logical_alignment_position_ltr_and_rtl_lines() {
 
     let mut rtl_fonts = FontCollection::new(FontCollectionLimits::default());
     rtl_fonts
-        .add_face(FontFace::from_bytes(FontId::new(81), toy_font('\u{05d0}')).expect("Alef font"))
+        .add_face(FontFace::from_bytes(FontId::new(81), bytes(BASIC_ALEF)).expect("Alef font"))
         .expect("add font");
     let natural_rtl = rtl_fonts
         .layout_text(
@@ -447,7 +456,7 @@ fn justification_expands_interior_spaces_and_controls_the_final_line() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(90), toy_font_for(&[' ', 'A'])).expect("text font"),
+            FontFace::from_bytes(FontId::new(90), bytes(COVERAGE_LATIN_SPACE)).expect("text font"),
         )
         .expect("add font");
 
@@ -517,11 +526,8 @@ fn justification_expands_interior_spaces_and_controls_the_final_line() {
 
 #[test]
 fn font_decorations_use_primary_metrics_across_fallback_and_alignment() {
-    let primary = FontFace::from_bytes(
-        FontId::new(110),
-        toy_styled_font(&[' ', 'A'], "Decorated", FontStyle::NORMAL),
-    )
-    .expect("decorated primary font");
+    let primary = FontFace::from_bytes(FontId::new(110), bytes(STYLED_DECORATED))
+        .expect("decorated primary font");
     let underline = primary
         .underline_metrics(20 << 16)
         .expect("underline query")
@@ -538,7 +544,7 @@ fn font_decorations_use_primary_metrics_across_fallback_and_alignment() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts.add_face(primary).expect("add primary font");
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(111), toy_font('B')).expect("fallback font"))
+        .add_face(FontFace::from_bytes(FontId::new(111), bytes(BASIC_B)).expect("fallback font"))
         .expect("add fallback font");
     let layout = fonts
         .layout_text(
@@ -579,11 +585,8 @@ fn font_decorations_use_primary_metrics_across_fallback_and_alignment() {
 
 #[test]
 fn text_decoration_patterns_share_resolved_cpu_geometry() {
-    let face = FontFace::from_bytes(
-        FontId::new(119),
-        toy_styled_font(&['A'], "Decoration Patterns", FontStyle::NORMAL),
-    )
-    .expect("decorated font");
+    let face = FontFace::from_bytes(FontId::new(119), bytes(STYLED_DECORATION_PATTERNS))
+        .expect("decorated font");
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts.add_face(face).expect("add decorated font");
     let layout = fonts
@@ -619,11 +622,8 @@ fn text_decoration_patterns_share_resolved_cpu_geometry() {
 
 #[test]
 fn display_list_expands_layout_runs_and_decorations_transactionally() {
-    let face = FontFace::from_bytes(
-        FontId::new(118),
-        toy_styled_font(&['A'], "Display Layout", FontStyle::NORMAL),
-    )
-    .expect("decorated font");
+    let face = FontFace::from_bytes(FontId::new(118), bytes(STYLED_DISPLAY_LAYOUT))
+        .expect("decorated font");
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts.add_face(face).expect("add decorated font");
     let layout = fonts
@@ -677,11 +677,8 @@ fn display_list_expands_layout_runs_and_decorations_transactionally() {
 
 #[test]
 fn styled_layout_resolves_per_span_paints_and_decorations() {
-    let font = FontFace::from_bytes(
-        FontId::new(121),
-        toy_styled_font(&['A'], "Span Styles", FontStyle::NORMAL),
-    )
-    .expect("styled font");
+    let font =
+        FontFace::from_bytes(FontId::new(121), bytes(STYLED_SPAN_STYLES)).expect("styled font");
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts.add_face(font).expect("add styled font");
     let red_style = TextStyleId::new(1);

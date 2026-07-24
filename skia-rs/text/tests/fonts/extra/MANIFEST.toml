@@ -1,0 +1,13 @@
+schema = 1
+
+[upstream]
+repository = "https://skia.googlesource.com/skia.git"
+revision = "3424966b8a2b1e96427f3eab2bd069954ff745e7"
+asset = "skparagraph"
+asset_version = 4
+upstream_install_path = "resources/extra_fonts"
+description = "Fonts used by upstream SkParagraph's extended native-font tests"
+
+# Add individually pinned, licensed downloads here before enabling the
+# corresponding Rust tests. Verified files are installed under
+# skia-rs/target/extra-fonts and are never committed in this directory.

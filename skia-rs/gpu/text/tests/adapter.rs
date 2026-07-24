@@ -1,7 +1,3 @@
-#[path = "../../../core/tests/support/mod.rs"]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-mod support;
-
 use std::sync::Arc;
 
 use skia_core::{
@@ -13,13 +9,19 @@ use skia_core::{TextDecoration, layout_decoration_batches};
 use skia_gpu::{GpuBackend, GpuCommand, GpuCommandEncoder, GpuSurfaceDescriptor};
 use skia_gpu_text::{TextAtlasBuilder, TextAtlasCache, TextAtlasCacheLimits, TextGlyphKey};
 
-use support::toy_font;
+const BASIC_A: &[u8] = include_bytes!("../../../text/tests/fonts/synthetic/basic-a.ttf");
+const BASIC_B: &[u8] = include_bytes!("../../../text/tests/fonts/synthetic/basic-b.ttf");
+const BASIC_C: &[u8] = include_bytes!("../../../text/tests/fonts/synthetic/basic-c.ttf");
 #[cfg(target_os = "macos")]
-use support::toy_font_with_decorations;
+const DECORATED_A: &[u8] = include_bytes!("../../../text/tests/fonts/synthetic/decorated-a.ttf");
+
+fn font_bytes(fixture: &[u8]) -> Vec<u8> {
+    fixture.to_vec()
+}
 
 #[test]
 fn text_adapter_shapes_packs_and_replays_layout_glyphs() {
-    let face = FontFace::from_bytes(FontId::new(91), toy_font('A')).expect("load toy font");
+    let face = FontFace::from_bytes(FontId::new(91), font_bytes(BASIC_A)).expect("load toy font");
     let glyph = face
         .glyph_for_character('A')
         .expect("lookup glyph")
@@ -119,8 +121,7 @@ fn text_adapter_draws_styled_glyphs_and_decorations_on_metal() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(93), toy_font_with_decorations('A'))
-                .expect("decorated font"),
+            FontFace::from_bytes(FontId::new(93), font_bytes(DECORATED_A)).expect("decorated font"),
         )
         .expect("register face");
     let red_style = TextStyleId::new(21);
@@ -186,10 +187,10 @@ fn text_adapter_draws_styled_glyphs_and_decorations_on_metal() {
 #[test]
 fn atlas_cache_reuses_supersets_and_evicts_least_recently_used_entries() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
-    for (value, character) in [(201, 'A'), (202, 'B'), (203, 'C')] {
+    for (value, fixture) in [(201, BASIC_A), (202, BASIC_B), (203, BASIC_C)] {
         fonts
             .add_face(
-                FontFace::from_bytes(FontId::new(value), toy_font(character)).expect("toy font"),
+                FontFace::from_bytes(FontId::new(value), font_bytes(fixture)).expect("toy font"),
             )
             .expect("register face");
     }

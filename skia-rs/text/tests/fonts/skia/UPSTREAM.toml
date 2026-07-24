@@ -1,0 +1,4 @@
+repository = "https://skia.googlesource.com/skia.git"
+revision = "3424966b8a2b1e96427f3eab2bd069954ff745e7"
+resource_root = "resources/fonts"
+imported = "2026-07-24"

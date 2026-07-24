@@ -1,15 +1,29 @@
 use skia_text::{
     FontCollection, FontCollectionLimits, FontEmbeddingPermission, FontFace, FontFeature, FontId,
     FontLimits, FontProgramFormat, FontSlant, FontStyle, FontTag, FontVariation, FontWidth,
-    GlyphBitmapFormat, GlyphId, GlyphOutlineProvider, TextAffinity, TextAlignment, TextDecoration,
-    TextDirection, TextErrorCode, TextJustification, TextLayoutOptions, TextOverflow, TextPosition,
-    TextStyleSpan, TextWordBreak, TextWordBreakKind,
+    GlyphBitmapFormat, GlyphId, GlyphOutlineProvider, TextAffinity, TextAlignment,
+    TextBreakProvider, TextDecoration, TextDirection, TextError, TextErrorCode, TextJustification,
+    TextLayoutOptions, TextOverflow, TextPosition, TextStyleSpan, TextWordBreak, TextWordBreakKind,
 };
 
-#[path = "../../test-support/font.rs"]
-mod font_support;
+#[path = "support/font_fixtures.rs"]
+mod font_fixtures;
 
-use font_support::*;
+use font_fixtures::*;
+
+struct FixedBreakProvider {
+    language: &'static str,
+    opportunities: Vec<TextWordBreak>,
+}
+
+impl TextBreakProvider for FixedBreakProvider {
+    fn opportunities(&self, _word: &str, language: &str) -> Result<Vec<TextWordBreak>, TextError> {
+        if language != self.language {
+            return Err(TextError::new(TextErrorCode::InvalidLanguage));
+        }
+        Ok(self.opportunities.clone())
+    }
+}
 
 #[test]
 fn public_font_loader_rejects_malformed_data() {
@@ -19,8 +33,36 @@ fn public_font_loader_rejects_malformed_data() {
 }
 
 #[test]
+fn upstream_skia_fonts_cover_real_sfnt_and_collection_inputs() {
+    let em = FontFace::from_bytes(FontId::new(200), bytes(SKIA_EM)).expect("load Skia Em.ttf");
+    assert_eq!(
+        em.portable_program().expect("extract Skia Em.ttf").format(),
+        FontProgramFormat::TrueType
+    );
+
+    let variable = FontFace::from_bytes(FontId::new(201), bytes(SKIA_VARIABLE))
+        .expect("load Skia Variable.ttf");
+    assert!(!variable.variation_axes().is_empty());
+
+    let _first = FontFace::from_bytes_with_limits(
+        FontId::new(202),
+        bytes(SKIA_TEST_COLLECTION),
+        0,
+        FontLimits::default(),
+    )
+    .expect("load first Skia test.ttc face");
+    let _second = FontFace::from_bytes_with_limits(
+        FontId::new(203),
+        bytes(SKIA_TEST_COLLECTION),
+        1,
+        FontLimits::default(),
+    )
+    .expect("load second Skia test.ttc face");
+}
+
+#[test]
 fn font_face_rasterizes_hinted_alpha_glyphs_without_native_font_libraries() {
-    let face = FontFace::from_bytes(FontId::new(8), toy_font('A')).expect("load toy font");
+    let face = FontFace::from_bytes(FontId::new(8), bytes(BASIC_A)).expect("load toy font");
     let glyph = face
         .glyph_for_character('A')
         .expect("lookup glyph")
@@ -47,7 +89,7 @@ fn font_face_rasterizes_hinted_alpha_glyphs_without_native_font_libraries() {
 
 #[test]
 fn shaping_retains_the_exact_source_range_for_document_backends() {
-    let face = FontFace::from_bytes(FontId::new(9), toy_font('A')).expect("load toy font");
+    let face = FontFace::from_bytes(FontId::new(9), bytes(BASIC_A)).expect("load toy font");
     let run = face.shape("A", 12 << 16).expect("shape text");
     let source = run.source().expect("shaper source");
     assert_eq!(source.text(), "A");
@@ -57,7 +99,7 @@ fn shaping_retains_the_exact_source_range_for_document_backends() {
 
 #[test]
 fn portable_program_extracts_one_ttc_face_and_honors_embedding_rights() {
-    let collection = toy_font_collection(&[toy_font('A'), toy_font('B')]);
+    let collection = bytes(COLLECTION_AB);
     let face =
         FontFace::from_bytes_with_limits(FontId::new(10), collection, 1, FontLimits::default())
             .expect("load second collection face");
@@ -78,7 +120,7 @@ fn portable_program_extracts_one_ttc_face_and_honors_embedding_rights() {
 
 #[test]
 fn portable_program_reports_os2_embedding_and_subsetting_restrictions() {
-    let mut font = toy_font_with_decorations('A');
+    let mut font = bytes(DECORATED_A);
     set_os2_fs_type(&mut font, 0x0002 | 0x0100);
     let face = FontFace::from_bytes(FontId::new(12), font).expect("load restricted font");
 
@@ -139,45 +181,49 @@ fn font_metadata_and_css_like_style_matching_are_deterministic() {
             FontId::new(100),
             "Example Sans",
             style(400, FontWidth::Normal, FontSlant::Normal),
+            STYLE_EXAMPLE_REGULAR,
         ),
         (
             FontId::new(101),
             "Example Sans",
             style(700, FontWidth::Normal, FontSlant::Normal),
+            STYLE_EXAMPLE_BOLD,
         ),
         (
             FontId::new(102),
             "Example Sans",
             style(700, FontWidth::Condensed, FontSlant::Normal),
+            STYLE_EXAMPLE_BOLD_CONDENSED,
         ),
         (
             FontId::new(103),
             "Example Sans",
             style(400, FontWidth::Normal, FontSlant::Italic),
+            STYLE_EXAMPLE_ITALIC,
         ),
         (
             FontId::new(104),
             "Other Family",
             style(400, FontWidth::Normal, FontSlant::Normal),
+            STYLE_OTHER_REGULAR,
         ),
         (
             FontId::new(105),
             "Example Sans",
             style(500, FontWidth::Normal, FontSlant::Normal),
+            STYLE_EXAMPLE_MEDIUM,
         ),
         (
             FontId::new(106),
             "Example Sans",
             style(400, FontWidth::Normal, FontSlant::Oblique),
+            STYLE_EXAMPLE_OBLIQUE,
         ),
     ];
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
-    for (id, family, face_style) in faces {
+    for (id, _family, _face_style, fixture) in faces {
         fonts
-            .add_face(
-                FontFace::from_bytes(id, toy_styled_font(&['A'], family, face_style))
-                    .expect("styled font"),
-            )
+            .add_face(FontFace::from_bytes(id, bytes(fixture)).expect("styled font"))
             .expect("add styled font");
     }
 
@@ -264,8 +310,7 @@ fn font_metadata_and_css_like_style_matching_are_deterministic() {
 
 #[test]
 fn variable_font_instances_validate_axes_and_keep_distinct_identities() {
-    let base = FontFace::from_bytes(FontId::new(130), toy_variable_font(&['A'], "Variable Sans"))
-        .expect("variable font");
+    let base = FontFace::from_bytes(FontId::new(130), bytes(VARIABLE)).expect("variable font");
     let weight = FontTag::new(*b"wght");
     assert_eq!(weight.bytes(), *b"wght");
     assert_eq!(base.variation_axes().len(), 1);
@@ -320,8 +365,7 @@ fn variable_font_instances_validate_axes_and_keep_distinct_identities() {
 
 #[test]
 fn shaping_feature_instances_propagate_through_paragraph_and_layout() {
-    let base =
-        FontFace::from_bytes(FontId::new(140), toy_kerned_font(&['A'])).expect("kerned font");
+    let base = FontFace::from_bytes(FontId::new(140), bytes(KERNED_A)).expect("kerned font");
     let default_run = base.shape("AA", 10 << 16).expect("default kerning");
     assert_eq!(
         default_run
@@ -392,11 +436,8 @@ fn shaping_feature_instances_propagate_through_paragraph_and_layout() {
 
 #[test]
 fn shaping_language_propagates_through_fallback_bidi_styles_layout_and_markers() {
-    let face = FontFace::from_bytes(
-        FontId::new(145),
-        toy_localized_font(&['-', 'A', '\u{05d0}', '\u{2026}']),
-    )
-    .expect("localized font");
+    let face =
+        FontFace::from_bytes(FontId::new(145), bytes(LOCALIZED_LAYOUT)).expect("localized font");
     assert_eq!(
         face.shape("A", 10 << 16).expect("default shape").glyphs()[0]
             .glyph()
@@ -428,7 +469,7 @@ fn shaping_language_propagates_through_fallback_bidi_styles_layout_and_markers()
 
     let mut fallback_fonts = FontCollection::new(FontCollectionLimits::default());
     fallback_fonts
-        .add_face(FontFace::from_bytes(FontId::new(146), toy_font('B')).expect("primary font"))
+        .add_face(FontFace::from_bytes(FontId::new(146), bytes(BASIC_B)).expect("primary font"))
         .expect("add primary font");
     fallback_fonts
         .add_face(face)
@@ -553,24 +594,15 @@ fn shaping_language_propagates_through_fallback_bidi_styles_layout_and_markers()
 
 #[test]
 fn styled_layout_wraps_with_per_line_metrics_decorations_and_hyphens() {
-    let characters = ['-', 'A', 'a', 'e', 'h', 'i', 'n', 'o', 'p', 't', 'y'];
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(
-                FontId::new(152),
-                toy_styled_font(&characters, "Small", FontStyle::NORMAL),
-            )
-            .expect("small styled font"),
+            FontFace::from_bytes(FontId::new(152), bytes(STYLED_SMALL)).expect("small styled font"),
         )
         .expect("add small font");
     fonts
         .add_face(
-            FontFace::from_bytes(
-                FontId::new(153),
-                toy_styled_font(&characters, "Large", FontStyle::NORMAL),
-            )
-            .expect("large styled font"),
+            FontFace::from_bytes(FontId::new(153), bytes(STYLED_LARGE)).expect("large styled font"),
         )
         .expect("add large font");
 
@@ -698,7 +730,7 @@ fn styled_layout_wraps_with_per_line_metrics_decorations_and_hyphens() {
 #[test]
 fn font_limits_bound_shaping_and_outline_work() {
     let shaping_limits = FontLimits::new(1_024, 8, 1, 32).expect("valid limits");
-    let face = FontFace::from_bytes_with_limits(FontId::new(2), toy_font('A'), 0, shaping_limits)
+    let face = FontFace::from_bytes_with_limits(FontId::new(2), bytes(BASIC_A), 0, shaping_limits)
         .expect("load bounded font");
     assert_eq!(
         face.shape("AA", 10 << 16)
@@ -708,7 +740,7 @@ fn font_limits_bound_shaping_and_outline_work() {
     );
 
     let outline_limits = FontLimits::new(1_024, 8, 8, 2).expect("valid limits");
-    let face = FontFace::from_bytes_with_limits(FontId::new(3), toy_font('A'), 0, outline_limits)
+    let face = FontFace::from_bytes_with_limits(FontId::new(3), bytes(BASIC_A), 0, outline_limits)
         .expect("load bounded font");
     assert_eq!(
         face.glyph_outline(face.id(), GlyphId::new(1))
@@ -718,7 +750,7 @@ fn font_limits_bound_shaping_and_outline_work() {
     );
 
     assert_eq!(
-        FontFace::from_bytes_with_limits(FontId::new(4), toy_font('A'), 1, FontLimits::default())
+        FontFace::from_bytes_with_limits(FontId::new(4), bytes(BASIC_A), 1, FontLimits::default())
             .expect_err("standalone font has no second face")
             .code(),
         TextErrorCode::InvalidFaceIndex
@@ -729,10 +761,10 @@ fn font_limits_bound_shaping_and_outline_work() {
 fn bidi_reorders_rtl_fallback_runs_and_preserves_source_clusters() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(20), toy_font('\u{05d0}')).expect("Alef font"))
+        .add_face(FontFace::from_bytes(FontId::new(20), bytes(BASIC_ALEF)).expect("Alef font"))
         .expect("add Alef font");
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(21), toy_font('\u{05d1}')).expect("Bet font"))
+        .add_face(FontFace::from_bytes(FontId::new(21), bytes(BASIC_BET)).expect("Bet font"))
         .expect("add Bet font");
 
     let paragraph = fonts
@@ -757,11 +789,11 @@ fn collection_rejects_duplicate_faces_missing_glyphs_and_multiple_paragraphs() {
         FontCollectionLimits::new(2, 32, 8, 8).expect("valid collection limits"),
     );
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(30), toy_font('A')).expect("A font"))
+        .add_face(FontFace::from_bytes(FontId::new(30), bytes(BASIC_A)).expect("A font"))
         .expect("add font");
     assert_eq!(
         fonts
-            .add_face(FontFace::from_bytes(FontId::new(30), toy_font('B')).expect("B font"))
+            .add_face(FontFace::from_bytes(FontId::new(30), bytes(BASIC_B)).expect("B font"))
             .expect_err("duplicate ID must fail")
             .code(),
         TextErrorCode::DuplicateFontId
@@ -786,7 +818,7 @@ fn collection_rejects_duplicate_faces_missing_glyphs_and_multiple_paragraphs() {
 fn hard_breaks_trailing_empty_lines_and_long_graphemes_are_bounded() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(60), toy_font('A')).expect("A font"))
+        .add_face(FontFace::from_bytes(FontId::new(60), bytes(BASIC_A)).expect("A font"))
         .expect("add font");
 
     let hard = fonts
@@ -854,8 +886,7 @@ fn line_limit_overflow_clips_or_adds_style_aware_ellipses() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(61), toy_font_for(&['.', 'A', '\u{2026}']))
-                .expect("ellipsis font"),
+            FontFace::from_bytes(FontId::new(61), bytes(COVERAGE_ELLIPSIS)).expect("ellipsis font"),
         )
         .expect("add ellipsis font");
     let clip_options = TextLayoutOptions::with_limits(18 << 16, 2, 128)
@@ -911,7 +942,7 @@ fn line_limit_overflow_clips_or_adds_style_aware_ellipses() {
     let mut period_fonts = FontCollection::new(FontCollectionLimits::default());
     period_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(62), toy_font_for(&['.', 'A']))
+            FontFace::from_bytes(FontId::new(62), bytes(COVERAGE_PERIOD_FALLBACK))
                 .expect("period fallback font"),
         )
         .expect("add period font");
@@ -934,14 +965,12 @@ fn line_limit_overflow_clips_or_adds_style_aware_ellipses() {
     let mut styled_fonts = FontCollection::new(FontCollectionLimits::default());
     styled_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(63), toy_font_for(&['A', '\u{2026}']))
-                .expect("small font"),
+            FontFace::from_bytes(FontId::new(63), bytes(COVERAGE_A_ELLIPSIS)).expect("small font"),
         )
         .expect("add small font");
     styled_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(64), toy_font_for(&['A', '\u{2026}']))
-                .expect("large font"),
+            FontFace::from_bytes(FontId::new(64), bytes(COVERAGE_A_ELLIPSIS)).expect("large font"),
         )
         .expect("add large font");
     let styled = styled_fonts
@@ -964,11 +993,8 @@ fn line_limit_overflow_clips_or_adds_style_aware_ellipses() {
     let mut rtl_fonts = FontCollection::new(FontCollectionLimits::default());
     rtl_fonts
         .add_face(
-            FontFace::from_bytes(
-                FontId::new(66),
-                toy_font_for(&['\u{05d0}', '\u{05d1}', '\u{05d2}', '\u{2026}']),
-            )
-            .expect("RTL ellipsis font"),
+            FontFace::from_bytes(FontId::new(66), bytes(COVERAGE_RTL_ELLIPSIS))
+                .expect("RTL ellipsis font"),
         )
         .expect("add RTL font");
     let rtl = rtl_fonts
@@ -1021,7 +1047,7 @@ fn line_limit_overflow_clips_or_adds_style_aware_ellipses() {
 
     let mut missing_fonts = FontCollection::new(FontCollectionLimits::default());
     missing_fonts
-        .add_face(FontFace::from_bytes(FontId::new(65), toy_font('A')).expect("plain font"))
+        .add_face(FontFace::from_bytes(FontId::new(65), bytes(BASIC_A)).expect("plain font"))
         .expect("add plain font");
     assert_eq!(
         missing_fonts
@@ -1037,14 +1063,7 @@ fn dictionary_hyphenation_positions_rtl_hyphens_and_rejects_invalid_providers() 
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(
-                FontId::new(66),
-                toy_font_for(&[
-                    '-', 'A', 'B', 'a', 'b', '\u{0301}', '\u{05d0}', '\u{05d1}', '\u{05d2}',
-                    '\u{05d3}',
-                ]),
-            )
-            .expect("mixed font"),
+            FontFace::from_bytes(FontId::new(66), bytes(COVERAGE_DICTIONARY)).expect("mixed font"),
         )
         .expect("add font");
     let rtl = fonts
@@ -1146,7 +1165,7 @@ fn soft_wrapped_rtl_line_keeps_the_logical_paragraph_base_direction() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(70), toy_font_for(&[' ', 'A', '\u{05d0}']))
+            FontFace::from_bytes(FontId::new(70), bytes(COVERAGE_MIXED_SPACE_ALEF))
                 .expect("mixed font"),
         )
         .expect("add font");
@@ -1170,7 +1189,7 @@ fn hit_testing_and_carets_resolve_wraps_alignment_bidi_and_spacing() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(82), toy_font_for(&[' ', 'A'])).expect("LTR font"),
+            FontFace::from_bytes(FontId::new(82), bytes(COVERAGE_LATIN_SPACE)).expect("LTR font"),
         )
         .expect("add LTR font");
 
@@ -1263,8 +1282,7 @@ fn hit_testing_and_carets_resolve_wraps_alignment_bidi_and_spacing() {
     let mut rtl_fonts = FontCollection::new(FontCollectionLimits::default());
     rtl_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(83), toy_font_for(&['\u{05d0}', '\u{05d1}']))
-                .expect("RTL font"),
+            FontFace::from_bytes(FontId::new(83), bytes(COVERAGE_RTL_PAIR)).expect("RTL font"),
         )
         .expect("add RTL font");
     let rtl = rtl_fonts
@@ -1298,7 +1316,7 @@ fn hit_testing_and_carets_resolve_wraps_alignment_bidi_and_spacing() {
     let mut mixed_fonts = FontCollection::new(FontCollectionLimits::default());
     mixed_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(84), toy_font_for(&['A', '\u{05d0}']))
+            FontFace::from_bytes(FontId::new(84), bytes(COVERAGE_MIXED_BIDI))
                 .expect("mixed bidi font"),
         )
         .expect("add mixed font");
@@ -1350,11 +1368,8 @@ fn selection_rects_follow_clusters_wraps_spacing_bidi_and_synthetic_markers() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(
-                FontId::new(87),
-                toy_font_for(&['A', '\u{05d0}', '\u{05d1}', '\u{2026}', '\u{4e2d}']),
-            )
-            .expect("selection font"),
+            FontFace::from_bytes(FontId::new(87), bytes(COVERAGE_SELECTION))
+                .expect("selection font"),
         )
         .expect("add selection font");
 
@@ -1476,8 +1491,8 @@ fn selection_rects_follow_clusters_wraps_spacing_bidi_and_synthetic_markers() {
 
 #[test]
 fn gdef_ligature_carets_drive_hit_testing_carets_and_partial_selection() {
-    let face = FontFace::from_bytes(FontId::new(160), toy_ligature_font(Some(&[200, 450])))
-        .expect("ligature font");
+    let face =
+        FontFace::from_bytes(FontId::new(160), bytes(LIGATURE_CARETS)).expect("ligature font");
     let shaped = face.shape("ffi", 10 << 16).expect("shape ffi ligature");
     assert_eq!(shaped.glyphs().len(), 1);
     assert_eq!(shaped.glyphs()[0].glyph(), GlyphId::new(2));
@@ -1563,7 +1578,7 @@ fn gdef_ligature_carets_drive_hit_testing_carets_and_partial_selection() {
     let mut atomic_fonts = FontCollection::new(FontCollectionLimits::default());
     atomic_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(161), toy_ligature_font(None))
+            FontFace::from_bytes(FontId::new(161), bytes(LIGATURE_ATOMIC))
                 .expect("ligature font without GDEF"),
         )
         .expect("add atomic ligature font");
@@ -1591,7 +1606,7 @@ fn gdef_ligature_carets_drive_hit_testing_carets_and_partial_selection() {
     let mut mismatched_fonts = FontCollection::new(FontCollectionLimits::default());
     mismatched_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(162), toy_ligature_font(Some(&[300])))
+            FontFace::from_bytes(FontId::new(162), bytes(LIGATURE_MISMATCHED))
                 .expect("ligature font with mismatched GDEF"),
         )
         .expect("add mismatched ligature font");
@@ -1615,11 +1630,7 @@ fn cluster_spacing_affects_wraps_carets_bidi_justification_and_ellipsis() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(
-                FontId::new(85),
-                toy_font_for(&[' ', 'A', '\u{00a0}', '\u{0301}', '\u{2026}']),
-            )
-            .expect("spacing font"),
+            FontFace::from_bytes(FontId::new(85), bytes(COVERAGE_SPACING)).expect("spacing font"),
         )
         .expect("add spacing font");
 
@@ -1761,7 +1772,7 @@ fn cluster_spacing_affects_wraps_carets_bidi_justification_and_ellipsis() {
     let mut rtl_fonts = FontCollection::new(FontCollectionLimits::default());
     rtl_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(86), toy_font_for(&['\u{05d0}', '\u{05d1}']))
+            FontFace::from_bytes(FontId::new(86), bytes(COVERAGE_RTL_PAIR))
                 .expect("RTL spacing font"),
         )
         .expect("add RTL font");
@@ -1796,11 +1807,8 @@ fn justification_expands_unicode_spaces_but_not_non_breaking_spaces() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(
-                FontId::new(100),
-                toy_font_for(&['A', '\u{00a0}', '\u{2007}', '\u{202f}', '\u{3000}']),
-            )
-            .expect("Unicode space font"),
+            FontFace::from_bytes(FontId::new(100), bytes(COVERAGE_UNICODE_SPACES))
+                .expect("Unicode space font"),
         )
         .expect("add font");
     let justify_final = TextLayoutOptions::new(24 << 16)
@@ -1835,13 +1843,7 @@ fn justification_expands_unicode_spaces_but_not_non_breaking_spaces() {
 fn justification_expands_cjk_cluster_boundaries_without_splitting_marks_or_punctuation() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
-        .add_face(
-            FontFace::from_bytes(
-                FontId::new(101),
-                toy_font_for(&[' ', '\u{0301}', '\u{3002}', '\u{4e2d}']),
-            )
-            .expect("CJK font"),
-        )
+        .add_face(FontFace::from_bytes(FontId::new(101), bytes(COVERAGE_CJK)).expect("CJK font"))
         .expect("add CJK font");
     let justify_final = |width| {
         TextLayoutOptions::new(width)
@@ -1933,12 +1935,12 @@ fn justification_expands_cjk_cluster_boundaries_without_splitting_marks_or_punct
     let mut fallback_fonts = FontCollection::new(FontCollectionLimits::default());
     fallback_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(102), toy_font('\u{4e2d}')).expect("Han primary"),
+            FontFace::from_bytes(FontId::new(102), bytes(BASIC_HAN_ZHONG)).expect("Han primary"),
         )
         .expect("add Han primary");
     fallback_fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(103), toy_font('\u{6587}')).expect("Han fallback"),
+            FontFace::from_bytes(FontId::new(103), bytes(BASIC_HAN_WEN)).expect("Han fallback"),
         )
         .expect("add Han fallback");
     let fallback = fallback_fonts
@@ -1958,7 +1960,7 @@ fn justification_supports_mixed_and_explicit_cross_script_boundaries() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
         .add_face(
-            FontFace::from_bytes(FontId::new(109), toy_font_for(&['.', 'A', 'B', '\u{4e2d}']))
+            FontFace::from_bytes(FontId::new(109), bytes(COVERAGE_MIXED_SCRIPT))
                 .expect("mixed-script font"),
         )
         .expect("add mixed-script font");
@@ -2024,7 +2026,7 @@ fn justification_supports_mixed_and_explicit_cross_script_boundaries() {
 fn requested_font_decoration_requires_native_metrics() {
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts
-        .add_face(FontFace::from_bytes(FontId::new(120), toy_font('A')).expect("plain font"))
+        .add_face(FontFace::from_bytes(FontId::new(120), bytes(BASIC_A)).expect("plain font"))
         .expect("add plain font");
     let error = fonts
         .layout_text(

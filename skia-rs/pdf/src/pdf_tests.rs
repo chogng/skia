@@ -18,8 +18,16 @@ use crate::{
     PdfErrorCode as DocumentErrorCode, PdfLimits as DocumentLimits, PdfMetadata as DocumentMetadata,
 };
 
-#[path = "../../test-support/font.rs"]
-mod test_font;
+const BASIC_A_FONT: &[u8] = include_bytes!("../../text/tests/fonts/synthetic/basic-a.ttf");
+const BASIC_B_FONT: &[u8] = include_bytes!("../../text/tests/fonts/synthetic/basic-b.ttf");
+const COLLECTION_AB_FONT: &[u8] =
+    include_bytes!("../../text/tests/fonts/synthetic/collection-ab.ttc");
+const DECORATED_A_FONT: &[u8] = include_bytes!("../../text/tests/fonts/synthetic/decorated-a.ttf");
+const LOCALIZED_A_FONT: &[u8] = include_bytes!("../../text/tests/fonts/synthetic/localized-a.ttf");
+
+fn font_bytes(fixture: &[u8]) -> Vec<u8> {
+    fixture.to_vec()
+}
 
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).expect("test scalar")
@@ -711,7 +719,7 @@ fn glyph_outlines_are_emitted_as_vector_paths() {
 fn font_face_directly_provides_searchable_ttc_text() {
     let face = FontFace::from_bytes_with_limits(
         FontId::new(23),
-        test_font::toy_font_collection(&[test_font::toy_font('A'), test_font::toy_font('B')]),
+        font_bytes(COLLECTION_AB_FONT),
         1,
         FontLimits::default(),
     )
@@ -742,8 +750,8 @@ fn font_face_directly_provides_searchable_ttc_text() {
 
 #[test]
 fn font_collection_provides_searchable_fallback_glyph_runs() {
-    let first = FontFace::from_bytes(FontId::new(26), test_font::toy_font('A')).expect("A face");
-    let second = FontFace::from_bytes(FontId::new(27), test_font::toy_font('B')).expect("B face");
+    let first = FontFace::from_bytes(FontId::new(26), font_bytes(BASIC_A_FONT)).expect("A face");
+    let second = FontFace::from_bytes(FontId::new(27), font_bytes(BASIC_B_FONT)).expect("B face");
     let mut fonts = FontCollection::new(FontCollectionLimits::default());
     fonts.add_face(first.clone()).expect("add A face");
     fonts.add_face(second.clone()).expect("add B face");
@@ -773,7 +781,7 @@ fn font_collection_provides_searchable_fallback_glyph_runs() {
 
 #[test]
 fn font_face_uses_accessible_outlines_when_embedding_is_restricted() {
-    let mut program = test_font::toy_font_with_decorations('A');
+    let mut program = font_bytes(DECORATED_A_FONT);
     set_os2_fs_type(&mut program, 0x0002);
     let face = FontFace::from_bytes(FontId::new(24), program).expect("restricted face");
     let mut builder = DisplayListBuilder::new(2).expect("builder");
@@ -799,7 +807,7 @@ fn font_face_uses_accessible_outlines_when_embedding_is_restricted() {
 
 #[test]
 fn font_face_honors_os2_no_subsetting_permission() {
-    let mut program = test_font::toy_font_with_decorations('A');
+    let mut program = font_bytes(DECORATED_A_FONT);
     set_os2_fs_type(&mut program, 0x0100);
     let face = FontFace::from_bytes(FontId::new(25), program).expect("non-subsettable face");
     let mut builder = DisplayListBuilder::new(2).expect("builder");
@@ -840,7 +848,7 @@ fn set_os2_fs_type(font: &mut [u8], fs_type: u16) {
 
 #[test]
 fn true_type_glyf_subsetter_preserves_requested_glyph_ids() {
-    let program = test_font::toy_localized_font(&['A']);
+    let program = font_bytes(LOCALIZED_A_FONT);
     let subset = subset_truetype_font(&program, &BTreeSet::from([1_u16]))
         .expect("subset result")
         .expect("glyf subset");

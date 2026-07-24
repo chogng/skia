@@ -1,0 +1,31 @@
+schema = 1
+
+[[font]]
+path = "resources/fonts/Em.ttf"
+upstream_path = "resources/fonts/Em.ttf"
+sha256 = "91fd21b20cde65d27c7c31d3056c72412185cc5e4dcd0e57af82b3283948bcd3"
+size = 14788
+license = "OFL-1.1"
+license_file = "LICENSES/OFL-1.1.txt"
+copyright = "Copyright (c) 2015, Ben Wagner; Copyright (c) 2015, Google Inc."
+purpose = "Real TrueType parsing, shaping, outlines, and font metrics"
+
+[[font]]
+path = "resources/fonts/Variable.ttf"
+upstream_path = "resources/fonts/Variable.ttf"
+sha256 = "d9437a0f2ecef4fca3eb1567d21cd8b21c557ac23e47da8642105f14c94519d9"
+size = 4132
+license = "OFL-1.1"
+license_file = "LICENSES/OFL-1.1.txt"
+copyright = "Copyright (c) 2015, Google Inc."
+purpose = "Real OpenType variable-font parsing"
+
+[[font]]
+path = "resources/fonts/test.ttc"
+upstream_path = "resources/fonts/test.ttc"
+sha256 = "ce9205f1f1c86172019995be619c9db3d009712515c00122cb3881f5cf48be99"
+size = 6076
+license = "BSD-3-Clause"
+license_file = "LICENSES/SKIA-BSD-3-Clause.txt"
+copyright = "Copyright (c) 2014, Ben Wagner"
+purpose = "Real TrueType Collection parsing and face selection"

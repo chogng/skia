@@ -1,26 +1,212 @@
-#![allow(dead_code)]
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
-use skia_text::{FontSlant, FontStyle, TextBreakProvider, TextError, TextErrorCode, TextWordBreak};
-
-pub(crate) struct FixedBreakProvider {
-    pub(crate) language: &'static str,
-    pub(crate) opportunities: Vec<TextWordBreak>,
+#[derive(Clone, Copy)]
+enum FontSlant {
+    Normal,
+    Italic,
+    Oblique,
 }
 
-impl TextBreakProvider for FixedBreakProvider {
-    fn opportunities(&self, _word: &str, language: &str) -> Result<Vec<TextWordBreak>, TextError> {
-        if language != self.language {
-            return Err(TextError::new(TextErrorCode::InvalidLanguage));
+#[derive(Clone, Copy)]
+struct FontStyle {
+    weight: u16,
+    width: u16,
+    slant: FontSlant,
+}
+
+impl FontStyle {
+    const NORMAL: Self = Self::new(400, 5, FontSlant::Normal);
+
+    const fn new(weight: u16, width: u16, slant: FontSlant) -> Self {
+        Self {
+            weight,
+            width,
+            slant,
         }
-        Ok(self.opportunities.clone())
     }
 }
 
-pub(crate) fn toy_font(character: char) -> Vec<u8> {
+fn main() {
+    let output = env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("skia-rs/text/tests/fonts/synthetic"));
+    fs::create_dir_all(&output).expect("create synthetic font directory");
+
+    let basic_a = toy_font('A');
+    let basic_b = toy_font('B');
+    write_fixture(&output, "basic-a.ttf", basic_a.clone());
+    write_fixture(&output, "basic-b.ttf", basic_b.clone());
+    write_fixture(&output, "basic-c.ttf", toy_font('C'));
+    write_fixture(&output, "basic-alef.ttf", toy_font('\u{05d0}'));
+    write_fixture(&output, "basic-bet.ttf", toy_font('\u{05d1}'));
+    write_fixture(&output, "basic-han-zhong.ttf", toy_font('\u{4e2d}'));
+    write_fixture(&output, "basic-han-wen.ttf", toy_font('\u{6587}'));
+    write_fixture(
+        &output,
+        "collection-ab.ttc",
+        toy_font_collection(&[basic_a, basic_b]),
+    );
+    write_fixture(&output, "decorated-a.ttf", toy_font_with_decorations('A'));
+
+    for (name, family, style) in [
+        (
+            "style-example-regular.ttf",
+            "Example Sans",
+            FontStyle::NORMAL,
+        ),
+        (
+            "style-example-bold.ttf",
+            "Example Sans",
+            FontStyle::new(700, 5, FontSlant::Normal),
+        ),
+        (
+            "style-example-bold-condensed.ttf",
+            "Example Sans",
+            FontStyle::new(700, 3, FontSlant::Normal),
+        ),
+        (
+            "style-example-italic.ttf",
+            "Example Sans",
+            FontStyle::new(400, 5, FontSlant::Italic),
+        ),
+        (
+            "style-example-medium.ttf",
+            "Example Sans",
+            FontStyle::new(500, 5, FontSlant::Normal),
+        ),
+        (
+            "style-example-oblique.ttf",
+            "Example Sans",
+            FontStyle::new(400, 5, FontSlant::Oblique),
+        ),
+        ("style-other-regular.ttf", "Other Family", FontStyle::NORMAL),
+    ] {
+        write_fixture(&output, name, toy_styled_font(&['A'], family, style));
+    }
+
+    write_fixture(
+        &output,
+        "styled-small.ttf",
+        toy_styled_font(
+            &['-', 'A', 'a', 'e', 'h', 'i', 'n', 'o', 'p', 't', 'y'],
+            "Small",
+            FontStyle::NORMAL,
+        ),
+    );
+    write_fixture(
+        &output,
+        "styled-large.ttf",
+        toy_styled_font(
+            &['-', 'A', 'a', 'e', 'h', 'i', 'n', 'o', 'p', 't', 'y'],
+            "Large",
+            FontStyle::NORMAL,
+        ),
+    );
+    for (name, family, characters) in [
+        ("styled-decorated.ttf", "Decorated", &[' ', 'A'][..]),
+        (
+            "styled-decoration-patterns.ttf",
+            "Decoration Patterns",
+            &['A'][..],
+        ),
+        ("styled-display-layout.ttf", "Display Layout", &['A'][..]),
+        ("styled-span-styles.ttf", "Span Styles", &['A'][..]),
+    ] {
+        write_fixture(
+            &output,
+            name,
+            toy_styled_font(characters, family, FontStyle::NORMAL),
+        );
+    }
+
+    write_fixture(
+        &output,
+        "variable.ttf",
+        toy_variable_font(&['A'], "Variable Sans"),
+    );
+    write_fixture(&output, "kerned-a.ttf", toy_kerned_font(&['A']));
+    write_fixture(
+        &output,
+        "localized-layout.ttf",
+        toy_localized_font(&['-', 'A', '\u{05d0}', '\u{2026}']),
+    );
+    write_fixture(&output, "localized-a.ttf", toy_localized_font(&['A']));
+    write_fixture(
+        &output,
+        "ligature-carets.ttf",
+        toy_ligature_font(Some(&[200, 450])),
+    );
+    write_fixture(&output, "ligature-atomic.ttf", toy_ligature_font(None));
+    write_fixture(
+        &output,
+        "ligature-mismatched.ttf",
+        toy_ligature_font(Some(&[300])),
+    );
+
+    for (name, characters) in [
+        (
+            "coverage-cpu-fallback.ttf",
+            &['A', '\u{0301}', '\u{05d0}'][..],
+        ),
+        ("coverage-latin-space.ttf", &[' ', 'A'][..]),
+        (
+            "coverage-hyphenation.ttf",
+            &['-', 'a', 'e', 'h', 'i', 'n', 'o', 'p', 't', 'y'][..],
+        ),
+        ("coverage-ellipsis.ttf", &['.', 'A', '\u{2026}'][..]),
+        ("coverage-period-fallback.ttf", &['.', 'A'][..]),
+        ("coverage-a-ellipsis.ttf", &['A', '\u{2026}'][..]),
+        (
+            "coverage-rtl-ellipsis.ttf",
+            &['\u{05d0}', '\u{05d1}', '\u{05d2}', '\u{2026}'][..],
+        ),
+        (
+            "coverage-dictionary.ttf",
+            &[
+                '-', 'A', 'B', 'a', 'b', '\u{0301}', '\u{05d0}', '\u{05d1}', '\u{05d2}', '\u{05d3}',
+            ][..],
+        ),
+        ("coverage-mixed-space-alef.ttf", &[' ', 'A', '\u{05d0}'][..]),
+        ("coverage-rtl-pair.ttf", &['\u{05d0}', '\u{05d1}'][..]),
+        ("coverage-mixed-bidi.ttf", &['A', '\u{05d0}'][..]),
+        (
+            "coverage-selection.ttf",
+            &['A', '\u{05d0}', '\u{05d1}', '\u{2026}', '\u{4e2d}'][..],
+        ),
+        (
+            "coverage-spacing.ttf",
+            &[' ', 'A', '\u{00a0}', '\u{0301}', '\u{2026}'][..],
+        ),
+        (
+            "coverage-unicode-spaces.ttf",
+            &['A', '\u{00a0}', '\u{2007}', '\u{202f}', '\u{3000}'][..],
+        ),
+        (
+            "coverage-cjk.ttf",
+            &[' ', '\u{0301}', '\u{3002}', '\u{4e2d}'][..],
+        ),
+        (
+            "coverage-mixed-script.ttf",
+            &['.', 'A', 'B', '\u{4e2d}'][..],
+        ),
+    ] {
+        write_fixture(&output, name, toy_font_for(characters));
+    }
+}
+
+fn write_fixture(output: &Path, name: &str, bytes: Vec<u8>) {
+    fs::write(output.join(name), bytes).expect("write synthetic font fixture");
+}
+
+fn toy_font(character: char) -> Vec<u8> {
     toy_font_for(&[character])
 }
 
-pub(crate) fn toy_font_collection(faces: &[Vec<u8>]) -> Vec<u8> {
+fn toy_font_collection(faces: &[Vec<u8>]) -> Vec<u8> {
     assert!(!faces.is_empty());
     let directory_len = 12 + faces.len() * 4;
     let mut collection = vec![0; directory_len];
@@ -58,7 +244,7 @@ pub(crate) fn toy_font_collection(faces: &[Vec<u8>]) -> Vec<u8> {
     collection
 }
 
-pub(crate) fn toy_font_with_decorations(character: char) -> Vec<u8> {
+fn toy_font_with_decorations(character: char) -> Vec<u8> {
     build_font_from_tables(vec![
         (*b"cmap", cmap_table(&[character])),
         (*b"glyf", glyf_table()),
@@ -72,23 +258,23 @@ pub(crate) fn toy_font_with_decorations(character: char) -> Vec<u8> {
     ])
 }
 
-pub(crate) fn toy_font_for(characters: &[char]) -> Vec<u8> {
+fn toy_font_for(characters: &[char]) -> Vec<u8> {
     build_toy_font(characters, None, false, false)
 }
 
-pub(crate) fn toy_styled_font(characters: &[char], family: &str, style: FontStyle) -> Vec<u8> {
+fn toy_styled_font(characters: &[char], family: &str, style: FontStyle) -> Vec<u8> {
     build_toy_font(characters, Some((family, style)), false, false)
 }
 
-pub(crate) fn toy_variable_font(characters: &[char], family: &str) -> Vec<u8> {
+fn toy_variable_font(characters: &[char], family: &str) -> Vec<u8> {
     build_toy_font(characters, Some((family, FontStyle::NORMAL)), true, false)
 }
 
-pub(crate) fn toy_kerned_font(characters: &[char]) -> Vec<u8> {
+fn toy_kerned_font(characters: &[char]) -> Vec<u8> {
     build_toy_font(characters, None, false, true)
 }
 
-pub(crate) fn toy_localized_font(characters: &[char]) -> Vec<u8> {
+fn toy_localized_font(characters: &[char]) -> Vec<u8> {
     let outline = glyf_table();
     let mut glyf = outline.clone();
     glyf.extend_from_slice(&outline);
@@ -113,7 +299,7 @@ pub(crate) fn toy_localized_font(characters: &[char]) -> Vec<u8> {
     ])
 }
 
-pub(crate) fn toy_ligature_font(caret_coordinates: Option<&[i16]>) -> Vec<u8> {
+fn toy_ligature_font(caret_coordinates: Option<&[i16]>) -> Vec<u8> {
     let outline = glyf_table();
     let mut glyf = outline.clone();
     glyf.extend_from_slice(&outline);
@@ -374,11 +560,11 @@ fn name_table(family: &str) -> Vec<u8> {
 fn os2_table(style: FontStyle) -> Vec<u8> {
     let mut table = vec![0; 96];
     put_u16(&mut table, 0, 4);
-    put_u16(&mut table, 4, style.weight());
-    put_u16(&mut table, 6, style.width().class());
+    put_u16(&mut table, 4, style.weight);
+    put_u16(&mut table, 6, style.width);
     put_i16(&mut table, 26, 100);
     put_i16(&mut table, 28, 300);
-    let selection = match style.slant() {
+    let selection = match style.slant {
         FontSlant::Normal => 0,
         FontSlant::Italic => 1,
         FontSlant::Oblique => 1 << 9,

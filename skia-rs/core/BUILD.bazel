@@ -4,4 +4,5 @@ skia_rust_crate(
     name = "core",
     crate_features = ["text"],
     crate_name = "skia_core",
+    test_data_extra = ["//skia-rs/text:font-test-fixtures"],
 )

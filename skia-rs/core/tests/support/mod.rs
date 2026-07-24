@@ -1,4 +1,7 @@
-#[path = "../../../test-support/font.rs"]
-mod font;
+pub(crate) const BASIC_A: &[u8] = include_bytes!("../../../text/tests/fonts/synthetic/basic-a.ttf");
+pub(crate) const DECORATED_A: &[u8] =
+    include_bytes!("../../../text/tests/fonts/synthetic/decorated-a.ttf");
 
-pub(crate) use font::{toy_font, toy_font_with_decorations};
+pub(crate) fn font_bytes(fixture: &[u8]) -> Vec<u8> {
+    fixture.to_vec()
+}

@@ -3,4 +3,5 @@ load("//:defs.bzl", "skia_rust_crate")
 skia_rust_crate(
     name = "text",
     crate_name = "skia_gpu_text",
+    test_data_extra = ["//skia-rs/text:font-test-fixtures"],
 )
