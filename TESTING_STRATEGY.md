@@ -10,7 +10,7 @@ that can be dropped into this workspace unchanged.
 The current baseline is useful but predominantly behavioural: workspace Rust
 tests cover the responsibility-crate APIs, CPU canvas, display lists, paths/path effects,
 the software GPU replay contract, Metal, Vulkan offscreen execution, codecs, text, and
-the deterministic PDF and XPS/OpenXPS document writers.
+the deterministic SVG, PDF, and XPS/OpenXPS writers.
 Run Rust commands from `skia-rs/`; `cargo test --workspace --exclude skia-metal --exclude skia-vulkan
 --all-features` is the portable regression gate; platform executors run in
 their dedicated Metal and forced-Lavapipe jobs.  The three full Unicode
@@ -72,7 +72,7 @@ and [its Puppeteer performance harness](https://skia.googlesource.com/skia/+/ref
 | `fuzz/` and OSS-Fuzz harnesses | Test code | **Design reference / adapter.** Add Rust `cargo-fuzz` targets against this crate's decode, path, display-list, and text boundaries. | Do not treat an OSS-Fuzz public corpus URL as a versioned, licensed vendoring source; keep only locally minimized, provenance-reviewed reproducers. |
 | CanvasKit Jasmine/Karma/Puppeteer tests | JS/WASM test code | **Design reference only** until a Rust WASM/CanvasKit API is introduced. | The API, build toolchain, and browser image semantics differ. |
 | Unicode UCD conformance files | Input corpus | **Direct CI download; already implemented.** | Unicode Data Files are under Unicode License v3 unless individually noted; URLs and SHA-256 values remain in the fetch script and data stays under `target/`. [Unicode terms](https://www.unicode.org/copyright.html). |
-| ICC/color profiles, PDF/XPS comparison inputs, SVG suites | External corpora | **Not yet admitted.** Keep PDF and XPS/OpenXPS coverage generated through the public APIs and package-level invariants; add third-party files only through the same manifest. | Profiles, fonts, and documents have independent licences. SVG still has no supported API, so an SVG suite would not test a current boundary. |
+| ICC/color profiles, PDF/XPS comparison inputs, SVG suites | External corpora | **Not yet admitted.** Keep SVG, PDF, and XPS/OpenXPS coverage generated through the public APIs and structural/determinism invariants; add third-party files only through the same manifest. | Profiles, fonts, and documents have independent licences. The SVG writer now has a supported output boundary, but external conformance inputs still require individual provenance and an input-parser or browser-oracle policy. |
 
 The source-license statement above is based on [Skia's current
 LICENSE](https://skia.googlesource.com/skia/+/main/LICENSE), rather than an

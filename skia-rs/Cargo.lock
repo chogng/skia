@@ -818,6 +818,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "skia-svg"
+version = "0.1.0"
+dependencies = [
+ "skia-codec",
+ "skia-core",
+ "skia-image",
+]
+
+[[package]]
 name = "skia-system-fonts"
 version = "0.1.0"
 dependencies = [

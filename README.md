@@ -2,9 +2,9 @@
 
 `skia-rs/` is the Rust workspace for an independently developed 2D graphics subsystem and reusable
 library. It owns portable geometry, paths, paints, image resources and codecs,
-text-glyph drawing contracts, display lists, and CPU/GPU execution. It is **not** an
-implementation detail of a particular caller and it does not model caller-specific
-operators or objects.
+text-glyph drawing contracts, display lists, CPU/GPU execution, and bounded
+document/vector output. It is **not** an implementation detail of a particular
+caller and it does not model caller-specific operators or objects.
 
 Cargo remains the dependency and package source of truth. The repository also
 contains an initial Bazel build rooted at `MODULE.bazel`: `rules_rs` reads
@@ -29,6 +29,7 @@ flowchart LR
   api --> effects["Built-in effects"]
   api --> cpu["Skia CPU executor"]
   api --> gpu["Skia GPU executor"]
+  api --> svg["SVG canvas writer"]
   api --> pdf["PDF document writer"]
   api --> xps["XPS / OpenXPS writer"]
   gpu --> metal["Metal backend"]
@@ -51,7 +52,7 @@ availability; there is no separate `portable` platform, crate, or feature.
 
 | Capability | Windows | Linux | macOS |
 | --- | --- | --- | --- |
-| Portable crates, CPU, text, codecs, document writers, and shared GPU contracts | Yes | Yes | Yes |
+| Portable crates, CPU, text, codecs, SVG/document writers, and shared GPU contracts | Yes | Yes | Yes |
 | Vulkan backend | Yes | Yes | No |
 | Metal backend | No | No | Yes |
 
@@ -65,7 +66,7 @@ at the application composition boundary; Bazel expresses the same boundary with
 - `skia-rs/Cargo.toml` is a virtual workspace manifest, not a package. There is
   no root facade crate: consumers depend directly on the public responsibility
   crates they use, such as `skia-core`, `skia-effects`, `skia-cpu`,
-  `skia-codec`, `skia-pdf`, `skia-xps`, or `skia-gpu`. Skia crates may depend
+  `skia-codec`, `skia-svg`, `skia-pdf`, `skia-xps`, or `skia-gpu`. Skia crates may depend
   on each other, but never on a caller-specific document crate or semantic type.
 - The application composition root may additionally depend on `skia-rs/gpu`,
   `skia-rs/gpu/text`, and one selected platform executor such as `skia-rs/gpu/metal` or
@@ -83,6 +84,9 @@ at the application composition boundary; Bazel expresses the same boundary with
   graphics API, caller-specific parser, document model, or Scene. Its default
   `text` feature adds glyph-run display-list resources; GPU crates disable that
   feature because generic atlas submission does not need shaping types.
+  `core/src/shaders` owns backend-neutral gradient, runtime-program, coordinate,
+  validation, evaluation, and shared-handle semantics; it contains no native
+  shader-language source.
 - `skia-rs/effects` contains the built-in effect implementation and factory
   surface. `skia-core` owns stable effect value and extension contracts so it
   never depends on concrete effects; `skia-effects` depends one-way on core and
@@ -98,7 +102,8 @@ at the application composition boundary; Bazel expresses the same boundary with
   portable outline and decoration geometry remains in `skia-core`. Hardware
   backends depend on `skia-gpu`, never on the text adapter, so adding Vulkan or
   WebGPU does not duplicate shaping or atlas policy.
-- `skia-rs/gpu/metal` and `skia-rs/gpu/vulkan` are platform execution adapters. The
+- `skia-rs/gpu/metal` and `skia-rs/gpu/vulkan` are platform execution adapters.
+  Each backend owns its native shader sources and their build-time compilation. The
   Vulkan adapter dynamically loads the platform loader and owns a real instance,
   device, graphics queue, compute pipeline, and offscreen RGBA8 storage target.
   It executes the complete portable command vocabulary in Vulkan shaders,
@@ -122,6 +127,15 @@ at the application composition boundary; Bazel expresses the same boundary with
 - A Skia public type, method, error, or command must not mention caller-specific
   objects, operators, page state, or policy. Perform such translation in the
   caller's adapter.
+
+`skia-svg` is the single-canvas SVG output boundary. It depends on core drawing
+semantics, image storage, and PNG encoding; none of those lower crates depends
+on SVG. XML assembly remains private to the format crate. The current SVG and
+XPS writers do not yet share a general element/attribute API, and there is no
+input parser, entity policy, or namespace model that would justify a public
+`skia-xml` responsibility crate. Introduce that crate only when at least two
+format implementations share a concrete bounded XML contract or when an SVG
+input parser establishes a separately useful XML boundary.
 
 ## Image pixels and color management
 
@@ -163,6 +177,40 @@ modes, layer restore, glyph masks, and blend color filters. Color-managed
 images are converted before sampling, so samples from different declared
 spaces enter that same compositing path instead of being mixed as if they
 shared an encoding.
+
+## SVG output
+
+`skia-svg::SvgWriter` serializes one complete `DisplayList` and
+`SvgCanvasSpec` to deterministic UTF-8 SVG. `encode` returns owned bytes;
+`write` compiles the complete document before touching the destination, so an
+unsupported command, invalid display-list resource, unbalanced save state, or
+resource-limit failure never leaves a misleading SVG prefix. Destination I/O
+failures retain their `ErrorKind`.
+
+The writer has explicit ceilings for commands, combined definitions, path
+verbs, each embedded PNG, and total output bytes. The canvas owns independent
+rendered dimensions and a logical `viewBox`. Q16.16 values use exact stable
+decimal formatting, generated resource IDs follow declaration order, and
+repeated gradient/image resources are deduplicated.
+
+The initial native mapping is:
+
+| Display-list semantic | SVG policy |
+| --- | --- |
+| Initial clear | A view-box-sized rectangle; transparent clear emits no element |
+| Save/restore, affine set/concat transform | Nested groups plus SVG matrix attributes |
+| Rectangle/path fill, even-odd/non-zero rule | Native `rect`/`path` |
+| Center stroke, cap/join/miter, dash | Native path stroke attributes |
+| Intersect rectangle/path clip | `clipPathUnits="userSpaceOnUse"` definition captured at the clip-time transform |
+| Linear/radial gradient, clamp/repeat/mirror, transparent stops | Deduplicated `linearGradient`/`radialGradient` definitions |
+| sRGB RGBA8 image, opacity, nearest/linear sampling | Deduplicated PNG data URI symbol and `use`; nearest requests pixelated reconstruction |
+| Source-over layer without bounds or filter | Native group opacity |
+| Difference clip, non-center stroke, path effect, runtime shader, color/image filter, non-source-over blend, rational conic | Explicit `Unsupported` |
+| Glyph-run command | `UnsupportedText`; source text and font rights are never guessed from glyph IDs |
+
+SVG input parsing, external resources, CSS, animation, masks, patterns, filters,
+text embedding/outlines, and whole-canvas CPU fallback are separate future
+increments rather than silent behavior in this writer.
 
 ## PDF output
 
@@ -255,9 +303,9 @@ reusable `DisplayList`.
 
 Encryption and digital signatures are not current features: both need a
 reviewed cryptographic implementation plus caller-owned password/key and CMS
-signing contracts, so this writer does not emit a misleading placeholder. SVG
-remains a separate single-canvas output responsibility rather than being forced
-into this multi-page API.
+signing contracts, so this writer does not emit a misleading placeholder.
+Single-canvas SVG output remains in `skia-svg` rather than being forced into
+this multi-page API.
 
 ## XPS and OpenXPS output
 
