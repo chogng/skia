@@ -416,6 +416,11 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
                     .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::Unsupported))
             })
             .transpose()?;
+        let clip_bounds = clip
+            .as_deref()
+            .filter(|id| self.clip_uses_object_bounding_box(id))
+            .map(|_| self.element_object_bounds(self.root))
+            .transpose()?;
         let uses_state = transform.is_some() || opacity != u8::MAX || clip.is_some();
         if uses_state {
             if opacity == u8::MAX {
@@ -431,7 +436,7 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
                     .map_err(map_core_error)?;
             }
             if let Some(clip) = clip.as_deref() {
-                self.apply_clip_path(clip)?;
+                self.apply_clip_path(clip, clip_bounds)?;
             }
         }
         self.ancestors.push(self.root);
@@ -540,6 +545,15 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
                     .and_then(|id| self.resolve_color_matrix_filter(id))
             })
             .transpose()?;
+        let needs_object_bounds = clip
+            .as_deref()
+            .is_some_and(|id| self.clip_uses_object_bounding_box(id))
+            || mask
+                .as_deref()
+                .is_some_and(|id| self.mask_uses_object_bounding_box(id));
+        let object_bounds = needs_object_bounds
+            .then(|| self.element_object_bounds(element))
+            .transpose()?;
 
         let uses_state =
             transform.is_some() || opacity != u8::MAX || clip.is_some() || filter.is_some();
@@ -559,7 +573,7 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
                     .map_err(map_core_error)?;
             }
             if let Some(clip) = clip.as_deref() {
-                self.apply_clip_path(clip)?;
+                self.apply_clip_path(clip, object_bounds)?;
             }
         }
 
@@ -601,7 +615,7 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         if result.is_ok()
             && let Some(mask) = mask.as_deref()
         {
-            result = self.apply_alpha_mask(mask);
+            result = self.apply_alpha_mask(mask, object_bounds);
         }
         self.ancestors.pop();
         if mask.is_some() {
@@ -1733,7 +1747,155 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         Ok(())
     }
 
-    fn apply_clip_path(&mut self, id: &str) -> Result<(), SvgReadError> {
+    fn clip_uses_object_bounding_box(&self, id: &str) -> bool {
+        self.resources.get(id).is_some_and(|element| {
+            element.local_name() == "clipPath"
+                && element.attribute_ns(None, "clipPathUnits") == Some("objectBoundingBox")
+        })
+    }
+
+    fn mask_uses_object_bounding_box(&self, id: &str) -> bool {
+        self.resources.get(id).is_some_and(|element| {
+            element.local_name() == "mask"
+                && (matches!(
+                    element.attribute_ns(None, "maskUnits"),
+                    None | Some("objectBoundingBox")
+                ) || element.attribute_ns(None, "maskContentUnits")
+                    == Some("objectBoundingBox"))
+        })
+    }
+
+    fn element_object_bounds(&self, element: &'a XmlElement) -> Result<Rect, SvgReadError> {
+        self.element_bounds_inner(element, 0)?
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))
+    }
+
+    fn element_bounds_inner(
+        &self,
+        element: &'a XmlElement,
+        depth: usize,
+    ) -> Result<Option<Rect>, SvgReadError> {
+        if depth >= self.limits.max_reference_depth {
+            return Err(SvgReadError::new(SvgReadErrorCode::ResourceLimit));
+        }
+        if element
+            .namespace_uri()
+            .is_some_and(|namespace| namespace != SVG_NAMESPACE)
+            || style_property(element, "display") == Some("none")
+        {
+            return Ok(None);
+        }
+        let path_bounds = |path: Option<Path>| -> Result<Option<Rect>, SvgReadError> {
+            let Some(path) = path else {
+                return Ok(None);
+            };
+            let Some(bounds) = path.tight_bounds() else {
+                return Ok(None);
+            };
+            Rect::new(bounds.left(), bounds.top(), bounds.right(), bounds.bottom())
+                .map(Some)
+                .map_err(map_core_error)
+        };
+        let bounds = match element.local_name() {
+            "rect" => path_bounds(self.rect_path(element)?)?,
+            "circle" => path_bounds(self.circle_path(element)?)?,
+            "ellipse" => path_bounds(self.ellipse_path(element)?)?,
+            "line" => path_bounds(Some(self.line_path(element)?))?,
+            "polyline" => path_bounds(self.polygon_path(element, false)?)?,
+            "polygon" => path_bounds(self.polygon_path(element, true)?)?,
+            "path" => path_bounds(self.path(element)?)?,
+            "image" => {
+                let x = optional_length(element, "x")?;
+                let y = optional_length(element, "y")?;
+                let width = required_nonnegative_length(element, "width")?;
+                let height = required_nonnegative_length(element, "height")?;
+                if width == Scalar::ZERO || height == Scalar::ZERO {
+                    None
+                } else {
+                    Some(Rect::new(x, y, add(x, width)?, add(y, height)?).map_err(map_core_error)?)
+                }
+            }
+            "use" => {
+                let reference = href(element)
+                    .and_then(|value| value.strip_prefix('#'))
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::Unsupported))?;
+                let target = *self
+                    .resources
+                    .get(reference)
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
+                self.element_bounds_inner(target, depth + 1)?
+                    .map(|bounds| {
+                        transform_rect(
+                            bounds,
+                            Transform::translate(
+                                optional_length(element, "x")?,
+                                optional_length(element, "y")?,
+                            ),
+                        )
+                    })
+                    .transpose()?
+            }
+            "svg" if depth > 0 => {
+                let x = optional_length(element, "x")?;
+                let y = optional_length(element, "y")?;
+                let width = element
+                    .attribute_ns(None, "width")
+                    .map(parse_positive_length)
+                    .transpose()?
+                    .unwrap_or(Scalar::from_bits(300 << 16));
+                let height = element
+                    .attribute_ns(None, "height")
+                    .map(parse_positive_length)
+                    .transpose()?
+                    .unwrap_or(Scalar::from_bits(150 << 16));
+                Some(Rect::new(x, y, add(x, width)?, add(y, height)?).map_err(map_core_error)?)
+            }
+            "g" | "svg" | "symbol" => {
+                let mut aggregate = None;
+                for child in element.children().iter().filter_map(XmlNode::as_element) {
+                    if matches!(
+                        child.local_name(),
+                        "defs"
+                            | "style"
+                            | "title"
+                            | "desc"
+                            | "metadata"
+                            | "linearGradient"
+                            | "radialGradient"
+                            | "pattern"
+                            | "clipPath"
+                            | "mask"
+                            | "marker"
+                            | "filter"
+                    ) {
+                        continue;
+                    }
+                    let Some(mut child_bounds) = self.element_bounds_inner(child, depth + 1)?
+                    else {
+                        continue;
+                    };
+                    if let Some(transform) = style_property(child, "transform") {
+                        child_bounds = transform_rect(child_bounds, parse_transform(transform)?)?;
+                    }
+                    aggregate = Some(match aggregate {
+                        Some(current) => union_rect(current, child_bounds)?,
+                        None => child_bounds,
+                    });
+                }
+                aggregate
+            }
+            "text" => return Err(SvgReadError::new(SvgReadErrorCode::Unsupported)),
+            _ => None,
+        };
+        Ok(bounds)
+    }
+
+    fn apply_clip_path(
+        &mut self,
+        id: &str,
+        object_bounds: Option<Rect>,
+    ) -> Result<(), SvgReadError> {
         if self.reference_stack.len() >= self.limits.max_reference_depth
             || self.reference_stack.iter().any(|active| active == id)
         {
@@ -1748,12 +1910,11 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         {
             return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
         }
-        if !matches!(
-            clip.attribute_ns(None, "clipPathUnits"),
-            None | Some("userSpaceOnUse")
-        ) {
-            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
-        }
+        let object_bounding_box = match clip.attribute_ns(None, "clipPathUnits") {
+            None | Some("userSpaceOnUse") => false,
+            Some("objectBoundingBox") => true,
+            Some(_) => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+        };
         let mut shapes = Vec::new();
         for child in clip.children() {
             match child {
@@ -1775,6 +1936,13 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
             return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
         }
         let mut path = combine_paths(&shapes, self.limits.max_path_verbs)?;
+        if object_bounding_box {
+            let bounds = object_bounds
+                .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+            path = path
+                .transformed(bounding_box_transform(bounds)?)
+                .map_err(map_core_error)?;
+        }
         if let Some(transform) = clip.attribute_ns(None, "transform") {
             path = path
                 .transformed(parse_transform(transform)?)
@@ -1791,7 +1959,11 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
             .map_err(map_core_error)
     }
 
-    fn apply_alpha_mask(&mut self, id: &str) -> Result<(), SvgReadError> {
+    fn apply_alpha_mask(
+        &mut self,
+        id: &str,
+        object_bounds: Option<Rect>,
+    ) -> Result<(), SvgReadError> {
         if self.reference_stack.len() >= self.limits.max_reference_depth
             || self.reference_stack.iter().any(|active| active == id)
         {
@@ -1806,14 +1978,16 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         {
             return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
         }
-        if !matches!(mask.attribute_ns(None, "maskUnits"), Some("userSpaceOnUse"))
-            || !matches!(
-                mask.attribute_ns(None, "maskContentUnits"),
-                None | Some("userSpaceOnUse")
-            )
-        {
-            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
-        }
+        let mask_object_bounding_box = match mask.attribute_ns(None, "maskUnits") {
+            None | Some("objectBoundingBox") => true,
+            Some("userSpaceOnUse") => false,
+            Some(_) => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+        };
+        let content_object_bounding_box = match mask.attribute_ns(None, "maskContentUnits") {
+            None | Some("userSpaceOnUse") => false,
+            Some("objectBoundingBox") => true,
+            Some(_) => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+        };
         if !matches!(style_property(mask, "mask-type"), Some("alpha")) {
             return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
         }
@@ -1826,10 +2000,44 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         self.builder
             .save_layer(SaveLayerOptions::new().with_blend_mode(BlendMode::DestinationIn))
             .map_err(map_core_error)?;
-        let has_region = ["x", "y", "width", "height"]
-            .iter()
-            .any(|name| mask.attribute_ns(None, name).is_some());
-        let region_result = if has_region {
+        let has_region = mask_object_bounding_box
+            || ["x", "y", "width", "height"]
+                .iter()
+                .any(|name| mask.attribute_ns(None, name).is_some());
+        let region_result = if mask_object_bounding_box {
+            (|| {
+                let bounds = object_bounds
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+                let width = subtract(bounds.right(), bounds.left())?;
+                let height = subtract(bounds.bottom(), bounds.top())?;
+                let x = object_box_coordinate(
+                    mask.attribute_ns(None, "x"),
+                    bounds.left(),
+                    width,
+                    Scalar::from_bits(-(1 << 16) / 10),
+                )?;
+                let y = object_box_coordinate(
+                    mask.attribute_ns(None, "y"),
+                    bounds.top(),
+                    height,
+                    Scalar::from_bits(-(1 << 16) / 10),
+                )?;
+                let mask_width = match mask.attribute_ns(None, "width") {
+                    Some(value) => multiply_scalar(width, object_box_fraction(value)?)?,
+                    None => multiply_scalar(width, Scalar::from_bits((12 << 16) / 10))?,
+                };
+                let mask_height = match mask.attribute_ns(None, "height") {
+                    Some(value) => multiply_scalar(height, object_box_fraction(value)?)?,
+                    None => multiply_scalar(height, Scalar::from_bits((12 << 16) / 10))?,
+                };
+                if mask_width.bits() <= 0 || mask_height.bits() <= 0 {
+                    return Err(SvgReadError::new(SvgReadErrorCode::InvalidGeometry));
+                }
+                let region = Rect::new(x, y, add(x, mask_width)?, add(y, mask_height)?)
+                    .map_err(map_core_error)?;
+                self.builder.clip_rect(region).map_err(map_core_error)
+            })()
+        } else if has_region {
             (|| {
                 let x = optional_length(mask, "x")?;
                 let y = optional_length(mask, "y")?;
@@ -1846,6 +2054,13 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
             Ok(())
         };
         let result = region_result.and_then(|()| {
+            if content_object_bounding_box {
+                let bounds = object_bounds
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+                self.builder
+                    .concat_transform(bounding_box_transform(bounds)?)
+                    .map_err(map_core_error)?;
+            }
             self.ancestors.push(mask);
             let result = self.lower_children(mask, &style);
             self.ancestors.pop();
@@ -2421,6 +2636,59 @@ fn multiply_scalar(left: Scalar, right: Scalar) -> Result<Scalar, SvgReadError> 
     i32::try_from(rounded)
         .map(Scalar::from_bits)
         .map_err(|_| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))
+}
+
+fn bounding_box_transform(bounds: Rect) -> Result<Transform, SvgReadError> {
+    let width = subtract(bounds.right(), bounds.left())?;
+    let height = subtract(bounds.bottom(), bounds.top())?;
+    if width.bits() <= 0 || height.bits() <= 0 {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidGeometry));
+    }
+    Ok(Transform::new(
+        width,
+        Scalar::ZERO,
+        Scalar::ZERO,
+        height,
+        bounds.left(),
+        bounds.top(),
+    ))
+}
+
+fn transform_rect(rect: Rect, transform: Transform) -> Result<Rect, SvgReadError> {
+    let corners = [
+        Point::new(rect.left(), rect.top()),
+        Point::new(rect.right(), rect.top()),
+        Point::new(rect.right(), rect.bottom()),
+        Point::new(rect.left(), rect.bottom()),
+    ];
+    let mut minimum_x = i32::MAX;
+    let mut minimum_y = i32::MAX;
+    let mut maximum_x = i32::MIN;
+    let mut maximum_y = i32::MIN;
+    for corner in corners {
+        let point = transform.map_point(corner).map_err(map_core_error)?;
+        minimum_x = minimum_x.min(point.x().bits());
+        minimum_y = minimum_y.min(point.y().bits());
+        maximum_x = maximum_x.max(point.x().bits());
+        maximum_y = maximum_y.max(point.y().bits());
+    }
+    Rect::new(
+        Scalar::from_bits(minimum_x),
+        Scalar::from_bits(minimum_y),
+        Scalar::from_bits(maximum_x),
+        Scalar::from_bits(maximum_y),
+    )
+    .map_err(map_core_error)
+}
+
+fn union_rect(first: Rect, second: Rect) -> Result<Rect, SvgReadError> {
+    Rect::new(
+        Scalar::from_bits(first.left().bits().min(second.left().bits())),
+        Scalar::from_bits(first.top().bits().min(second.top().bits())),
+        Scalar::from_bits(first.right().bits().max(second.right().bits())),
+        Scalar::from_bits(first.bottom().bits().max(second.bottom().bits())),
+    )
+    .map_err(map_core_error)
 }
 
 fn object_box_fraction(value: &str) -> Result<Scalar, SvgReadError> {

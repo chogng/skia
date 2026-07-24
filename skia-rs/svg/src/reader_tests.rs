@@ -474,6 +474,70 @@ fn markers_follow_start_mid_and_end_path_tangents() {
 }
 
 #[test]
+fn object_bounding_box_clips_and_masks_use_target_geometry() {
+    let clipped = decode(
+        r##"<svg width="50" height="30">
+          <defs>
+            <clipPath id="half" clipPathUnits="objectBoundingBox">
+              <rect x=".25" y="0" width=".5" height="1"/>
+            </clipPath>
+          </defs>
+          <g clip-path="url(#half)">
+            <rect x="10" y="5" width="20" height="10"/>
+          </g>
+        </svg>"##,
+    );
+    let (path_id, _) = clipped
+        .display_list()
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            DrawCommand::ClipPath { path, rule, .. } => Some((*path, *rule)),
+            _ => None,
+        })
+        .expect("object bounding-box clip");
+    let bounds = clipped
+        .display_list()
+        .path(path_id)
+        .expect("clip resource")
+        .tight_bounds()
+        .expect("clip bounds");
+    assert_eq!(bounds.left().bits(), 15 << 16);
+    assert_eq!(bounds.right().bits(), 25 << 16);
+    assert_eq!(bounds.top().bits(), 5 << 16);
+    assert_eq!(bounds.bottom().bits(), 15 << 16);
+
+    let masked = decode(
+        r##"<svg width="50" height="30">
+          <defs>
+            <mask id="local" mask-type="alpha" maskContentUnits="objectBoundingBox">
+              <rect x="0" y="0" width=".5" height="1" fill="white"/>
+            </mask>
+          </defs>
+          <rect x="10" y="5" width="20" height="10" mask="url(#local)"/>
+        </svg>"##,
+    );
+    assert!(
+        masked
+            .display_list()
+            .commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                DrawCommand::SaveLayer(options)
+                    if options.blend_mode() == skia_core::BlendMode::DestinationIn
+            ))
+    );
+    assert!(
+        masked
+            .display_list()
+            .commands()
+            .iter()
+            .any(|command| matches!(command, DrawCommand::ConcatTransform(_)))
+    );
+}
+
+#[test]
 fn malformed_xml_and_unsupported_svg_are_distinct() {
     let malformed = SvgReader::decode(
         br#"<svg width="1" height="1"><path></svg>"#,

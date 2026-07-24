@@ -205,7 +205,8 @@ linear and radial gradients (including inherited definitions,
 object-bounding-box transforms, spread modes, and stop opacity),
 object-bounding-box and user-space vector fill patterns (including inherited
 definitions and pattern view boxes), user-space clip paths, explicit
-user-space alpha masks, single-stage `SourceGraphic` color-matrix filters,
+user-space and object-bounding-box clip paths and alpha masks,
+single-stage `SourceGraphic` color-matrix filters,
 start/mid/end path markers with tangent-derived auto orientation,
 stroke-width or user-space sizing, reference points, and marker view boxes,
 embedded PNG/JPEG/WebP data-URI images, and nested SVG viewports. With
@@ -253,9 +254,8 @@ The reader and writer intentionally have separate limits and error types.
 `skia-xml` provides syntax only and does not by itself accept or render SVG.
 The reader still rejects network/file resources, animation, script, pattern
 strokes/transforms, filter graphs beyond the exact color-matrix mapping,
-luminance/object-bounding-box masks, arbitrary focal radial gradients,
-object-bounding-box clip paths, context paint in markers, and text-on-path or
-stroked text. The writer
+luminance masks, arbitrary focal radial gradients, context paint in markers,
+object-bounding-box effects on text, and text-on-path or stroked text. The writer
 still rejects glyph-run commands because a DisplayList does not retain source
 text or font-licensing policy. Unsupported semantics fail explicitly rather
 than being silently approximated.
