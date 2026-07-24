@@ -294,11 +294,9 @@ fn font_metadata_and_css_like_style_matching_are_deterministic() {
             .id(),
         FontId::new(100)
     );
-    assert!(
-        fonts
-            .match_face("Missing Family", FontStyle::NORMAL)
-            .is_none()
-    );
+    assert!(fonts
+        .match_face("Missing Family", FontStyle::NORMAL)
+        .is_none());
     assert_eq!(
         fonts
             .match_face_for_families(&["Missing Family", "Other Family"], FontStyle::NORMAL)
@@ -332,12 +330,10 @@ fn variable_font_instances_validate_axes_and_keep_distinct_identities() {
     assert_eq!(instance.variations(), &[coordinate]);
     let run = instance.shape("A", 10 << 16).expect("shape instance");
     assert_eq!(run.font(), FontId::new(131));
-    assert!(
-        instance
-            .glyph_outline(run.font(), run.glyphs()[0].glyph())
-            .expect("instance outline")
-            .is_some()
-    );
+    assert!(instance
+        .glyph_outline(run.font(), run.glyphs()[0].glyph())
+        .expect("instance outline")
+        .is_some());
 
     let default_instance = base
         .instantiate_variations(FontId::new(132), &[FontVariation::new(weight, 400 << 16)])
@@ -510,13 +506,11 @@ fn shaping_language_propagates_through_fallback_bidi_styles_layout_and_markers()
     let styled = fallback_fonts
         .shape_styled_paragraph_with_language("AA", &spans, "sr")
         .expect("localized styled paragraph");
-    assert!(
-        styled
-            .runs()
-            .iter()
-            .flat_map(|run| run.glyph_run().glyphs())
-            .all(|glyph| glyph.glyph().value() == 2)
-    );
+    assert!(styled
+        .runs()
+        .iter()
+        .flat_map(|run| run.glyph_run().glyphs())
+        .all(|glyph| glyph.glyph().value() == 2));
     let styled_layout = fallback_fonts
         .layout_styled_text_with_language(
             "AA",
@@ -525,15 +519,13 @@ fn shaping_language_propagates_through_fallback_bidi_styles_layout_and_markers()
             "sr",
         )
         .expect("localized styled layout");
-    assert!(
-        styled_layout.lines()[0]
-            .paragraph()
-            .expect("styled line")
-            .runs()
-            .iter()
-            .flat_map(|run| run.glyph_run().glyphs())
-            .all(|glyph| glyph.glyph().value() == 2)
-    );
+    assert!(styled_layout.lines()[0]
+        .paragraph()
+        .expect("styled line")
+        .runs()
+        .iter()
+        .flat_map(|run| run.glyph_run().glyphs())
+        .all(|glyph| glyph.glyph().value() == 2));
 
     let ellipsized = fallback_fonts
         .layout_text_with_language(
@@ -546,15 +538,13 @@ fn shaping_language_propagates_through_fallback_bidi_styles_layout_and_markers()
         )
         .expect("localized ellipsis");
     assert!(ellipsized.lines()[0].ellipsized());
-    assert!(
-        ellipsized.lines()[0]
-            .paragraph()
-            .expect("ellipsis line")
-            .runs()
-            .iter()
-            .flat_map(|run| run.glyph_run().glyphs())
-            .all(|glyph| glyph.glyph().value() == 2)
-    );
+    assert!(ellipsized.lines()[0]
+        .paragraph()
+        .expect("ellipsis line")
+        .runs()
+        .iter()
+        .flat_map(|run| run.glyph_run().glyphs())
+        .all(|glyph| glyph.glyph().value() == 2));
 
     let provider_layout = fallback_fonts
         .layout_text_with_break_provider(
@@ -568,16 +558,14 @@ fn shaping_language_propagates_through_fallback_bidi_styles_layout_and_markers()
             },
         )
         .expect("provider language also shapes");
-    assert!(
-        provider_layout.lines()[0]
-            .paragraph()
-            .expect("provider line")
-            .runs()[0]
-            .glyph_run()
-            .glyphs()
-            .iter()
-            .all(|glyph| glyph.glyph().value() == 2)
-    );
+    assert!(provider_layout.lines()[0]
+        .paragraph()
+        .expect("provider line")
+        .runs()[0]
+        .glyph_run()
+        .glyphs()
+        .iter()
+        .all(|glyph| glyph.glyph().value() == 2));
     assert_eq!(
         fallback_fonts
             .layout_text_with_language(
@@ -1245,12 +1233,10 @@ fn hit_testing_and_carets_resolve_wraps_alignment_bidi_and_spacing() {
             .position(),
         TextPosition::new(2, TextAffinity::Downstream)
     );
-    assert!(
-        wrapped
-            .caret_for_position(TextPosition::new(4, TextAffinity::Downstream))
-            .expect("invalid boundary query")
-            .is_none()
-    );
+    assert!(wrapped
+        .caret_for_position(TextPosition::new(4, TextAffinity::Downstream))
+        .expect("invalid boundary query")
+        .is_none());
 
     let justified = fonts
         .layout_text(
@@ -1399,12 +1385,10 @@ fn selection_rects_follow_clusters_wraps_spacing_bidi_and_synthetic_markers() {
         (second[0].left_bits(), second[0].right_bits()),
         (8 << 16, 14 << 16)
     );
-    assert!(
-        spaced
-            .selection_rects(1, 1)
-            .expect("collapsed selection")
-            .is_empty()
-    );
+    assert!(spaced
+        .selection_rects(1, 1)
+        .expect("collapsed selection")
+        .is_empty());
 
     let wrapped = fonts
         .layout_text(

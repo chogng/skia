@@ -1,0 +1,5 @@
+filegroup(
+    name = "test_typeface_src",
+    srcs = ["test_typeface.rs"],
+    visibility = ["//skia-rs/text:__pkg__"],
+)

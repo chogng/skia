@@ -167,11 +167,11 @@ impl TextAtlasBuilder {
             };
             for shaped in paragraph.runs() {
                 let run = shaped.glyph_run();
-                let face = fonts
-                    .face(run.font())
+                let typeface = fonts
+                    .typeface(run.font())
                     .ok_or(TextGpuError::new(TextGpuErrorCode::InvalidResource))?;
                 for glyph in run.glyphs() {
-                    if let Some(bitmap) = face
+                    if let Some(bitmap) = typeface
                         .rasterize_glyph(glyph.glyph(), run.font_size_bits())
                         .map_err(map_text_error)?
                     {

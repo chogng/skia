@@ -14,6 +14,12 @@ fonts/
 `-- extra/
 ```
 
+The non-SFNT upstream TestTypeface dataset is maintained separately in
+`tools/fonts/test_typeface.rs`: it is direct Rust data compiled into
+`skia-text`'s unit tests as an internal Typeface backend. Those tests exercise
+the production `FontCollection` matching, shaping, metrics, and outline paths.
+It is not a replacement for the font-file fixtures below.
+
 ## `synthetic`
 
 `synthetic/` contains small, repository-authored fonts with deliberately

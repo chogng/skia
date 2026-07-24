@@ -9,6 +9,7 @@ def skia_rust_crate(
         build_script_data = [],
         compile_data = [],
         deps_extra = [],
+        srcs_extra = [],
         test_data_extra = [],
         test_tags = [],
         target_compatible_with = []):
@@ -46,7 +47,7 @@ def skia_rust_crate(
         deps = all_crate_deps() + build_deps + deps_extra,
         edition = "2024",
         rustc_env = rustc_env,
-        srcs = native.glob(["src/**/*.rs"]),
+        srcs = native.glob(["src/**/*.rs"]) + srcs_extra,
         target_compatible_with = target_compatible_with,
         visibility = ["//visibility:public"],
     )

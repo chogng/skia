@@ -3,6 +3,7 @@ load("//:defs.bzl", "skia_rust_crate")
 skia_rust_crate(
     name = "text",
     crate_name = "skia_text",
+    srcs_extra = ["//tools/fonts:test_typeface_src"],
 )
 
 filegroup(

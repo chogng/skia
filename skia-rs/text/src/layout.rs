@@ -3,9 +3,9 @@ use unicode_linebreak::BreakOpportunity;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    FontCollection, FontFace, FontMetrics, ShapedParagraph, TextDecoration, TextDecorationMetrics,
+    FontCollection, FontMetrics, ShapedParagraph, TextDecoration, TextDecorationMetrics,
     TextDecorationStyle, TextDirection, TextError, TextErrorCode, TextStyleId, TextStyleSpan,
-    collection::RunStyle, line_break::linebreaks, valid_language_tag,
+    Typeface, collection::RunStyle, line_break::linebreaks, valid_language_tag,
 };
 
 /// Horizontal placement policy inside a layout's configured line width.
@@ -935,7 +935,7 @@ impl FontCollection {
         language: Option<&'a str>,
         language_breaks: Option<(&str, &dyn TextBreakProvider)>,
     ) -> Result<TextLayout, TextError> {
-        if self.faces().is_empty() {
+        if self.typefaces().is_empty() {
             return Err(TextError::new(TextErrorCode::EmptyFontCollection));
         }
         if text.len() > self.limits().max_text_bytes() || text.len() > u32::MAX as usize {
@@ -1371,7 +1371,7 @@ impl LayoutBuilder<'_> {
             LayoutStyle::Uniform(font_size_bits) => Ok(ResolvedLineStyle {
                 face: self
                     .fonts
-                    .faces()
+                    .typefaces()
                     .first()
                     .ok_or(TextError::new(TextErrorCode::EmptyFontCollection))?,
                 font_size_bits,
@@ -1396,7 +1396,7 @@ impl LayoutBuilder<'_> {
                 Ok(ResolvedLineStyle {
                     face: self
                         .fonts
-                        .face(span.font())
+                        .typeface(span.font())
                         .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?,
                     font_size_bits: span.font_size_bits(),
                     style_id: span.style_id(),
@@ -1474,7 +1474,7 @@ enum LayoutStyle<'a> {
 }
 
 struct ResolvedLineStyle<'a> {
-    face: &'a FontFace,
+    face: &'a Typeface,
     font_size_bits: i32,
     style_id: TextStyleId,
     decoration: Option<TextDecoration>,
@@ -1482,7 +1482,7 @@ struct ResolvedLineStyle<'a> {
 }
 
 impl ResolvedLineStyle<'_> {
-    const fn run_style(&self) -> RunStyle {
+    fn run_style(&self) -> RunStyle {
         RunStyle {
             id: self.style_id,
             preferred_font: self.face.id(),
@@ -1536,7 +1536,7 @@ fn decoration_segments(
         }
         let style = run.run_style();
         let face = fonts
-            .face(style.preferred_font)
+            .typeface(style.preferred_font)
             .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
         let underline_metrics = if decoration.includes_underline() {
             Some(

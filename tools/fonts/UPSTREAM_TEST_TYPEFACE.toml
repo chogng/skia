@@ -1,0 +1,44 @@
+format_version = 1
+
+[dataset]
+path = "test_typeface.rs"
+format = "Rust test-only constants"
+faces = 12
+description = "Mechanical Rust adaptation of Skia TestTypeface glyph outlines, path verbs, character maps, fixed advances, metrics, and style metadata."
+
+[upstream]
+repository = "https://skia.googlesource.com/skia.git"
+revision = "fa51c183742c7dfb1731b86aee07fdaa4a5e2be7"
+directory = "tools/fonts"
+adaptation = "The C++ declaration syntax was mechanically adapted to Rust constants; numeric values and face metadata are unchanged."
+
+[[source_file]]
+path = "tools/fonts/test_font_index.inc"
+sha256 = "8e5c677fc8f019999120c7ba55e1a4452f509f8eb86d58de230413161fd4ac54"
+bytes = 7103
+
+[[source_file]]
+path = "tools/fonts/test_font_monospace.inc"
+sha256 = "358a18f14409d4020893cdda796e4cf69868fbecfdf099b43827e11a09809c9e"
+bytes = 422827
+
+[[source_file]]
+path = "tools/fonts/test_font_sans_serif.inc"
+sha256 = "3edf1b83e827706aa9bb9d97d183bcf8272fa2386407436e70a0769c07735a38"
+bytes = 422755
+
+[[source_file]]
+path = "tools/fonts/test_font_serif.inc"
+sha256 = "4d721fa3e22351aa0bf634ce88d29638f133c094607b80b9bb7125fc2d7e7685"
+bytes = 446520
+
+[[license]]
+name = "Skia source and generated-data notice"
+spdx = "BSD-3-Clause"
+file = "LICENSES/SKIA-BSD-3-Clause.txt"
+
+[[license]]
+name = "Liberation font source design"
+spdx = "OFL-1.1"
+file = "LICENSES/OFL-1.1.txt"
+note = "Upstream create_test_font.cpp identifies Liberation Mono, Sans, and Serif as the source font families. No Liberation font binary is bundled here."

@@ -3,7 +3,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     FontFace, FontId, FontMetrics, FontStyle, GlyphOutline, GlyphOutlineProvider, GlyphRun,
-    TextDecorationStyle, TextError, TextErrorCode, TextJustification,
+    TextDecorationStyle, TextError, TextErrorCode, TextJustification, Typeface,
 };
 
 /// Horizontal direction of one shaped text run.
@@ -642,9 +642,10 @@ fn is_inter_character_unit(character: char) -> bool {
         )
 }
 
-/// Ordered font faces used for deterministic grapheme-level fallback.
+/// Ordered typefaces used for deterministic grapheme-level fallback.
 #[derive(Clone, Debug)]
 pub struct FontCollection {
+    typefaces: Vec<Typeface>,
     faces: Vec<FontFace>,
     limits: FontCollectionLimits,
 }
@@ -653,6 +654,7 @@ impl FontCollection {
     /// Creates an empty collection with explicit resource ceilings.
     pub const fn new(limits: FontCollectionLimits) -> Self {
         Self {
+            typefaces: Vec::new(),
             faces: Vec::new(),
             limits,
         }
@@ -660,27 +662,80 @@ impl FontCollection {
 
     /// Appends one fallback face after all existing faces.
     pub fn add_face(&mut self, face: FontFace) -> Result<(), TextError> {
-        if self.faces.len() == self.limits.max_faces {
+        self.add_typeface(face.into())
+    }
+
+    /// Appends one production typeface after all existing fallback entries.
+    pub fn add_typeface(&mut self, typeface: Typeface) -> Result<(), TextError> {
+        if self.typefaces.len() == self.limits.max_faces {
             return Err(TextError::new(TextErrorCode::ResourceLimit));
         }
-        if self.faces.iter().any(|existing| existing.id() == face.id()) {
+        if self
+            .typefaces
+            .iter()
+            .any(|existing| existing.id() == typeface.id())
+        {
             return Err(TextError::new(TextErrorCode::DuplicateFontId));
         }
-        self.faces
+        self.typefaces
             .try_reserve(1)
             .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
-        self.faces.push(face);
+        if typeface.font_face().is_some() {
+            self.faces
+                .try_reserve(1)
+                .map_err(|_| TextError::new(TextErrorCode::AllocationFailed))?;
+        }
+        if let Some(face) = typeface.font_face() {
+            self.faces.push(face.clone());
+        }
+        self.typefaces.push(typeface);
         Ok(())
     }
 
-    /// Borrows faces in fallback priority order.
+    /// Borrows all production typefaces in fallback priority order.
+    pub fn typefaces(&self) -> &[Typeface] {
+        &self.typefaces
+    }
+
+    /// Resolves one production typeface by its stable identifier.
+    pub fn typeface(&self, id: FontId) -> Option<&Typeface> {
+        self.typefaces.iter().find(|typeface| typeface.id() == id)
+    }
+
+    /// Borrows parsed SFNT faces in their relative insertion order.
+    ///
+    /// This compatibility view excludes non-SFNT typefaces. New fallback and
+    /// rendering code should use [`Self::typefaces`] instead.
     pub fn faces(&self) -> &[FontFace] {
         &self.faces
     }
 
-    /// Resolves one stable face identifier.
+    /// Resolves one parsed SFNT face by its stable identifier.
+    ///
+    /// This returns `None` for non-SFNT typefaces.
     pub fn face(&self, id: FontId) -> Option<&FontFace> {
         self.faces.iter().find(|face| face.id() == id)
+    }
+
+    /// Selects the closest production typeface in one named family.
+    pub fn match_typeface(&self, family: &str, style: FontStyle) -> Option<&Typeface> {
+        self.typefaces
+            .iter()
+            .enumerate()
+            .filter(|(_, typeface)| typeface.matches_family(family))
+            .min_by_key(|(index, typeface)| style_match_key(typeface.style(), style, *index))
+            .map(|(_, typeface)| typeface)
+    }
+
+    /// Selects a production typeface from the first available family.
+    pub fn match_typeface_for_families(
+        &self,
+        families: &[&str],
+        style: FontStyle,
+    ) -> Option<&Typeface> {
+        families
+            .iter()
+            .find_map(|family| self.match_typeface(family, style))
     }
 
     /// Selects the closest style in one named family using CSS-like matching.
@@ -878,7 +933,7 @@ impl FontCollection {
             .ok_or(TextError::new(TextErrorCode::InvalidLayout))?;
         let (face_index, marker) =
             self.select_synthetic_marker(&["\u{2026}", "..."], preferred_face)?;
-        let face = &self.faces[face_index];
+        let face = &self.typefaces[face_index];
         let run = face.shape_segment(
             marker,
             style.font_size_bits,
@@ -954,7 +1009,7 @@ impl FontCollection {
         } else {
             anchor.origin_x_bits
         };
-        let face = &self.faces[face_index];
+        let face = &self.typefaces[face_index];
         let run = face.shape_segment(
             marker,
             font_size_bits,
@@ -1046,7 +1101,7 @@ impl FontCollection {
         base_direction: Option<TextDirection>,
         language: Option<&str>,
     ) -> Result<ShapedParagraph, TextError> {
-        if self.faces.is_empty() {
+        if self.typefaces.is_empty() {
             return Err(TextError::new(TextErrorCode::EmptyFontCollection));
         }
         if font_size_bits <= 0 {
@@ -1088,7 +1143,7 @@ impl FontCollection {
         base_direction: Option<TextDirection>,
         language: Option<&str>,
     ) -> Result<ShapedParagraph, TextError> {
-        if self.faces.is_empty() {
+        if self.typefaces.is_empty() {
             return Err(TextError::new(TextErrorCode::EmptyFontCollection));
         }
         if text.is_empty() {
@@ -1171,7 +1226,7 @@ impl FontCollection {
                 .ok()
                 .and_then(|end| end.checked_add(source_offset))
                 .ok_or(TextError::new(TextErrorCode::ResourceLimit))?;
-            let face = &self.faces[segment.face_index];
+            let face = &self.typefaces[segment.face_index];
             let run = face.shape_segment(
                 &text[segment.start..segment.end],
                 segment.style.font_size_bits,
@@ -1241,7 +1296,7 @@ impl FontCollection {
                         return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
                     }
                     let preferred_face = self
-                        .faces
+                        .typefaces
                         .iter()
                         .position(|face| face.id() == span.font)
                         .ok_or(TextError::new(TextErrorCode::InvalidTextStyleSpan))?;
@@ -1261,7 +1316,7 @@ impl FontCollection {
                     RunStyle {
                         id: TextStyleId::DEFAULT,
                         preferred_font: self
-                            .faces
+                            .typefaces
                             .first()
                             .ok_or(TextError::new(TextErrorCode::EmptyFontCollection))?
                             .id(),
@@ -1308,11 +1363,11 @@ impl FontCollection {
         preferred: Option<usize>,
     ) -> Result<Option<usize>, TextError> {
         if let Some(index) = preferred
-            && supports_grapheme(&self.faces[index], grapheme)?
+            && supports_grapheme(&self.typefaces[index], grapheme)?
         {
             return Ok(Some(index));
         }
-        for (index, face) in self.faces.iter().enumerate() {
+        for (index, face) in self.typefaces.iter().enumerate() {
             if Some(index) == preferred {
                 continue;
             }
@@ -1344,7 +1399,7 @@ impl FontCollection {
                 || end > text.len()
                 || !text.is_char_boundary(start)
                 || !text.is_char_boundary(end)
-                || self.face(span.font).is_none()
+                || self.typeface(span.font).is_none()
             {
                 return Err(TextError::new(TextErrorCode::InvalidTextStyleSpan));
             }
@@ -1369,7 +1424,7 @@ impl GlyphOutlineProvider for FontCollection {
         font: FontId,
         glyph: crate::GlyphId,
     ) -> Result<Option<GlyphOutline>, TextError> {
-        let Some(face) = self.face(font) else {
+        let Some(face) = self.typeface(font) else {
             return Ok(None);
         };
         face.glyph_outline(font, glyph)
@@ -1399,7 +1454,7 @@ struct BidiRangeContext<'a, 'text> {
     language: Option<&'a str>,
 }
 
-fn supports_grapheme(face: &FontFace, grapheme: &str) -> Result<bool, TextError> {
+fn supports_grapheme(face: &Typeface, grapheme: &str) -> Result<bool, TextError> {
     for character in grapheme.chars() {
         if is_default_ignorable_for_fallback(character) || character.is_control() {
             continue;

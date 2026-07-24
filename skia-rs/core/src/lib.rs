@@ -65,7 +65,7 @@ pub use skia_text::{
     TextDecoration, TextDecorationMetrics, TextDecorationRect, TextDecorationSegment,
     TextDecorationStyle, TextDirection, TextError, TextErrorCode, TextHitResult, TextJustification,
     TextLayout, TextLayoutOptions, TextOverflow, TextPosition, TextSelectionRect, TextStyleId,
-    TextStyleSpan, TextUnit, TextWordBreak, TextWordBreakKind, text_decoration_rects,
+    TextStyleSpan, TextUnit, TextWordBreak, TextWordBreakKind, Typeface, text_decoration_rects,
 };
 #[cfg(feature = "text")]
 pub use text_geometry::{

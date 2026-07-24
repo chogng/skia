@@ -481,8 +481,8 @@ impl PdfTextProvider for FontCollection {
         font: FontId,
         glyph: GlyphId,
     ) -> Result<Option<GlyphOutline>, TextError> {
-        self.face(font).map_or(Ok(None), |face| {
-            GlyphOutlineProvider::glyph_outline(face, font, glyph)
+        self.typeface(font).map_or(Ok(None), |typeface| {
+            GlyphOutlineProvider::glyph_outline(typeface, font, glyph)
         })
     }
 }

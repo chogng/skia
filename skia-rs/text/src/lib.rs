@@ -16,6 +16,7 @@ mod font;
 mod layout;
 mod line_break;
 mod outline;
+mod typeface;
 mod types;
 
 pub use break_provider::BuiltinTextBreakProvider;
@@ -37,6 +38,7 @@ pub use layout::{
     TextSelectionRect, TextWordBreak, TextWordBreakKind,
 };
 pub use outline::{GlyphOutline, GlyphOutlineProvider, OutlinePoint, OutlineSegment};
+pub use typeface::Typeface;
 pub(crate) use types::LigatureCaret;
 pub use types::{FontId, GlyphId, GlyphRun, GlyphRunSource, PositionedGlyph, TextUnit};
 
