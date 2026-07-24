@@ -1,6 +1,6 @@
 use skia_core::{
-    Color, DisplayListBuilder, DrawCommand, FillRule, Paint, PathVerb, Rect, Scalar, StrokeCap,
-    StrokeJoin,
+    Color, DisplayListBuilder, DrawCommand, FillRule, FontCollection, FontCollectionLimits,
+    FontFace, FontId, FontLimits, Paint, PathVerb, Rect, Scalar, StrokeCap, StrokeJoin,
 };
 use skia_image::Image;
 
@@ -15,6 +15,22 @@ fn decode(source: &str) -> super::SvgDocument {
 
 fn scalar(value: i32) -> Scalar {
     Scalar::from_i32(value).expect("scalar")
+}
+
+fn test_fonts() -> FontCollection {
+    let mut fonts = FontCollection::new(FontCollectionLimits::default());
+    let bytes = include_bytes!("../../text/tests/fonts/skia/resources/fonts/test.ttc").to_vec();
+    for index in 0..2 {
+        let face = FontFace::from_bytes_with_limits(
+            FontId::new(700 + index as u64),
+            bytes.clone(),
+            index,
+            FontLimits::default(),
+        )
+        .expect("test font");
+        fonts.add_face(face).expect("font collection");
+    }
+    fonts
 }
 
 #[test]
@@ -275,6 +291,90 @@ fn transforms_group_opacity_and_stroke_geometry_survive_writer_round_trip() {
 }
 
 #[test]
+fn stylesheets_cascade_and_symbol_instances_establish_viewports() {
+    let document = decode(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60">
+          <style>
+            .themed { fill: red; stroke: black }
+            symbol > .themed[data-state="active"] { fill: #2468ac }
+            #instance { stroke: blue !important }
+          </style>
+          <defs>
+            <symbol id="badge" viewBox="0 0 10 10" preserveAspectRatio="none">
+              <rect class="themed" data-state="active" width="10" height="10"/>
+            </symbol>
+          </defs>
+          <use id="instance" href="#badge" x="20" y="10" width="40" height="20"
+               style="stroke: yellow"/>
+        </svg>"##,
+    );
+    let commands = document.display_list().commands();
+    assert!(commands.iter().any(
+        |command| matches!(command, DrawCommand::ClipRect { rect, .. }
+            if rect.left().bits() == 20 << 16
+                && rect.top().bits() == 10 << 16
+                && rect.right().bits() == 60 << 16
+                && rect.bottom().bits() == 30 << 16)
+    ));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillPath { paint, .. } if paint.color() == Color::rgb(0x24, 0x68, 0xac)
+    )));
+}
+
+#[test]
+fn text_uses_explicit_fonts_and_lowers_positioned_glyph_runs() {
+    let fonts = test_fonts();
+    let document = SvgReader::decode_with_fonts(
+        br##"<svg width="100" height="30">
+          <style>text { fill: #13579b; font-size: 14px }</style>
+          <text x="10" y="20" text-anchor="middle">A1<tspan font-weight="700">2</tspan></text>
+        </svg>"##,
+        SvgReadOptions::default(),
+        &fonts,
+    )
+    .expect("text SVG");
+    assert!(
+        document
+            .display_list()
+            .commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                DrawCommand::DrawPositionedGlyphRun { origin, paint, .. }
+                    if origin.y().bits() == 20 << 16
+                        && paint.color() == Color::rgb(0x13, 0x57, 0x9b)
+            ))
+    );
+}
+
+#[test]
+fn alpha_masks_lower_as_destination_in_layers() {
+    let document = decode(
+        r##"<svg width="30" height="20">
+          <defs>
+            <mask id="fade" mask-type="alpha" maskUnits="userSpaceOnUse"
+                  x="0" y="0" width="30" height="20">
+              <rect width="15" height="20" fill="#ffffff80"/>
+            </mask>
+          </defs>
+          <rect width="30" height="20" fill="red" mask="url(#fade)"/>
+        </svg>"##,
+    );
+    assert!(
+        document
+            .display_list()
+            .commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                DrawCommand::SaveLayer(options)
+                    if options.blend_mode() == skia_core::BlendMode::DestinationIn
+            ))
+    );
+}
+
+#[test]
 fn malformed_xml_and_unsupported_svg_are_distinct() {
     let malformed = SvgReader::decode(
         br#"<svg width="1" height="1"><path></svg>"#,
@@ -288,8 +388,8 @@ fn malformed_xml_and_unsupported_svg_are_distinct() {
         br#"<svg width="1" height="1"><text>hello</text></svg>"#,
         SvgReadOptions::default(),
     )
-    .expect_err("unsupported text");
-    assert_eq!(unsupported.code(), SvgReadErrorCode::Unsupported);
+    .expect_err("missing font context");
+    assert_eq!(unsupported.code(), SvgReadErrorCode::MissingFontContext);
 }
 
 #[test]

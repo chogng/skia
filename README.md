@@ -135,7 +135,8 @@ in declaration order; applies explicit input, depth, node, attribute, name, and
 decoded-text ceilings; and rejects DTDs, arbitrary entities, and external entity
 loading. It validates an optional UTF-8 XML 1.0 declaration, resolves default
 and prefixed namespaces (including expanded duplicate attributes), and exposes
-qualified, prefix, local-name, namespace-URI, exact-attribute, and
+the XML 1.0 fifth-edition Unicode name ranges together with qualified, prefix,
+local-name, namespace-URI, exact-attribute, and
 namespace-aware attribute access. It intentionally does not apply CSS,
 resource resolution, or any SVG semantics. SVG input parsing depends one-way
 on this crate.
@@ -197,12 +198,18 @@ profile covers the root viewport/view box, groups, `rect`, `circle`, `ellipse`,
 arcs, inherited solid fill/stroke properties, fill rules,
 cap/join/miter/dash geometry, visibility, element/group opacity, and all
 affine transform functions. It resolves bounded local `defs`/`use` chains,
+stylesheet rules with type, ID, class, attribute, descendant, child, and
+`:root` selectors (including specificity, source order, inline declarations,
+and `!important`), `symbol` instances with independent viewports,
 linear and radial gradients (including inherited definitions,
 object-bounding-box transforms, spread modes, and stop opacity),
-user-space clip paths, embedded PNG/JPEG/WebP data-URI images, and nested SVG
-viewports. Root and nested `preserveAspectRatio` policies are retained or
-lowered explicitly. Missing root dimensions use the SVG defaults of 300 by
-150. Zero-sized basic shapes produce no drawing command.
+user-space clip paths, explicit user-space alpha masks, embedded
+PNG/JPEG/WebP data-URI images, and nested SVG viewports. With
+`decode_with_fonts`, caller-owned portable font collections shape basic
+`text`/`tspan` content into positioned glyph-run commands without consulting
+platform fonts. Root, nested, symbol, and image `preserveAspectRatio` policies
+are retained or lowered explicitly. Missing root dimensions use the SVG
+defaults of 300 by 150. Zero-sized basic shapes produce no drawing command.
 
 Input parsing has independent XML, display-list, and per-path ceilings and
 adds reference-depth and embedded-image ceilings. It publishes stable error
@@ -240,11 +247,12 @@ The initial native mapping is:
 
 The reader and writer intentionally have separate limits and error types.
 `skia-xml` provides syntax only and does not by itself accept or render SVG.
-Network/file resources, selector-based CSS stylesheets, animation, masks,
-patterns, filters, markers, symbols, arbitrary focal radial gradients,
-object-bounding-box clip paths, and text shaping/font resolution are outside
-the current safe portable profile and fail explicitly. They are not silently
-approximated. Whole-canvas CPU fallback remains a separate increment.
+The reader still rejects network/file resources, animation, script, patterns,
+filters, markers, luminance/object-bounding-box masks, arbitrary focal radial
+gradients, object-bounding-box clip paths, and text-on-path or stroked text.
+The writer still rejects glyph-run commands because a DisplayList does not
+retain source text or font-licensing policy. Unsupported semantics fail
+explicitly rather than being silently approximated.
 
 ## PDF output
 

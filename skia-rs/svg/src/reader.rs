@@ -2,12 +2,14 @@ use std::{collections::HashMap, fmt};
 
 use skia_codec::{CodecErrorCode, CodecLimits, ImageCodec};
 use skia_core::{
-    Angle, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, Gradient, GradientStop, Paint,
-    Path, PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar, ShaderHandle,
-    StrokeCap, StrokeJoin, StrokeOptions, TileMode, Transform,
+    Angle, BlendMode, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, FontCollection,
+    FontSlant, FontStyle, FontWidth, Gradient, GradientStop, Paint, Path, PathBuilder, Point, Rect,
+    SamplingOptions, SaveLayerOptions, Scalar, ShaderHandle, StrokeCap, StrokeJoin, StrokeOptions,
+    TextDirection, TextError, TextErrorCode, TextStyleSpan, TileMode, Transform,
 };
 use skia_xml::{XmlDocument, XmlElement, XmlError, XmlErrorCode, XmlLimits, XmlNode};
 
+use crate::css::{CascadedStyle, CssError, Stylesheet};
 use crate::{SvgCanvasSpec, SvgPreserveAspectRatio, SvgViewBoxAlignment, SvgViewBoxScale};
 
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
@@ -28,6 +30,8 @@ pub enum SvgReadErrorCode {
     ResourceLimit,
     /// A valid SVG feature is outside this reader's current profile.
     Unsupported,
+    /// Text was present but the caller did not provide an ordered font collection.
+    MissingFontContext,
     /// Memory allocation failed.
     AllocationFailed,
 }
@@ -151,6 +155,26 @@ pub struct SvgReader;
 impl SvgReader {
     /// Parses and transactionally lowers one UTF-8 SVG document.
     pub fn decode(input: &[u8], options: SvgReadOptions) -> Result<SvgDocument, SvgReadError> {
+        Self::decode_impl(input, options, None)
+    }
+
+    /// Parses and lowers one SVG using caller-owned portable fonts for text.
+    ///
+    /// Font family, weight, width, and slant matching is deterministic within
+    /// the supplied collection. The reader never consults platform fonts.
+    pub fn decode_with_fonts(
+        input: &[u8],
+        options: SvgReadOptions,
+        fonts: &FontCollection,
+    ) -> Result<SvgDocument, SvgReadError> {
+        Self::decode_impl(input, options, Some(fonts))
+    }
+
+    fn decode_impl(
+        input: &[u8],
+        options: SvgReadOptions,
+        fonts: Option<&FontCollection>,
+    ) -> Result<SvgDocument, SvgReadError> {
         let limits = options.limits;
         if limits.max_display_list_items == 0
             || limits.max_path_verbs == 0
@@ -160,8 +184,22 @@ impl SvgReader {
             return Err(SvgReadError::new(SvgReadErrorCode::ResourceLimit));
         }
         let xml = XmlDocument::parse(input, limits.xml).map_err(SvgReadError::xml)?;
-        Compiler::new(xml.root(), limits)?.compile()
+        Compiler::new(xml.root(), limits, fonts)?.compile()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextAnchor {
+    Start,
+    Middle,
+    End,
+}
+
+struct TextCursor {
+    x: Scalar,
+    y: Scalar,
+    emitted: bool,
+    pending_space: bool,
 }
 
 #[derive(Clone)]
@@ -178,6 +216,11 @@ struct Style {
     fill_opacity: u8,
     stroke_opacity: u8,
     visible: bool,
+    font_size: Scalar,
+    font_families: Vec<String>,
+    font_style: FontStyle,
+    text_anchor: TextAnchor,
+    text_direction: Option<TextDirection>,
 }
 
 impl Default for Style {
@@ -195,11 +238,16 @@ impl Default for Style {
             fill_opacity: u8::MAX,
             stroke_opacity: u8::MAX,
             visible: true,
+            font_size: Scalar::from_bits(16 << 16),
+            font_families: vec!["sans-serif".to_owned()],
+            font_style: FontStyle::NORMAL,
+            text_anchor: TextAnchor::Start,
+            text_direction: None,
         }
     }
 }
 
-struct Compiler<'a> {
+struct Compiler<'a, 'fonts> {
     root: &'a XmlElement,
     limits: SvgReadLimits,
     builder: DisplayListBuilder,
@@ -207,6 +255,9 @@ struct Compiler<'a> {
     reference_stack: Vec<String>,
     canvas: Option<SvgCanvasSpec>,
     viewport_stack: Vec<Rect>,
+    stylesheet: Stylesheet,
+    ancestors: Vec<&'a XmlElement>,
+    fonts: Option<&'fonts FontCollection>,
 }
 
 #[derive(Clone)]
@@ -225,13 +276,7 @@ fn collect_resources<'a>(
         .is_none_or(|uri| uri == SVG_NAMESPACE)
         && matches!(
             element.local_name(),
-            "style"
-                | "script"
-                | "animate"
-                | "animateColor"
-                | "animateMotion"
-                | "animateTransform"
-                | "set"
+            "script" | "animate" | "animateColor" | "animateMotion" | "animateTransform" | "set"
         )
     {
         return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
@@ -258,12 +303,18 @@ fn collect_resources<'a>(
     Ok(())
 }
 
-impl<'a> Compiler<'a> {
-    fn new(root: &'a XmlElement, limits: SvgReadLimits) -> Result<Self, SvgReadError> {
+impl<'a, 'fonts> Compiler<'a, 'fonts> {
+    fn new(
+        root: &'a XmlElement,
+        limits: SvgReadLimits,
+        fonts: Option<&'fonts FontCollection>,
+    ) -> Result<Self, SvgReadError> {
         let builder =
             DisplayListBuilder::new(limits.max_display_list_items).map_err(map_core_error)?;
         let mut resources = HashMap::new();
         collect_resources(root, &mut resources, limits.max_display_list_items)?;
+        let stylesheet =
+            Stylesheet::parse(root, limits.max_display_list_items).map_err(map_css_error)?;
         Ok(Self {
             root,
             limits,
@@ -272,6 +323,9 @@ impl<'a> Compiler<'a> {
             reference_stack: Vec::new(),
             canvas: None,
             viewport_stack: Vec::new(),
+            stylesheet,
+            ancestors: Vec::new(),
+            fonts,
         })
     }
 
@@ -312,21 +366,28 @@ impl<'a> Compiler<'a> {
         self.canvas = Some(canvas);
         self.viewport_stack.push(canvas.view_box());
 
-        if style_property(self.root, "display") == Some("none") {
+        let cascade = self
+            .stylesheet
+            .cascade(self.root, &[])
+            .map_err(map_css_error)?;
+        if cascade.property("display") == Some("none") {
             return Ok(SvgDocument {
                 canvas,
                 display_list: self.builder.finish(),
             });
         }
-        let style = parse_style(self.root, &Style::default())?;
-        let transform = style_property(self.root, "transform")
+        let style = parse_style(&Style::default(), &cascade)?;
+        let transform = cascade
+            .property("transform")
             .map(parse_transform)
             .transpose()?;
-        let opacity = style_property(self.root, "opacity")
+        let opacity = cascade
+            .property("opacity")
             .map(parse_opacity)
             .transpose()?
             .unwrap_or(u8::MAX);
-        let clip = style_property(self.root, "clip-path")
+        let clip = cascade
+            .property("clip-path")
             .filter(|value| *value != "none")
             .map(|value| {
                 local_url_reference(value)
@@ -352,7 +413,10 @@ impl<'a> Compiler<'a> {
                 self.apply_clip_path(clip)?;
             }
         }
-        self.lower_children(self.root, &style)?;
+        self.ancestors.push(self.root);
+        let result = self.lower_children(self.root, &style);
+        self.ancestors.pop();
+        result?;
         self.viewport_stack.pop();
         if uses_state {
             self.builder.restore().map_err(map_core_error)?;
@@ -365,7 +429,7 @@ impl<'a> Compiler<'a> {
 
     fn lower_children(
         &mut self,
-        parent: &XmlElement,
+        parent: &'a XmlElement,
         inherited: &Style,
     ) -> Result<(), SvgReadError> {
         for child in parent.children() {
@@ -382,7 +446,7 @@ impl<'a> Compiler<'a> {
 
     fn lower_element(
         &mut self,
-        element: &XmlElement,
+        element: &'a XmlElement,
         inherited: &Style,
     ) -> Result<(), SvgReadError> {
         if element
@@ -392,21 +456,49 @@ impl<'a> Compiler<'a> {
             return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
         }
         let name = element.local_name();
-        if matches!(name, "title" | "desc" | "metadata" | "defs") {
+        if matches!(
+            name,
+            "title"
+                | "desc"
+                | "metadata"
+                | "defs"
+                | "style"
+                | "linearGradient"
+                | "radialGradient"
+                | "clipPath"
+                | "mask"
+                | "symbol"
+        ) {
             return Ok(());
         }
-        if style_property(element, "display") == Some("none") {
+        let cascade = self
+            .stylesheet
+            .cascade(element, &self.ancestors)
+            .map_err(map_css_error)?;
+        if cascade.property("display") == Some("none") {
             return Ok(());
         }
-        let style = parse_style(element, inherited)?;
-        let transform = style_property(element, "transform")
+        let style = parse_style(inherited, &cascade)?;
+        let transform = cascade
+            .property("transform")
             .map(parse_transform)
             .transpose()?;
-        let opacity = style_property(element, "opacity")
+        let opacity = cascade
+            .property("opacity")
             .map(parse_opacity)
             .transpose()?
             .unwrap_or(u8::MAX);
-        let clip = style_property(element, "clip-path")
+        let clip = cascade
+            .property("clip-path")
+            .filter(|value| *value != "none")
+            .map(|value| {
+                local_url_reference(value)
+                    .map(str::to_owned)
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::Unsupported))
+            })
+            .transpose()?;
+        let mask = cascade
+            .property("mask")
             .filter(|value| *value != "none")
             .map(|value| {
                 local_url_reference(value)
@@ -434,9 +526,15 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        let result = match name {
+        if mask.is_some() {
+            self.builder
+                .save_layer(SaveLayerOptions::new())
+                .map_err(map_core_error)?;
+        }
+        self.ancestors.push(element);
+        let mut result = match name {
             "g" => self.lower_children(element, &style),
-            "svg" => self.lower_nested_svg(element, &style),
+            "svg" => self.lower_nested_svg(element, &style, &cascade),
             "rect" => self
                 .rect_path(element)
                 .and_then(|path| self.draw_optional_path(path, &style)),
@@ -458,10 +556,20 @@ impl<'a> Compiler<'a> {
             "path" => self
                 .path(element)
                 .and_then(|path| self.draw_optional_path(path, &style)),
-            "image" => self.draw_image_element(element, &style),
+            "image" => self.draw_image_element(element, &style, &cascade),
+            "text" => self.lower_text(element, &style, &cascade),
             "use" => self.lower_use(element, &style),
             _ => Err(SvgReadError::new(SvgReadErrorCode::Unsupported)),
         };
+        if result.is_ok()
+            && let Some(mask) = mask.as_deref()
+        {
+            result = self.apply_alpha_mask(mask);
+        }
+        self.ancestors.pop();
+        if mask.is_some() {
+            self.builder.restore().map_err(map_core_error)?;
+        }
 
         if uses_state {
             self.builder.restore().map_err(map_core_error)?;
@@ -778,6 +886,18 @@ impl<'a> Compiler<'a> {
             .resources
             .get(reference)
             .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
+        if target
+            .namespace_uri()
+            .is_some_and(|uri| uri != SVG_NAMESPACE)
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+        }
+        if target.local_name() == "symbol" {
+            self.reference_stack.push(reference.to_owned());
+            let result = self.lower_symbol_instance(element, target, inherited);
+            self.reference_stack.pop();
+            return result;
+        }
         let x = optional_length(element, "x")?;
         let y = optional_length(element, "y")?;
         let translated = x != Scalar::ZERO || y != Scalar::ZERO;
@@ -796,10 +916,114 @@ impl<'a> Compiler<'a> {
         result
     }
 
+    fn lower_symbol_instance(
+        &mut self,
+        use_element: &XmlElement,
+        symbol: &'a XmlElement,
+        inherited: &Style,
+    ) -> Result<(), SvgReadError> {
+        let parent = self
+            .viewport_stack
+            .last()
+            .copied()
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidDocument))?;
+        let parent_width = subtract(parent.right(), parent.left())?;
+        let parent_height = subtract(parent.bottom(), parent.top())?;
+        let x = nested_length(
+            use_element.attribute_ns(None, "x"),
+            parent_width,
+            Scalar::ZERO,
+        )?;
+        let y = nested_length(
+            use_element.attribute_ns(None, "y"),
+            parent_height,
+            Scalar::ZERO,
+        )?;
+        let width = nested_length(
+            use_element.attribute_ns(None, "width"),
+            parent_width,
+            parent_width,
+        )?;
+        let height = nested_length(
+            use_element.attribute_ns(None, "height"),
+            parent_height,
+            parent_height,
+        )?;
+        if width.bits() < 0 || height.bits() < 0 {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+        }
+        if width == Scalar::ZERO || height == Scalar::ZERO {
+            return Ok(());
+        }
+        let viewport = Rect::new(x, y, add(x, width)?, add(y, height)?).map_err(map_core_error)?;
+        let view_box = symbol
+            .attribute_ns(None, "viewBox")
+            .map(parse_view_box)
+            .transpose()?;
+        let cascade = self
+            .stylesheet
+            .cascade(symbol, &self.ancestors)
+            .map_err(map_css_error)?;
+        if cascade.property("display") == Some("none") {
+            return Ok(());
+        }
+        let style = parse_style(inherited, &cascade)?;
+        let transform = cascade
+            .property("transform")
+            .map(parse_transform)
+            .transpose()?;
+        let opacity = cascade
+            .property("opacity")
+            .map(parse_opacity)
+            .transpose()?
+            .unwrap_or(u8::MAX);
+        if opacity == u8::MAX {
+            self.builder.save().map_err(map_core_error)?;
+        } else {
+            self.builder
+                .save_layer(SaveLayerOptions::new().with_opacity(opacity))
+                .map_err(map_core_error)?;
+        }
+        self.builder.clip_rect(viewport).map_err(map_core_error)?;
+        if let Some(transform) = transform {
+            self.builder
+                .concat_transform(transform)
+                .map_err(map_core_error)?;
+        }
+        let (child_viewport, mapping) = if let Some(view_box) = view_box {
+            (
+                view_box,
+                viewport_mapping(
+                    viewport,
+                    view_box,
+                    symbol
+                        .attribute_ns(None, "preserveAspectRatio")
+                        .unwrap_or("xMidYMid meet"),
+                )?,
+            )
+        } else {
+            (
+                Rect::new(Scalar::ZERO, Scalar::ZERO, width, height).map_err(map_core_error)?,
+                Transform::translate(x, y),
+            )
+        };
+        self.builder
+            .concat_transform(mapping)
+            .map_err(map_core_error)?;
+        self.viewport_stack.push(child_viewport);
+        self.ancestors.push(symbol);
+        let result = self.lower_children(symbol, &style);
+        self.ancestors.pop();
+        self.viewport_stack.pop();
+        self.builder.restore().map_err(map_core_error)?;
+        result
+    }
+
     fn lower_nested_svg(
         &mut self,
-        element: &XmlElement,
+        element: &'a XmlElement,
         inherited: &Style,
+        cascade: &CascadedStyle,
     ) -> Result<(), SvgReadError> {
         let parent = self
             .viewport_stack
@@ -831,9 +1055,9 @@ impl<'a> Compiler<'a> {
             .attribute_ns(None, "viewBox")
             .map(parse_view_box)
             .transpose()?;
-        let overflow_hidden = !matches!(style_property(element, "overflow"), Some("visible"));
+        let overflow_hidden = !matches!(cascade.property("overflow"), Some("visible"));
         if !matches!(
-            style_property(element, "overflow"),
+            cascade.property("overflow"),
             None | Some("hidden" | "scroll" | "auto" | "visible")
         ) {
             return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
@@ -873,6 +1097,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         element: &XmlElement,
         style: &Style,
+        cascade: &CascadedStyle,
     ) -> Result<(), SvgReadError> {
         if !style.visible {
             return Ok(());
@@ -913,7 +1138,7 @@ impl<'a> Compiler<'a> {
             .builder
             .add_image(image.clone())
             .map_err(map_core_error)?;
-        let sampling = match style_property(element, "image-rendering").unwrap_or("auto") {
+        let sampling = match cascade.property("image-rendering").unwrap_or("auto") {
             "auto" | "smooth" | "optimizeQuality" => SamplingOptions::LINEAR,
             "pixelated" | "crisp-edges" | "optimizeSpeed" => SamplingOptions::NEAREST,
             _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
@@ -927,6 +1152,155 @@ impl<'a> Compiler<'a> {
                 sampling,
             )
             .map_err(map_core_error)
+    }
+
+    fn lower_text(
+        &mut self,
+        element: &'a XmlElement,
+        style: &Style,
+        cascade: &CascadedStyle,
+    ) -> Result<(), SvgReadError> {
+        let mut cursor = TextCursor {
+            x: cascade
+                .property("x")
+                .map(first_length)
+                .transpose()?
+                .unwrap_or(Scalar::ZERO),
+            y: cascade
+                .property("y")
+                .map(first_length)
+                .transpose()?
+                .unwrap_or(Scalar::ZERO),
+            emitted: false,
+            pending_space: false,
+        };
+        if let Some(dx) = cascade.property("dx") {
+            cursor.x = add(cursor.x, first_length(dx)?)?;
+        }
+        if let Some(dy) = cascade.property("dy") {
+            cursor.y = add(cursor.y, first_length(dy)?)?;
+        }
+        self.lower_text_children(element, style, &mut cursor)
+    }
+
+    fn lower_text_children(
+        &mut self,
+        parent: &'a XmlElement,
+        inherited: &Style,
+        cursor: &mut TextCursor,
+    ) -> Result<(), SvgReadError> {
+        for child in parent.children() {
+            match child {
+                XmlNode::Text(text) => {
+                    let normalized = normalize_text(text, cursor);
+                    if !normalized.is_empty() {
+                        self.draw_text_segment(&normalized, inherited, cursor)?;
+                    }
+                }
+                XmlNode::Element(element)
+                    if element
+                        .namespace_uri()
+                        .is_none_or(|uri| uri == SVG_NAMESPACE)
+                        && element.local_name() == "tspan" =>
+                {
+                    let cascade = self
+                        .stylesheet
+                        .cascade(element, &self.ancestors)
+                        .map_err(map_css_error)?;
+                    if cascade.property("display") == Some("none") {
+                        continue;
+                    }
+                    let style = parse_style(inherited, &cascade)?;
+                    if let Some(x) = cascade.property("x") {
+                        cursor.x = first_length(x)?;
+                        cursor.emitted = false;
+                        cursor.pending_space = false;
+                    }
+                    if let Some(y) = cascade.property("y") {
+                        cursor.y = first_length(y)?;
+                    }
+                    if let Some(dx) = cascade.property("dx") {
+                        cursor.x = add(cursor.x, first_length(dx)?)?;
+                    }
+                    if let Some(dy) = cascade.property("dy") {
+                        cursor.y = add(cursor.y, first_length(dy)?)?;
+                    }
+                    self.ancestors.push(element);
+                    let result = self.lower_text_children(element, &style, cursor);
+                    self.ancestors.pop();
+                    result?;
+                }
+                XmlNode::Element(element)
+                    if element
+                        .namespace_uri()
+                        .is_none_or(|uri| uri == SVG_NAMESPACE)
+                        && matches!(element.local_name(), "title" | "desc") => {}
+                XmlNode::Element(_) => {
+                    return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_text_segment(
+        &mut self,
+        text: &str,
+        style: &Style,
+        cursor: &mut TextCursor,
+    ) -> Result<(), SvgReadError> {
+        let fonts = self
+            .fonts
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::MissingFontContext))?;
+        let families = style
+            .font_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let typeface = fonts
+            .match_typeface_for_families(&families, style.font_style)
+            .or_else(|| fonts.typefaces().first())
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::MissingFontContext))?;
+        let source_end = u32::try_from(text.len())
+            .map_err(|_| SvgReadError::new(SvgReadErrorCode::ResourceLimit))?;
+        let span = TextStyleSpan::new(0, source_end, typeface.id(), style.font_size.bits())
+            .map_err(map_text_error)?;
+        let paragraph = match style.text_direction {
+            Some(direction) => fonts
+                .shape_styled_paragraph_with_direction(text, &[span], direction)
+                .map_err(map_text_error)?,
+            None => fonts
+                .shape_styled_paragraph(text, &[span])
+                .map_err(map_text_error)?,
+        };
+        let advance = Scalar::from_bits(paragraph.advance_x_bits());
+        let origin_x = match style.text_anchor {
+            TextAnchor::Start => cursor.x,
+            TextAnchor::Middle => {
+                subtract(cursor.x, Scalar::from_bits(paragraph.advance_x_bits() / 2))?
+            }
+            TextAnchor::End => subtract(cursor.x, advance)?,
+        };
+        if style.visible {
+            if style.stroke.is_some() {
+                return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+            }
+            if let Some(fill) = &style.fill {
+                let PaintSource::Color(color) = fill else {
+                    return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+                };
+                self.builder
+                    .draw_shaped_paragraph(
+                        &paragraph,
+                        Point::new(origin_x, cursor.y),
+                        Paint::new(color.with_opacity(style.fill_opacity)),
+                    )
+                    .map_err(map_core_error)?;
+            }
+        }
+        cursor.x = add(cursor.x, advance)?;
+        cursor.emitted = true;
+        Ok(())
     }
 
     fn apply_clip_path(&mut self, id: &str) -> Result<(), SvgReadError> {
@@ -985,6 +1359,71 @@ impl<'a> Compiler<'a> {
         self.builder
             .clip_path(path, rule, ClipOp::Intersect)
             .map_err(map_core_error)
+    }
+
+    fn apply_alpha_mask(&mut self, id: &str) -> Result<(), SvgReadError> {
+        if self.reference_stack.len() >= self.limits.max_reference_depth
+            || self.reference_stack.iter().any(|active| active == id)
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::ResourceLimit));
+        }
+        let mask = *self
+            .resources
+            .get(id)
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
+        if mask.namespace_uri().is_some_and(|uri| uri != SVG_NAMESPACE)
+            || mask.local_name() != "mask"
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+        }
+        if !matches!(mask.attribute_ns(None, "maskUnits"), Some("userSpaceOnUse"))
+            || !matches!(
+                mask.attribute_ns(None, "maskContentUnits"),
+                None | Some("userSpaceOnUse")
+            )
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+        }
+        if !matches!(style_property(mask, "mask-type"), Some("alpha")) {
+            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+        }
+        let cascade = self
+            .stylesheet
+            .cascade(mask, &self.ancestors)
+            .map_err(map_css_error)?;
+        let style = parse_style(&Style::default(), &cascade)?;
+        self.reference_stack.push(id.to_owned());
+        self.builder
+            .save_layer(SaveLayerOptions::new().with_blend_mode(BlendMode::DestinationIn))
+            .map_err(map_core_error)?;
+        let has_region = ["x", "y", "width", "height"]
+            .iter()
+            .any(|name| mask.attribute_ns(None, name).is_some());
+        let region_result = if has_region {
+            (|| {
+                let x = optional_length(mask, "x")?;
+                let y = optional_length(mask, "y")?;
+                let width = required_nonnegative_length(mask, "width")?;
+                let height = required_nonnegative_length(mask, "height")?;
+                if width == Scalar::ZERO || height == Scalar::ZERO {
+                    return Err(SvgReadError::new(SvgReadErrorCode::InvalidGeometry));
+                }
+                let region =
+                    Rect::new(x, y, add(x, width)?, add(y, height)?).map_err(map_core_error)?;
+                self.builder.clip_rect(region).map_err(map_core_error)
+            })()
+        } else {
+            Ok(())
+        };
+        let result = region_result.and_then(|()| {
+            self.ancestors.push(mask);
+            let result = self.lower_children(mask, &style);
+            self.ancestors.pop();
+            result
+        });
+        let restore_result = self.builder.restore().map_err(map_core_error);
+        self.reference_stack.pop();
+        result.and(restore_result)
     }
 
     fn clip_geometry(&self, element: &XmlElement) -> Result<Option<Path>, SvgReadError> {
@@ -1154,6 +1593,25 @@ fn map_codec_error(error: skia_codec::CodecError) -> SvgReadError {
         CodecErrorCode::InputTooLarge | CodecErrorCode::ImageTooLarge => {
             SvgReadErrorCode::ResourceLimit
         }
+        _ => SvgReadErrorCode::InvalidValue,
+    };
+    SvgReadError::new(code)
+}
+
+fn map_css_error(error: CssError) -> SvgReadError {
+    let code = match error {
+        CssError::Invalid => SvgReadErrorCode::InvalidValue,
+        CssError::ResourceLimit => SvgReadErrorCode::ResourceLimit,
+        CssError::AllocationFailed => SvgReadErrorCode::AllocationFailed,
+    };
+    SvgReadError::new(code)
+}
+
+fn map_text_error(error: TextError) -> SvgReadError {
+    let code = match error.code() {
+        TextErrorCode::ResourceLimit => SvgReadErrorCode::ResourceLimit,
+        TextErrorCode::AllocationFailed => SvgReadErrorCode::AllocationFailed,
+        TextErrorCode::EmptyFontCollection => SvgReadErrorCode::MissingFontContext,
         _ => SvgReadErrorCode::InvalidValue,
     };
     SvgReadError::new(code)
@@ -1532,20 +1990,31 @@ fn parse_preserve_aspect_ratio(value: &str) -> Result<SvgPreserveAspectRatio, Sv
     Ok(SvgPreserveAspectRatio::new(alignment, scale))
 }
 
-fn parse_style(element: &XmlElement, inherited: &Style) -> Result<Style, SvgReadError> {
+fn parse_style(inherited: &Style, cascade: &CascadedStyle) -> Result<Style, SvgReadError> {
     let mut style = inherited.clone();
-    for attribute in element.attributes() {
-        apply_style(&mut style, attribute.name(), attribute.value())?;
-    }
-    if let Some(declarations) = element.attribute("style") {
-        for declaration in declarations
-            .split(';')
-            .filter(|value| !value.trim().is_empty())
-        {
-            let (name, value) = declaration
-                .split_once(':')
-                .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
-            apply_style(&mut style, name.trim(), value.trim())?;
+    for name in [
+        "fill",
+        "stroke",
+        "fill-rule",
+        "stroke-width",
+        "stroke-linecap",
+        "stroke-linejoin",
+        "stroke-miterlimit",
+        "stroke-dasharray",
+        "stroke-dashoffset",
+        "fill-opacity",
+        "stroke-opacity",
+        "visibility",
+        "font-size",
+        "font-family",
+        "font-style",
+        "font-weight",
+        "font-stretch",
+        "text-anchor",
+        "direction",
+    ] {
+        if let Some(value) = cascade.property(name) {
+            apply_style(&mut style, name, value)?;
         }
     }
     Ok(style)
@@ -1582,6 +2051,13 @@ fn apply_style(style: &mut Style, name: &str, value: &str) -> Result<(), SvgRead
                 | "fill-opacity"
                 | "stroke-opacity"
                 | "visibility"
+                | "font-size"
+                | "font-family"
+                | "font-style"
+                | "font-weight"
+                | "font-stretch"
+                | "text-anchor"
+                | "direction"
         )
     {
         return Ok(());
@@ -1645,6 +2121,67 @@ fn apply_style(style: &mut Style, name: &str, value: &str) -> Result<(), SvgRead
                 _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
             }
         }
+        "font-size" => style.font_size = parse_positive_length(value)?,
+        "font-family" => style.font_families = parse_font_families(value)?,
+        "font-style" => {
+            let slant = match value.trim() {
+                "normal" => FontSlant::Normal,
+                "italic" => FontSlant::Italic,
+                value if value == "oblique" || value.starts_with("oblique ") => FontSlant::Oblique,
+                _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+            };
+            style.font_style =
+                FontStyle::new(style.font_style.weight(), style.font_style.width(), slant)
+                    .map_err(map_text_error)?;
+        }
+        "font-weight" => {
+            let weight = match value.trim() {
+                "normal" => 400,
+                "bold" => 700,
+                "bolder" => style.font_style.weight().saturating_add(300).min(1000),
+                "lighter" => style.font_style.weight().saturating_sub(300).max(1),
+                value => value
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|value| (1..=1000).contains(value))
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?,
+            };
+            style.font_style =
+                FontStyle::new(weight, style.font_style.width(), style.font_style.slant())
+                    .map_err(map_text_error)?;
+        }
+        "font-stretch" => {
+            let width = match value.trim() {
+                "ultra-condensed" => FontWidth::UltraCondensed,
+                "extra-condensed" => FontWidth::ExtraCondensed,
+                "condensed" => FontWidth::Condensed,
+                "semi-condensed" => FontWidth::SemiCondensed,
+                "normal" => FontWidth::Normal,
+                "semi-expanded" => FontWidth::SemiExpanded,
+                "expanded" => FontWidth::Expanded,
+                "extra-expanded" => FontWidth::ExtraExpanded,
+                "ultra-expanded" => FontWidth::UltraExpanded,
+                _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+            };
+            style.font_style =
+                FontStyle::new(style.font_style.weight(), width, style.font_style.slant())
+                    .map_err(map_text_error)?;
+        }
+        "text-anchor" => {
+            style.text_anchor = match value.trim() {
+                "start" => TextAnchor::Start,
+                "middle" => TextAnchor::Middle,
+                "end" => TextAnchor::End,
+                _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+            }
+        }
+        "direction" => {
+            style.text_direction = match value.trim() {
+                "ltr" => Some(TextDirection::LeftToRight),
+                "rtl" => Some(TextDirection::RightToLeft),
+                _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+            }
+        }
         "style"
         | "opacity"
         | "transform"
@@ -1668,6 +2205,8 @@ fn apply_style(style: &mut Style, name: &str, value: &str) -> Result<(), SvgRead
         | "clip-path"
         | "clip-rule"
         | "clipPathUnits"
+        | "dx"
+        | "dy"
         | "fx"
         | "fy"
         | "fr"
@@ -1697,6 +2236,61 @@ fn apply_style(style: &mut Style, name: &str, value: &str) -> Result<(), SvgRead
         _ => return Err(SvgReadError::new(SvgReadErrorCode::Unsupported)),
     }
     Ok(())
+}
+
+fn parse_font_families(value: &str) -> Result<Vec<String>, SvgReadError> {
+    let mut families = Vec::new();
+    for family in value.split(',') {
+        let family = family.trim();
+        let family = if family.len() >= 2
+            && ((family.starts_with('"') && family.ends_with('"'))
+                || (family.starts_with('\'') && family.ends_with('\'')))
+        {
+            &family[1..family.len() - 1]
+        } else {
+            family
+        };
+        if family.is_empty()
+            || family
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '"' | '\''))
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+        }
+        families
+            .try_reserve(1)
+            .map_err(|_| SvgReadError::new(SvgReadErrorCode::AllocationFailed))?;
+        families.push(family.to_owned());
+    }
+    if families.is_empty() {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+    }
+    Ok(families)
+}
+
+fn normalize_text(source: &str, cursor: &mut TextCursor) -> String {
+    let starts_with_space = source.chars().next().is_some_and(char::is_whitespace);
+    let ends_with_space = source.chars().next_back().is_some_and(char::is_whitespace);
+    let words = source.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        cursor.pending_space |= !source.is_empty();
+        return String::new();
+    }
+    let mut output = String::new();
+    if cursor.emitted && (cursor.pending_space || starts_with_space) {
+        output.push(' ');
+    }
+    output.push_str(&words.join(" "));
+    cursor.pending_space = ends_with_space;
+    output
+}
+
+fn first_length(value: &str) -> Result<Scalar, SvgReadError> {
+    let first = value
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',')
+        .find(|value| !value.is_empty())
+        .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
+    parse_length(first)
 }
 
 fn parse_paint(value: &str) -> Result<Option<PaintSource>, SvgReadError> {

@@ -167,3 +167,25 @@ fn parser_reports_invalid_utf8_without_replacing_or_lossily_decoding_source_byte
     assert_eq!(error.code(), XmlErrorCode::InvalidUtf8);
     assert_eq!(error.offset(), 3);
 }
+
+#[test]
+fn parser_accepts_the_xml_1_0_unicode_name_ranges() {
+    let document =
+        parse(r#"<图形 xmlns:ns="urn:unicode" ns:属性="值"><Ångström/><कंपोज़िट/><𐀀·name/></图形>"#);
+    assert_eq!(document.root().name(), "图形");
+    assert_eq!(
+        document.root().attribute_ns(Some("urn:unicode"), "属性"),
+        Some("值")
+    );
+    assert_eq!(
+        document.root().children()[2]
+            .as_element()
+            .expect("supplementary-plane name")
+            .name(),
+        "𐀀·name"
+    );
+
+    let error = XmlDocument::parse("<\u{037E}bad/>".as_bytes(), XmlLimits::default())
+        .expect_err("excluded name-start character");
+    assert_eq!(error.code(), XmlErrorCode::InvalidName);
+}
