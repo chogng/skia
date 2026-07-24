@@ -628,6 +628,34 @@ fn software_replay_evaluates_runtime_shaders_in_local_space() {
 }
 
 #[test]
+fn software_replay_evaluates_composed_shader_graphs_and_marks_native_lowering() {
+    let shader = ShaderHandle::blend(
+        ShaderHandle::from_color(Color::RED),
+        ShaderHandle::from_color(Color::BLUE),
+        BlendMode::SourceOver,
+    )
+    .unwrap()
+    .with_local_matrix(Transform::translate(scalar(1), Scalar::ZERO))
+    .unwrap();
+    let mut encoder = GpuCommandEncoder::new(1).unwrap();
+    encoder
+        .fill_rect(
+            rect(0, 0, 1, 1),
+            Paint::new(Color::WHITE).with_shader(shader),
+        )
+        .unwrap();
+    let commands = encoder.finish();
+    assert!(commands.commands()[0].requires_shader_graph_lowering());
+
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(1, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &commands).unwrap();
+    assert_eq!(pixel(&surface, 0, 0), Color::RED.channels());
+}
+
+#[test]
 fn gpu_encoder_expands_a_path_effect_held_by_paint() {
     let mut path = PathBuilder::new(2).unwrap();
     path.move_to(point(2, 5)).unwrap();

@@ -22,6 +22,9 @@ mod path_effect_tests;
 #[path = "runtime_shader_tests.rs"]
 mod runtime_shader_tests;
 mod sampling;
+#[cfg(test)]
+#[path = "shader_graph_tests.rs"]
+mod shader_graph_tests;
 mod shaders;
 #[cfg(feature = "text")]
 mod text_geometry;
@@ -41,8 +44,9 @@ pub use path_effect::{
 };
 pub use sampling::{SamplingFilter, SamplingOptions};
 pub use shaders::{
-    Gradient, GradientGeometry, GradientStop, RuntimeShader, RuntimeShaderInstruction,
-    RuntimeShaderLimits, RuntimeShaderProgram, Shader, ShaderHandle, TileMode,
+    BlendShader, Gradient, GradientGeometry, GradientStop, LocalMatrixShader, RuntimeShader,
+    RuntimeShaderInstruction, RuntimeShaderLimits, RuntimeShaderProgram, Shader, ShaderHandle,
+    TileMode,
 };
 pub use skia_error::{SkiaError, SkiaErrorCode};
 pub use skia_geometry::{Point, Rect, Scalar, Transform};

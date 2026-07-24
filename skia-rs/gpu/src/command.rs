@@ -1,5 +1,6 @@
 use skia_core::{
-    Color, FillRule, Paint, Path, Rect, SamplingOptions, SaveLayerOptions, StrokeOptions, Transform,
+    Color, FillRule, Paint, Path, Rect, SamplingOptions, SaveLayerOptions, Shader, StrokeOptions,
+    Transform,
 };
 use skia_image::Image;
 
@@ -124,6 +125,31 @@ impl GpuCommand {
             paint
                 .shader_handle()
                 .is_some_and(|shader| shader.as_shader().runtime().is_some())
+        })
+    }
+
+    /// Returns whether this command carries a shader graph not yet lowered by native backends.
+    ///
+    /// Software replay evaluates these nodes directly. Image draws ignore the
+    /// paint source shader and therefore never require this lowering.
+    pub fn requires_shader_graph_lowering(&self) -> bool {
+        let paint = match self {
+            Self::FillRect { paint, .. }
+            | Self::FillPath { paint, .. }
+            | Self::StrokePath { paint, .. }
+            | Self::DrawGlyphs { paint, .. } => Some(paint),
+            Self::Clear(_)
+            | Self::SaveLayer { .. }
+            | Self::RestoreLayer
+            | Self::DrawImage { .. } => None,
+        };
+        paint.is_some_and(|paint| {
+            paint.shader_handle().is_some_and(|shader| {
+                matches!(
+                    shader.as_shader(),
+                    Shader::SolidColor(_) | Shader::LocalMatrix(_) | Shader::Blend(_)
+                )
+            })
         })
     }
 }

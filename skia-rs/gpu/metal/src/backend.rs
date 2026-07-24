@@ -541,6 +541,9 @@ impl GpuBackend for MetalBackend {
         commands: &GpuCommandBuffer,
     ) -> Result<(), Self::Error> {
         for command in commands.commands() {
+            if command.requires_shader_graph_lowering() {
+                return Err(MetalError::new(MetalErrorCode::UnsupportedCommand));
+            }
             match command {
                 GpuCommand::Clear(_) => {}
                 GpuCommand::SaveLayer { clip, .. } => {

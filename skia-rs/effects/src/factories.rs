@@ -40,7 +40,15 @@ pub mod image_filters {
 
 /// Built-in paint-source shader factories.
 pub mod shaders {
-    use skia_core::{Gradient, GradientStop, Point, Scalar, ShaderHandle, SkiaError, TileMode};
+    use skia_core::{
+        BlendMode, Color, Gradient, GradientStop, Point, Scalar, ShaderHandle, SkiaError, TileMode,
+        Transform,
+    };
+
+    /// Creates a constant-color source shader.
+    pub fn solid_color(color: Color) -> ShaderHandle {
+        ShaderHandle::from_color(color)
+    }
 
     /// Creates a bounded local-space linear gradient shader.
     pub fn linear_gradient(
@@ -65,6 +73,23 @@ pub mod shaders {
     /// Wraps a gradient for shared paint or display-list ownership.
     pub fn gradient_handle(gradient: Gradient) -> ShaderHandle {
         ShaderHandle::from_gradient(gradient)
+    }
+
+    /// Applies an additional child-to-parent local transform to a shader.
+    pub fn local_matrix(
+        shader: ShaderHandle,
+        transform: Transform,
+    ) -> Result<ShaderHandle, SkiaError> {
+        shader.with_local_matrix(transform)
+    }
+
+    /// Composites two source shaders with one blend mode.
+    pub fn blend(
+        source: ShaderHandle,
+        destination: ShaderHandle,
+        mode: BlendMode,
+    ) -> Result<ShaderHandle, SkiaError> {
+        ShaderHandle::blend(source, destination, mode)
     }
 }
 

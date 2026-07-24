@@ -44,6 +44,13 @@ pub(crate) fn submit(
     commands: &GpuCommandBuffer,
     runtime_shader_packets: &mut RuntimeShaderPacketCache,
 ) -> Result<(), VulkanError> {
+    if commands
+        .commands()
+        .iter()
+        .any(GpuCommand::requires_shader_graph_lowering)
+    {
+        return Err(VulkanError::new(VulkanErrorCode::UnsupportedCommand));
+    }
     let descriptor = surface.descriptor();
     let mut layers = Vec::<Layer>::new();
     let mut clips = HashMap::<GpuClipId, PixelBuffer>::new();
