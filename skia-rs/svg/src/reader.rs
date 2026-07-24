@@ -3,10 +3,10 @@ use std::{collections::HashMap, fmt};
 use skia_codec::{CodecErrorCode, CodecLimits, ImageCodec};
 use skia_core::{
     Angle, BlendMode, ClipOp, Color, ColorFilter, ColorMatrix, DisplayList, DisplayListBuilder,
-    FillRule, FontCollection, FontSlant, FontStyle, FontWidth, Gradient, GradientStop, ImageFilter,
-    Paint, Path, PathBuilder, PathVerb, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar,
-    ShaderHandle, StrokeCap, StrokeJoin, StrokeOptions, TextDirection, TextError, TextErrorCode,
-    TextStyleSpan, TileMode, Transform,
+    FillRule, FontCollection, FontSlant, FontStyle, FontWidth, GlyphOutlineProvider, Gradient,
+    GradientStop, ImageFilter, Paint, Path, PathBuilder, PathVerb, Point, Rect, SamplingOptions,
+    SaveLayerOptions, Scalar, ShaderHandle, StrokeCap, StrokeJoin, StrokeOptions, TextDirection,
+    TextError, TextErrorCode, TextStyleSpan, TileMode, Transform, glyph_outline_path,
 };
 use skia_xml::{XmlDocument, XmlElement, XmlError, XmlErrorCode, XmlLimits, XmlNode};
 
@@ -239,6 +239,7 @@ struct Style {
     marker_start: Option<String>,
     marker_mid: Option<String>,
     marker_end: Option<String>,
+    color: Color,
 }
 
 impl Default for Style {
@@ -264,6 +265,7 @@ impl Default for Style {
             marker_start: None,
             marker_mid: None,
             marker_end: None,
+            color: Color::BLACK,
         }
     }
 }
@@ -284,6 +286,7 @@ struct Compiler<'a, 'fonts> {
 #[derive(Clone)]
 enum PaintSource {
     Color(Color),
+    CurrentColor,
     Reference(String),
 }
 
@@ -650,7 +653,7 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
             style
                 .fill
                 .as_ref()
-                .map(|source| self.resolve_paint(source, &path, style.fill_opacity))
+                .map(|source| self.resolve_paint(source, &path, style.fill_opacity, style.color))
                 .transpose()?
         };
         if style
@@ -664,7 +667,7 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         let stroke_paint = style
             .stroke
             .as_ref()
-            .map(|source| self.resolve_paint(source, &path, style.stroke_opacity))
+            .map(|source| self.resolve_paint(source, &path, style.stroke_opacity, style.color))
             .transpose()?;
         let pattern_bounds = fill_pattern
             .map(|_| {
@@ -1067,9 +1070,11 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         source: &PaintSource,
         path: &Path,
         opacity: u8,
+        current_color: Color,
     ) -> Result<Paint, SvgReadError> {
         match source {
             PaintSource::Color(color) => Ok(Paint::new(color.with_opacity(opacity))),
+            PaintSource::CurrentColor => Ok(Paint::new(current_color.with_opacity(opacity))),
             PaintSource::Reference(id) => {
                 if self.reference_stack.len() >= self.limits.max_reference_depth
                     || self.reference_stack.iter().any(|active| active == id)
@@ -1726,12 +1731,63 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
             TextAnchor::End => subtract(cursor.x, advance)?,
         };
         if style.visible {
-            if style.stroke.is_some() {
-                return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
-            }
-            if let Some(fill) = &style.fill {
-                let PaintSource::Color(color) = fill else {
-                    return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+            let requires_outlines = style.stroke.is_some()
+                || style
+                    .fill
+                    .as_ref()
+                    .is_some_and(|fill| matches!(fill, PaintSource::Reference(_)));
+            if requires_outlines {
+                let mut paths = Vec::new();
+                for shaped in paragraph.runs() {
+                    let run = shaped.glyph_run();
+                    for (index, glyph) in run.glyphs().iter().copied().enumerate() {
+                        let Some(outline) = fonts
+                            .glyph_outline(run.font(), glyph.glyph())
+                            .map_err(map_text_error)?
+                        else {
+                            continue;
+                        };
+                        let Some(path) =
+                            glyph_outline_path(run, glyph, &outline).map_err(map_core_error)?
+                        else {
+                            continue;
+                        };
+                        let offset = shaped
+                            .glyph_offsets_x_bits()
+                            .get(index)
+                            .copied()
+                            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+                        let translated = path
+                            .transformed(Transform::translate(
+                                Scalar::from_bits(
+                                    origin_x
+                                        .bits()
+                                        .checked_add(shaped.origin_x_bits())
+                                        .and_then(|value| value.checked_add(offset))
+                                        .ok_or_else(|| {
+                                            SvgReadError::new(SvgReadErrorCode::InvalidGeometry)
+                                        })?,
+                                ),
+                                cursor.y,
+                            ))
+                            .map_err(map_core_error)?;
+                        paths
+                            .try_reserve(1)
+                            .map_err(|_| SvgReadError::new(SvgReadErrorCode::AllocationFailed))?;
+                        paths.push(translated);
+                    }
+                }
+                if !paths.is_empty() {
+                    let path = combine_paths(&paths, self.limits.max_path_verbs)?;
+                    self.draw_path(path, style)?;
+                }
+            } else if let Some(fill) = &style.fill {
+                let color = match fill {
+                    PaintSource::Color(color) => *color,
+                    PaintSource::CurrentColor => style.color,
+                    PaintSource::Reference(_) => {
+                        return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+                    }
                 };
                 self.builder
                     .draw_shaped_paragraph(
@@ -2594,10 +2650,23 @@ fn gradient_stops(chain: &[&XmlElement]) -> Result<Vec<GradientStop>, SvgReadErr
         let offset = Scalar::from_bits(offset.bits().clamp(previous.bits(), 1 << 16));
         previous = offset;
         let color_value = style_property(stop, "stop-color").unwrap_or("black");
-        let PaintSource::Color(color) = parse_paint(color_value)?
+        let color = match parse_paint(color_value)?
             .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?
-        else {
-            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+        {
+            PaintSource::Color(color) => color,
+            PaintSource::CurrentColor => {
+                let current = style_property(stop, "color")
+                    .or_else(|| style_property(owner, "color"))
+                    .unwrap_or("black");
+                match parse_paint(current)? {
+                    Some(PaintSource::Color(color)) => color,
+                    Some(PaintSource::CurrentColor) => Color::BLACK,
+                    _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+                }
+            }
+            PaintSource::Reference(_) => {
+                return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+            }
         };
         let opacity = style_property(stop, "stop-opacity")
             .map(parse_opacity)
@@ -3044,6 +3113,7 @@ fn parse_style(inherited: &Style, cascade: &CascadedStyle) -> Result<Style, SvgR
         "marker-start",
         "marker-mid",
         "marker-end",
+        "color",
     ] {
         if let Some(value) = cascade.property(name) {
             apply_style(&mut style, name, value)?;
@@ -3094,6 +3164,7 @@ fn apply_style(style: &mut Style, name: &str, value: &str) -> Result<(), SvgRead
                 | "marker-start"
                 | "marker-mid"
                 | "marker-end"
+                | "color"
         )
     {
         return Ok(());
@@ -3227,6 +3298,13 @@ fn apply_style(style: &mut Style, name: &str, value: &str) -> Result<(), SvgRead
         "marker-start" => style.marker_start = parse_local_resource_property(value)?,
         "marker-mid" => style.marker_mid = parse_local_resource_property(value)?,
         "marker-end" => style.marker_end = parse_local_resource_property(value)?,
+        "color" => {
+            style.color = match parse_paint(value)? {
+                Some(PaintSource::Color(color)) => color,
+                Some(PaintSource::CurrentColor) => style.color,
+                _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+            }
+        }
         "style"
         | "opacity"
         | "transform"
@@ -3345,7 +3423,10 @@ fn parse_paint(value: &str) -> Result<Option<PaintSource>, SvgReadError> {
     if let Some(id) = local_url_reference(value) {
         return Ok(Some(PaintSource::Reference(id.to_owned())));
     }
-    if value.starts_with("url(") || value == "currentColor" {
+    if value == "currentColor" {
+        return Ok(Some(PaintSource::CurrentColor));
+    }
+    if value.starts_with("url(") {
         return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
     }
     let color = match value {
@@ -3360,6 +3441,8 @@ fn parse_paint(value: &str) -> Result<Option<PaintSource>, SvgReadError> {
         "gray" | "grey" => Color::rgb(128, 128, 128),
         "transparent" => Color::TRANSPARENT,
         _ if value.starts_with('#') => parse_hex_color(value)?,
+        _ if value.starts_with("rgb(") || value.starts_with("rgba(") => parse_rgb_color(value)?,
+        _ if value.starts_with("hsl(") || value.starts_with("hsla(") => parse_hsl_color(value)?,
         _ => return Err(SvgReadError::new(SvgReadErrorCode::Unsupported)),
     };
     Ok(Some(PaintSource::Color(color)))
@@ -3428,6 +3511,132 @@ fn parse_hex_color(value: &str) -> Result<Color, SvgReadError> {
         )),
         _ => Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
     }
+}
+
+fn parse_rgb_color(value: &str) -> Result<Color, SvgReadError> {
+    let (body, alpha_function) = if let Some(body) = value
+        .strip_prefix("rgba(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        (body, true)
+    } else if let Some(body) = value
+        .strip_prefix("rgb(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        (body, false)
+    } else {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+    };
+    let (components, alpha) = split_color_function(body, alpha_function)?;
+    if components.len() != 3 {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+    }
+    Ok(Color::rgba(
+        parse_rgb_component(components[0])?,
+        parse_rgb_component(components[1])?,
+        parse_rgb_component(components[2])?,
+        alpha
+            .map(parse_alpha_component)
+            .transpose()?
+            .unwrap_or(u8::MAX),
+    ))
+}
+
+fn parse_hsl_color(value: &str) -> Result<Color, SvgReadError> {
+    let (body, alpha_function) = if let Some(body) = value
+        .strip_prefix("hsla(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        (body, true)
+    } else if let Some(body) = value
+        .strip_prefix("hsl(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        (body, false)
+    } else {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+    };
+    let (components, alpha) = split_color_function(body, alpha_function)?;
+    if components.len() != 3 {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+    }
+    let hue = parse_angle_degrees(components[0])?.rem_euclid(360.0) / 360.0;
+    let percentage = |value: &str| -> Result<f64, SvgReadError> {
+        let value = value
+            .trim()
+            .strip_suffix('%')
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
+        Ok((scalar_to_f64(parse_scalar(value)?) / 100.0).clamp(0.0, 1.0))
+    };
+    let saturation = percentage(components[1])?;
+    let lightness = percentage(components[2])?;
+    let channel = |offset: f64| {
+        let k = (offset + hue * 12.0).rem_euclid(12.0);
+        let a = saturation * lightness.min(1.0 - lightness);
+        lightness - a * (-1.0_f64).max((k - 3.0).min(9.0 - k).min(1.0))
+    };
+    Ok(Color::rgba(
+        color_channel(channel(0.0)),
+        color_channel(channel(8.0)),
+        color_channel(channel(4.0)),
+        alpha
+            .map(parse_alpha_component)
+            .transpose()?
+            .unwrap_or(u8::MAX),
+    ))
+}
+
+fn split_color_function(
+    body: &str,
+    alpha_function: bool,
+) -> Result<(Vec<&str>, Option<&str>), SvgReadError> {
+    if body.contains(',') {
+        let values = body.split(',').map(str::trim).collect::<Vec<_>>();
+        let expected = if alpha_function { 4 } else { 3 };
+        if values.len() != expected || values.iter().any(|value| value.is_empty()) {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+        }
+        let alpha = if alpha_function {
+            Some(values[3])
+        } else {
+            None
+        };
+        return Ok((values[..3].to_vec(), alpha));
+    }
+    let (components, alpha) = body
+        .split_once('/')
+        .map_or((body, None), |(components, alpha)| {
+            (components, Some(alpha.trim()))
+        });
+    let components = components.split_ascii_whitespace().collect::<Vec<_>>();
+    if components.len() != 3 || alpha_function && alpha.is_none() {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+    }
+    Ok((components, alpha))
+}
+
+fn parse_rgb_component(value: &str) -> Result<u8, SvgReadError> {
+    let value = value.trim();
+    let component = if let Some(percentage) = value.strip_suffix('%') {
+        scalar_to_f64(parse_scalar(percentage)?) * 255.0 / 100.0
+    } else {
+        scalar_to_f64(parse_scalar(value)?)
+    };
+    Ok(component.clamp(0.0, 255.0).round() as u8)
+}
+
+fn parse_alpha_component(value: &str) -> Result<u8, SvgReadError> {
+    let value = value.trim();
+    let alpha = if let Some(percentage) = value.strip_suffix('%') {
+        scalar_to_f64(parse_scalar(percentage)?) / 100.0
+    } else {
+        scalar_to_f64(parse_scalar(value)?)
+    };
+    Ok((alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+fn color_channel(value: f64) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 fn parse_view_box(value: &str) -> Result<Rect, SvgReadError> {

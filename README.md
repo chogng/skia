@@ -197,7 +197,9 @@ profile covers the root viewport/view box, groups, `rect`, `circle`, `ellipse`,
 `line`, `polyline`, `polygon`, all path command families including elliptical
 arcs, inherited solid fill/stroke properties, fill rules,
 cap/join/miter/dash geometry, visibility, element/group opacity, and all
-affine transform functions. It resolves bounded local `defs`/`use` chains,
+affine transform functions. Color values include inherited
+`color`/`currentColor`, hexadecimal forms, legacy/modern RGB(A), and HSL(A).
+It resolves bounded local `defs`/`use` chains,
 stylesheet rules with type, ID, class, attribute, descendant, child, and
 `:root` selectors (including specificity, source order, inline declarations,
 and `!important`), `symbol` instances with independent viewports,
@@ -212,9 +214,11 @@ stroke-width or user-space sizing, reference points, and marker view boxes,
 embedded PNG/JPEG/WebP data-URI images, and nested SVG viewports. With
 `decode_with_fonts`, caller-owned portable font collections shape basic
 `text`/`tspan` content into positioned glyph-run commands without consulting
-platform fonts. Root, nested, symbol, and image `preserveAspectRatio` policies
-are retained or lowered explicitly. Missing root dimensions use the SVG
-defaults of 300 by 150. Zero-sized basic shapes produce no drawing command.
+platform fonts. Text requiring strokes, gradients, or patterns is converted
+from the same shaped glyphs and real font outlines into ordinary paths. Root,
+nested, symbol, and image `preserveAspectRatio` policies are retained or
+lowered explicitly. Missing root dimensions use the SVG defaults of 300 by
+150. Zero-sized basic shapes produce no drawing command.
 
 Input parsing has independent XML, display-list, and per-path ceilings and
 adds reference-depth and embedded-image ceilings. It publishes stable error
@@ -255,7 +259,7 @@ The reader and writer intentionally have separate limits and error types.
 The reader still rejects network/file resources, animation, script, pattern
 strokes/transforms, filter graphs beyond the exact color-matrix mapping,
 luminance masks, arbitrary focal radial gradients, context paint in markers,
-object-bounding-box effects on text, and text-on-path or stroked text. The writer
+object-bounding-box effects on text, and text-on-path. The writer
 still rejects glyph-run commands because a DisplayList does not retain source
 text or font-licensing policy. Unsupported semantics fail explicitly rather
 than being silently approximated.

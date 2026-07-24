@@ -349,6 +349,115 @@ fn text_uses_explicit_fonts_and_lowers_positioned_glyph_runs() {
 }
 
 #[test]
+fn stroked_text_uses_real_font_outlines() {
+    let fonts = test_fonts();
+    let document = SvgReader::decode_with_fonts(
+        br##"<svg width="40" height="30">
+          <text x="5" y="20" font-size="14" fill="none" stroke="#336699"
+                stroke-width="1">A</text>
+        </svg>"##,
+        SvgReadOptions::default(),
+        &fonts,
+    )
+    .expect("outlined text SVG");
+    assert!(
+        document
+            .display_list()
+            .commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                DrawCommand::StrokePath { paint, .. }
+                    if paint.color() == Color::rgb(0x33, 0x66, 0x99)
+            ))
+    );
+    assert!(
+        !document
+            .display_list()
+            .commands()
+            .iter()
+            .any(|command| matches!(command, DrawCommand::DrawPositionedGlyphRun { .. }))
+    );
+}
+
+#[test]
+fn current_color_inherits_into_shapes_text_and_gradient_stops() {
+    let fonts = test_fonts();
+    let document = SvgReader::decode_with_fonts(
+        br##"<svg width="60" height="30" color="#2468ac">
+          <defs>
+            <linearGradient id="tone" color="#aa3300">
+              <stop offset="0" stop-color="currentColor"/>
+              <stop offset="1" stop-color="white"/>
+            </linearGradient>
+          </defs>
+          <rect width="10" height="10" fill="currentColor"/>
+          <text x="12" y="15" fill="currentColor">A</text>
+          <rect x="30" width="20" height="10" fill="url(#tone)"/>
+        </svg>"##,
+        SvgReadOptions::default(),
+        &fonts,
+    )
+    .expect("currentColor SVG");
+    assert!(
+        document
+            .display_list()
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::FillPath { paint, .. }
+                | DrawCommand::StrokePath { paint, .. }
+                | DrawCommand::DrawPositionedGlyphRun { paint, .. } => Some(paint),
+                _ => None,
+            })
+            .any(|paint| paint.color() == Color::rgb(0x24, 0x68, 0xac))
+    );
+    assert!(
+        document
+            .display_list()
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::FillPath { paint, .. }
+                | DrawCommand::StrokePath { paint, .. }
+                | DrawCommand::DrawPositionedGlyphRun { paint, .. } => Some(paint),
+                _ => None,
+            })
+            .any(|paint| paint.shader_handle().is_some())
+    );
+}
+
+#[test]
+fn functional_css_colors_support_legacy_and_modern_forms() {
+    let document = decode(
+        r#"<svg width="40" height="10">
+          <rect width="10" height="10" fill="rgb(100%, 0%, 50%)"/>
+          <rect x="10" width="10" height="10" fill="rgba(0, 128, 255, .5)"/>
+          <rect x="20" width="10" height="10" fill="rgb(10 20 30 / 25%)"/>
+          <rect x="30" width="10" height="10" fill="hsl(120deg 100% 25%)"/>
+        </svg>"#,
+    );
+    let colors = document
+        .display_list()
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::FillPath { paint, .. } => Some(paint.color()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        colors,
+        [
+            Color::rgb(255, 0, 128),
+            Color::rgba(0, 128, 255, 128),
+            Color::rgba(10, 20, 30, 64),
+            Color::rgb(0, 128, 0),
+        ]
+    );
+}
+
+#[test]
 fn alpha_masks_lower_as_destination_in_layers() {
     let document = decode(
         r##"<svg width="30" height="20">
