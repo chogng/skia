@@ -2,7 +2,7 @@ load("//:defs.bzl", "skia_rust_crate")
 
 skia_rust_crate(
     name = "metal",
-    build_script_data = ["//skia-rs/shaders:solid_rect.metal"],
+    build_script_data = ["shaders/renderer.metal"],
     crate_name = "skia_metal",
     target_compatible_with = ["@platforms//os:macos"],
 )

@@ -605,7 +605,9 @@ DisplayList 在 `core/src/display_list.rs`，GPU 命令层在 `gpu/src/command.r
 后端无关的固定步数曲线展平在 `tessellation/src/flatten.rs`；CPU 将其输出接到
 `cpu/src/canvas.rs` 的栅格轮廓。Metal 后端提交在 `gpu/metal/src/backend.rs`，Metal mask 生命周期在
 `gpu/metal/src/backend/clip.rs`，`gpu/metal/src/backend/clip_geometry.rs` 只把共享折线轮廓转换为裁剪边，mask 与
-draw shader 在 `shaders/solid_rect.metal`。
+draw shader 在 `gpu/metal/shaders/renderer.metal`。后端无关的 gradient、runtime shader IR、验证、
+求值和共享 handle 语义位于 `core/src/shaders/`；Vulkan 程序资产位于
+`gpu/vulkan/shaders/renderer.wgsl`。
 Vulkan loader/device/queue 生命周期在 `gpu/vulkan/src/context.rs`，offscreen image、layout barrier
 与 staging readback 在 `gpu/vulkan/src/surface.rs`；Windows 强制设备测试见 `gpu/vulkan/README.md`。
 

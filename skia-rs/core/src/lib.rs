@@ -22,6 +22,7 @@ mod path_effect_tests;
 #[path = "runtime_shader_tests.rs"]
 mod runtime_shader_tests;
 mod sampling;
+mod shaders;
 #[cfg(feature = "text")]
 mod text_geometry;
 #[cfg(feature = "text")]
@@ -32,14 +33,17 @@ pub use clip::ClipOp;
 pub use display_list::GlyphRunId;
 pub use display_list::{DisplayList, DisplayListBuilder, DrawCommand, ImageId, PathId};
 pub use paint::{
-    BlendMode, Color, ColorFilter, ColorFilterHandle, ColorMatrix, Gradient, GradientGeometry,
-    GradientStop, ImageFilter, ImageFilterHandle, Paint, RuntimeShader, RuntimeShaderInstruction,
-    RuntimeShaderLimits, RuntimeShaderProgram, SaveLayerOptions, Shader, ShaderHandle, TileMode,
+    BlendMode, Color, ColorFilter, ColorFilterHandle, ColorMatrix, ImageFilter, ImageFilterHandle,
+    Paint, SaveLayerOptions,
 };
 pub use path_effect::{
     PathEffect, PathEffectHandle, PathEffectLimits, apply_path_effect, compose_path_effects,
 };
 pub use sampling::{SamplingFilter, SamplingOptions};
+pub use shaders::{
+    Gradient, GradientGeometry, GradientStop, RuntimeShader, RuntimeShaderInstruction,
+    RuntimeShaderLimits, RuntimeShaderProgram, Shader, ShaderHandle, TileMode,
+};
 pub use skia_error::{SkiaError, SkiaErrorCode};
 pub use skia_geometry::{Point, Rect, Scalar, Transform};
 pub use skia_path::{

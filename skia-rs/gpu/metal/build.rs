@@ -7,17 +7,17 @@ const RUNTIME_SHADER_INSTRUCTION_WORDS: usize = 6;
 const RUNTIME_SHADER_SPECIALIZATION_MARKER: &str = "// RUNTIME_SHADER_SPECIALIZATION";
 
 fn main() {
-    println!("cargo:rerun-if-changed=../../shaders/solid_rect.metal");
+    println!("cargo:rerun-if-changed=shaders/renderer.metal");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let source = manifest.join("../../shaders/solid_rect.metal");
+    let source = manifest.join("shaders/renderer.metal");
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
-    let generated_source = output.join("solid_rect.generated.metal");
-    let air = output.join("solid_rect.air");
-    let library = output.join("solid_rect.metallib");
+    let generated_source = output.join("renderer.generated.metal");
+    let air = output.join("renderer.air");
+    let library = output.join("renderer.metallib");
     fs::write(
         &generated_source,
         specialize_runtime_shader_source(fs::read_to_string(&source).expect("read Metal shader")),

@@ -1,6 +1,7 @@
 use skia_geometry::{Point, Scalar};
 
-use super::{BlendMode, Color, ColorFilter, ColorMatrix, Gradient, GradientStop, Paint, TileMode};
+use super::{BlendMode, Color, ColorFilter, ColorMatrix, Paint};
+use crate::{Gradient, GradientStop, TileMode};
 
 #[test]
 fn color_constructors_pack_channels_and_apply_opacity() {
