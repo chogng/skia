@@ -5,11 +5,13 @@
 //! coordinate rules, and ownership model.
 
 mod gradient;
+mod image;
 mod runtime;
 mod shader;
 
 pub(crate) use gradient::rounded_shift_q16;
 pub use gradient::{Gradient, GradientGeometry, GradientStop, TileMode};
+pub use image::ImageShader;
 pub use runtime::{
     RuntimeShader, RuntimeShaderInstruction, RuntimeShaderLimits, RuntimeShaderProgram,
 };

@@ -44,9 +44,9 @@ pub use path_effect::{
 };
 pub use sampling::{SamplingFilter, SamplingOptions};
 pub use shaders::{
-    BlendShader, Gradient, GradientGeometry, GradientStop, LocalMatrixShader, RuntimeShader,
-    RuntimeShaderInstruction, RuntimeShaderLimits, RuntimeShaderProgram, Shader, ShaderHandle,
-    TileMode,
+    BlendShader, Gradient, GradientGeometry, GradientStop, ImageShader, LocalMatrixShader,
+    RuntimeShader, RuntimeShaderInstruction, RuntimeShaderLimits, RuntimeShaderProgram, Shader,
+    ShaderHandle, TileMode,
 };
 pub use skia_error::{SkiaError, SkiaErrorCode};
 pub use skia_geometry::{Point, Rect, Scalar, Transform};

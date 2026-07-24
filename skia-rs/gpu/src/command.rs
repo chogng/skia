@@ -147,7 +147,10 @@ impl GpuCommand {
             paint.shader_handle().is_some_and(|shader| {
                 matches!(
                     shader.as_shader(),
-                    Shader::SolidColor(_) | Shader::LocalMatrix(_) | Shader::Blend(_)
+                    Shader::SolidColor(_)
+                        | Shader::Image(_)
+                        | Shader::LocalMatrix(_)
+                        | Shader::Blend(_)
                 )
             })
         })

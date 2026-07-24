@@ -742,6 +742,7 @@ name = "skia-effects"
 version = "0.1.0"
 dependencies = [
  "skia-core",
+ "skia-image",
  "skia-tessellation",
 ]
 

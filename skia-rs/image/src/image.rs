@@ -65,7 +65,7 @@ pub enum AlphaType {
 /// bounded matrix/TRC path can construct a transform to sRGB. LUT, CMYK,
 /// device-link, and malformed profiles are rejected instead of being treated
 /// as sRGB.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ColorSpace {
     /// IEC 61966-2-1 sRGB transfer function and BT.709/sRGB primaries.
     Srgb,
@@ -144,7 +144,7 @@ impl ColorSpace {
 }
 
 /// Immutable pixel dimensions, storage format, alpha representation, and color space.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ImageInfo {
     width: u32,
     height: u32,
@@ -250,7 +250,7 @@ impl fmt::Display for ImageError {
 impl std::error::Error for ImageError {}
 
 /// Immutable owned pixels with an explicit row stride, alpha type, and color space.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Image {
     info: ImageInfo,
     row_bytes: usize,

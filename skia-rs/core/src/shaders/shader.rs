@@ -1,7 +1,9 @@
-use super::{Gradient, RuntimeShader};
+use super::{Gradient, ImageShader, RuntimeShader};
 use crate::paint::{BlendMode, Color};
+use crate::sampling::SamplingOptions;
 use skia_error::{SkiaError, SkiaErrorCode};
 use skia_geometry::{Point, Transform};
+use skia_image::Image;
 use std::sync::Arc;
 
 /// Backend-neutral source program currently implemented by paints.
@@ -13,6 +15,8 @@ pub enum Shader {
     Gradient(Gradient),
     /// Evaluates a bounded local-space runtime program on CPU and software GPU.
     Runtime(RuntimeShader),
+    /// Samples an immutable image in local pixel-coordinate space.
+    Image(ImageShader),
     /// Evaluates a child shader through an additional local-space transform.
     LocalMatrix(LocalMatrixShader),
     /// Composites two child shaders at the same local coordinate.
@@ -28,6 +32,16 @@ impl Shader {
     /// Creates a constant-color shader.
     pub const fn solid_color(color: Color) -> Self {
         Self::SolidColor(color)
+    }
+
+    /// Creates an image shader with explicit reconstruction and tiling policies.
+    pub fn image(
+        image: Image,
+        sampling: SamplingOptions,
+        x_tile_mode: super::TileMode,
+        y_tile_mode: super::TileMode,
+    ) -> Result<Self, SkiaError> {
+        ImageShader::new(image, sampling, x_tile_mode, y_tile_mode).map(Self::Image)
     }
 
     /// Creates a local-matrix wrapper after validating its transform and graph limits.
@@ -48,7 +62,11 @@ impl Shader {
     pub const fn solid(&self) -> Option<Color> {
         match self {
             Self::SolidColor(color) => Some(*color),
-            Self::Gradient(_) | Self::Runtime(_) | Self::LocalMatrix(_) | Self::Blend(_) => None,
+            Self::Gradient(_)
+            | Self::Runtime(_)
+            | Self::Image(_)
+            | Self::LocalMatrix(_)
+            | Self::Blend(_) => None,
         }
     }
 
@@ -56,7 +74,11 @@ impl Shader {
     pub const fn gradient(&self) -> Option<Gradient> {
         match self {
             Self::Gradient(gradient) => Some(*gradient),
-            Self::SolidColor(_) | Self::Runtime(_) | Self::LocalMatrix(_) | Self::Blend(_) => None,
+            Self::SolidColor(_)
+            | Self::Runtime(_)
+            | Self::Image(_)
+            | Self::LocalMatrix(_)
+            | Self::Blend(_) => None,
         }
     }
 
@@ -64,7 +86,23 @@ impl Shader {
     pub const fn runtime(&self) -> Option<&RuntimeShader> {
         match self {
             Self::Runtime(runtime) => Some(runtime),
-            Self::SolidColor(_) | Self::Gradient(_) | Self::LocalMatrix(_) | Self::Blend(_) => None,
+            Self::SolidColor(_)
+            | Self::Gradient(_)
+            | Self::Image(_)
+            | Self::LocalMatrix(_)
+            | Self::Blend(_) => None,
+        }
+    }
+
+    /// Borrows the image representation when this shader has one.
+    pub const fn image_shader(&self) -> Option<&ImageShader> {
+        match self {
+            Self::Image(shader) => Some(shader),
+            Self::SolidColor(_)
+            | Self::Gradient(_)
+            | Self::Runtime(_)
+            | Self::LocalMatrix(_)
+            | Self::Blend(_) => None,
         }
     }
 
@@ -72,7 +110,11 @@ impl Shader {
     pub const fn local_matrix_shader(&self) -> Option<&LocalMatrixShader> {
         match self {
             Self::LocalMatrix(shader) => Some(shader),
-            Self::SolidColor(_) | Self::Gradient(_) | Self::Runtime(_) | Self::Blend(_) => None,
+            Self::SolidColor(_)
+            | Self::Gradient(_)
+            | Self::Runtime(_)
+            | Self::Image(_)
+            | Self::Blend(_) => None,
         }
     }
 
@@ -80,9 +122,11 @@ impl Shader {
     pub const fn blend_shader(&self) -> Option<&BlendShader> {
         match self {
             Self::Blend(shader) => Some(shader),
-            Self::SolidColor(_) | Self::Gradient(_) | Self::Runtime(_) | Self::LocalMatrix(_) => {
-                None
-            }
+            Self::SolidColor(_)
+            | Self::Gradient(_)
+            | Self::Runtime(_)
+            | Self::Image(_)
+            | Self::LocalMatrix(_) => None,
         }
     }
 
@@ -92,6 +136,7 @@ impl Shader {
             Self::SolidColor(color) => Ok(*color),
             Self::Gradient(gradient) => gradient.sample(point),
             Self::Runtime(runtime) => runtime.sample(point),
+            Self::Image(shader) => shader.sample(point),
             Self::LocalMatrix(shader) => shader.sample(point),
             Self::Blend(shader) => shader.sample(point),
         }
@@ -99,7 +144,7 @@ impl Shader {
 
     fn graph_size(&self) -> (usize, usize) {
         match self {
-            Self::SolidColor(_) | Self::Gradient(_) | Self::Runtime(_) => (1, 1),
+            Self::SolidColor(_) | Self::Gradient(_) | Self::Runtime(_) | Self::Image(_) => (1, 1),
             Self::LocalMatrix(shader) => {
                 let (depth, nodes) = shader.shader.as_shader().graph_size();
                 (depth.saturating_add(1), nodes.saturating_add(1))
@@ -241,6 +286,16 @@ impl ShaderHandle {
     /// Wraps one bounded runtime shader in shared ownership.
     pub fn from_runtime(runtime: RuntimeShader) -> Self {
         Self::new(Shader::Runtime(runtime))
+    }
+
+    /// Creates an image shader with explicit reconstruction and tiling policies.
+    pub fn from_image(
+        image: Image,
+        sampling: SamplingOptions,
+        x_tile_mode: super::TileMode,
+        y_tile_mode: super::TileMode,
+    ) -> Result<Self, SkiaError> {
+        Shader::image(image, sampling, x_tile_mode, y_tile_mode).map(Self::new)
     }
 
     /// Wraps this shader in an additional local-space transform.

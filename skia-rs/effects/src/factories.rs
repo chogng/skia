@@ -41,13 +41,24 @@ pub mod image_filters {
 /// Built-in paint-source shader factories.
 pub mod shaders {
     use skia_core::{
-        BlendMode, Color, Gradient, GradientStop, Point, Scalar, ShaderHandle, SkiaError, TileMode,
-        Transform,
+        BlendMode, Color, Gradient, GradientStop, Point, SamplingOptions, Scalar, ShaderHandle,
+        SkiaError, TileMode, Transform,
     };
+    use skia_image::Image;
 
     /// Creates a constant-color source shader.
     pub fn solid_color(color: Color) -> ShaderHandle {
         ShaderHandle::from_color(color)
+    }
+
+    /// Creates a tiled image shader in image pixel-coordinate space.
+    pub fn image(
+        image: Image,
+        sampling: SamplingOptions,
+        x_tile_mode: TileMode,
+        y_tile_mode: TileMode,
+    ) -> Result<ShaderHandle, SkiaError> {
+        ShaderHandle::from_image(image, sampling, x_tile_mode, y_tile_mode)
     }
 
     /// Creates a bounded local-space linear gradient shader.

@@ -656,6 +656,37 @@ fn software_replay_evaluates_composed_shader_graphs_and_marks_native_lowering() 
 }
 
 #[test]
+fn software_replay_evaluates_image_shaders_and_marks_native_lowering() {
+    let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let shader = ShaderHandle::from_image(
+        image,
+        SamplingOptions::NEAREST,
+        TileMode::Repeat,
+        TileMode::Clamp,
+    )
+    .unwrap();
+    let mut encoder = GpuCommandEncoder::new(1).unwrap();
+    encoder
+        .fill_rect(
+            rect(0, 0, 4, 1),
+            Paint::new(Color::WHITE).with_shader(shader),
+        )
+        .unwrap();
+    let commands = encoder.finish();
+    assert!(commands.commands()[0].requires_shader_graph_lowering());
+
+    let mut backend = SoftwareGpuBackend::default();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &commands).unwrap();
+    assert_eq!(pixel(&surface, 0, 0), Color::RED.channels());
+    assert_eq!(pixel(&surface, 1, 0), Color::BLUE.channels());
+    assert_eq!(pixel(&surface, 2, 0), Color::RED.channels());
+    assert_eq!(pixel(&surface, 3, 0), Color::BLUE.channels());
+}
+
+#[test]
 fn gpu_encoder_expands_a_path_effect_held_by_paint() {
     let mut path = PathBuilder::new(2).unwrap();
     path.move_to(point(2, 5)).unwrap();

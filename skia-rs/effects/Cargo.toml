@@ -7,4 +7,5 @@ publish = false
 
 [dependencies]
 skia-core = { workspace = true }
+skia-image = { workspace = true }
 skia-tessellation = { workspace = true }
