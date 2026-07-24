@@ -1,0 +1,25 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "gpu_tools",
+    crate_name = "skia_gpu_tools",
+    edition = "2024",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//skia-rs/core:core",
+        "//skia-rs/gpu:gpu",
+        "//skia-rs/image:image",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "gpu_tools_unit_tests",
+    crate = ":gpu_tools",
+    edition = "2024",
+    deps = [
+        "//skia-rs/core:core",
+        "//skia-rs/gpu:gpu",
+        "//skia-rs/image:image",
+    ],
+)
