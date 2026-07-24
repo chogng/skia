@@ -2,10 +2,11 @@ use std::{collections::HashMap, fmt};
 
 use skia_codec::{CodecErrorCode, CodecLimits, ImageCodec};
 use skia_core::{
-    Angle, BlendMode, ClipOp, Color, DisplayList, DisplayListBuilder, FillRule, FontCollection,
-    FontSlant, FontStyle, FontWidth, Gradient, GradientStop, Paint, Path, PathBuilder, Point, Rect,
-    SamplingOptions, SaveLayerOptions, Scalar, ShaderHandle, StrokeCap, StrokeJoin, StrokeOptions,
-    TextDirection, TextError, TextErrorCode, TextStyleSpan, TileMode, Transform,
+    Angle, BlendMode, ClipOp, Color, ColorFilter, ColorMatrix, DisplayList, DisplayListBuilder,
+    FillRule, FontCollection, FontSlant, FontStyle, FontWidth, Gradient, GradientStop, ImageFilter,
+    Paint, Path, PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar, ShaderHandle,
+    StrokeCap, StrokeJoin, StrokeOptions, TextDirection, TextError, TextErrorCode, TextStyleSpan,
+    TileMode, Transform,
 };
 use skia_xml::{XmlDocument, XmlElement, XmlError, XmlErrorCode, XmlLimits, XmlNode};
 
@@ -465,6 +466,9 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
                 | "style"
                 | "linearGradient"
                 | "radialGradient"
+                | "pattern"
+                | "filter"
+                | "feColorMatrix"
                 | "clipPath"
                 | "mask"
                 | "symbol"
@@ -506,15 +510,27 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
                     .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::Unsupported))
             })
             .transpose()?;
+        let filter = cascade
+            .property("filter")
+            .filter(|value| *value != "none")
+            .map(|value| {
+                local_url_reference(value)
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::Unsupported))
+                    .and_then(|id| self.resolve_color_matrix_filter(id))
+            })
+            .transpose()?;
 
-        let uses_state = transform.is_some() || opacity != u8::MAX || clip.is_some();
+        let uses_state =
+            transform.is_some() || opacity != u8::MAX || clip.is_some() || filter.is_some();
         if uses_state {
-            if opacity == u8::MAX {
+            if opacity == u8::MAX && filter.is_none() {
                 self.builder.save().map_err(map_core_error)?;
             } else {
-                self.builder
-                    .save_layer(SaveLayerOptions::new().with_opacity(opacity))
-                    .map_err(map_core_error)?;
+                let mut options = SaveLayerOptions::new().with_opacity(opacity);
+                if let Some(filter) = filter {
+                    options = options.with_filter(filter);
+                }
+                self.builder.save_layer(options).map_err(map_core_error)?;
             }
             if let Some(transform) = transform {
                 self.builder
@@ -581,18 +597,52 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         if !style.visible {
             return Ok(());
         }
-        let fill_paint = style
+        let fill_pattern = style
             .fill
             .as_ref()
-            .map(|source| self.resolve_paint(source, &path, style.fill_opacity))
-            .transpose()?;
+            .and_then(|source| self.paint_server_of_kind(source, "pattern"));
+        let fill_paint = if fill_pattern.is_some() {
+            None
+        } else {
+            style
+                .fill
+                .as_ref()
+                .map(|source| self.resolve_paint(source, &path, style.fill_opacity))
+                .transpose()?
+        };
+        if style
+            .stroke
+            .as_ref()
+            .and_then(|source| self.paint_server_of_kind(source, "pattern"))
+            .is_some()
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+        }
         let stroke_paint = style
             .stroke
             .as_ref()
             .map(|source| self.resolve_paint(source, &path, style.stroke_opacity))
             .transpose()?;
+        let pattern_bounds = fill_pattern
+            .map(|_| {
+                let bounds = path
+                    .tight_bounds()
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+                Rect::new(bounds.left(), bounds.top(), bounds.right(), bounds.bottom())
+                    .map_err(map_core_error)
+            })
+            .transpose()?;
         let id = self.builder.add_path(path).map_err(map_core_error)?;
-        if let Some(paint) = fill_paint {
+        if let Some(pattern) = fill_pattern {
+            self.lower_pattern_fill(
+                pattern,
+                id,
+                style.fill_rule,
+                pattern_bounds
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?,
+                style.fill_opacity,
+            )?;
+        } else if let Some(paint) = fill_paint {
             self.builder
                 .fill_path(id, style.fill_rule, paint)
                 .map_err(map_core_error)?;
@@ -612,6 +662,194 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
                 .map_err(map_core_error)?;
         }
         Ok(())
+    }
+
+    fn paint_server_of_kind(&self, source: &PaintSource, kind: &str) -> Option<&'a XmlElement> {
+        let PaintSource::Reference(id) = source else {
+            return None;
+        };
+        self.resources.get(id).copied().filter(|element| {
+            element
+                .namespace_uri()
+                .is_none_or(|uri| uri == SVG_NAMESPACE)
+                && element.local_name() == kind
+        })
+    }
+
+    fn lower_pattern_fill(
+        &mut self,
+        pattern: &'a XmlElement,
+        target: skia_core::PathId,
+        rule: FillRule,
+        bounds: Rect,
+        opacity: u8,
+    ) -> Result<(), SvgReadError> {
+        let id = pattern
+            .attribute_ns(None, "id")
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
+        if self.reference_stack.len() >= self.limits.max_reference_depth
+            || self.reference_stack.iter().any(|active| active == id)
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::ResourceLimit));
+        }
+        let chain = self.resource_chain(pattern, "pattern")?;
+        if effective_attribute(&chain, "patternTransform").is_some() {
+            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+        }
+        let object_bounding_box =
+            match effective_attribute(&chain, "patternUnits").unwrap_or("objectBoundingBox") {
+                "objectBoundingBox" => true,
+                "userSpaceOnUse" => false,
+                _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+            };
+        let bounds_width = subtract(bounds.right(), bounds.left())?;
+        let bounds_height = subtract(bounds.bottom(), bounds.top())?;
+        if bounds_width.bits() <= 0 || bounds_height.bits() <= 0 {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidGeometry));
+        }
+        let (base_x, base_y, tile_width, tile_height) = if object_bounding_box {
+            (
+                object_box_coordinate(
+                    effective_attribute(&chain, "x"),
+                    bounds.left(),
+                    bounds_width,
+                    Scalar::ZERO,
+                )?,
+                object_box_coordinate(
+                    effective_attribute(&chain, "y"),
+                    bounds.top(),
+                    bounds_height,
+                    Scalar::ZERO,
+                )?,
+                object_box_extent(effective_attribute(&chain, "width"), bounds_width)?,
+                object_box_extent(effective_attribute(&chain, "height"), bounds_height)?,
+            )
+        } else {
+            (
+                effective_attribute(&chain, "x")
+                    .map(parse_length)
+                    .transpose()?
+                    .unwrap_or(Scalar::ZERO),
+                effective_attribute(&chain, "y")
+                    .map(parse_length)
+                    .transpose()?
+                    .unwrap_or(Scalar::ZERO),
+                effective_attribute(&chain, "width")
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))
+                    .and_then(parse_positive_length)?,
+                effective_attribute(&chain, "height")
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))
+                    .and_then(parse_positive_length)?,
+            )
+        };
+        if tile_width.bits() <= 0 || tile_height.bits() <= 0 {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidGeometry));
+        }
+        let columns = tile_range(bounds.left(), bounds.right(), base_x, tile_width)?;
+        let rows = tile_range(bounds.top(), bounds.bottom(), base_y, tile_height)?;
+        let tile_count = columns
+            .len()
+            .checked_mul(rows.len())
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::ResourceLimit))?;
+        if tile_count == 0 || tile_count > self.limits.max_display_list_items {
+            return Err(SvgReadError::new(SvgReadErrorCode::ResourceLimit));
+        }
+        let owner = chain
+            .iter()
+            .rev()
+            .find(|element| {
+                element
+                    .children()
+                    .iter()
+                    .any(|child| child.as_element().is_some())
+            })
+            .copied()
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
+        let cascade = self
+            .stylesheet
+            .cascade(owner, &self.ancestors)
+            .map_err(map_css_error)?;
+        let pattern_style = parse_style(&Style::default(), &cascade)?;
+        let view_box = effective_attribute(&chain, "viewBox")
+            .map(parse_view_box)
+            .transpose()?;
+        let content_object_bounding_box =
+            match effective_attribute(&chain, "patternContentUnits").unwrap_or("userSpaceOnUse") {
+                "objectBoundingBox" if view_box.is_none() => true,
+                "userSpaceOnUse" | "objectBoundingBox" if view_box.is_some() => false,
+                "userSpaceOnUse" => false,
+                _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+            };
+
+        self.reference_stack.push(id.to_owned());
+        self.builder.save().map_err(map_core_error)?;
+        self.builder
+            .clip_path(target, rule, ClipOp::Intersect)
+            .map_err(map_core_error)?;
+        if opacity != u8::MAX {
+            self.builder
+                .save_layer(SaveLayerOptions::new().with_opacity(opacity))
+                .map_err(map_core_error)?;
+        }
+        self.ancestors.push(owner);
+        let mut result = Ok(());
+        'tiles: for row in rows {
+            for &column in &columns {
+                let tile_x = tile_position(base_x, tile_width, column)?;
+                let tile_y = tile_position(base_y, tile_height, row)?;
+                let tile = Rect::new(
+                    tile_x,
+                    tile_y,
+                    add(tile_x, tile_width)?,
+                    add(tile_y, tile_height)?,
+                )
+                .map_err(map_core_error)?;
+                self.builder.save().map_err(map_core_error)?;
+                self.builder.clip_rect(tile).map_err(map_core_error)?;
+                let mapping = if let Some(view_box) = view_box {
+                    viewport_mapping(
+                        tile,
+                        view_box,
+                        effective_attribute(&chain, "preserveAspectRatio")
+                            .unwrap_or("xMidYMid meet"),
+                    )?
+                } else {
+                    let offset_x = subtract(tile_x, base_x)?;
+                    let offset_y = subtract(tile_y, base_y)?;
+                    let repeat = Transform::translate(offset_x, offset_y);
+                    if content_object_bounding_box {
+                        repeat
+                            .concat(Transform::new(
+                                bounds_width,
+                                Scalar::ZERO,
+                                Scalar::ZERO,
+                                bounds_height,
+                                bounds.left(),
+                                bounds.top(),
+                            ))
+                            .map_err(map_core_error)?
+                    } else {
+                        repeat
+                    }
+                };
+                self.builder
+                    .concat_transform(mapping)
+                    .map_err(map_core_error)?;
+                result = self.lower_children(owner, &pattern_style);
+                let restore = self.builder.restore().map_err(map_core_error);
+                if result.is_err() {
+                    break 'tiles;
+                }
+                restore?;
+            }
+        }
+        self.ancestors.pop();
+        if opacity != u8::MAX {
+            self.builder.restore().map_err(map_core_error)?;
+        }
+        self.builder.restore().map_err(map_core_error)?;
+        self.reference_stack.pop();
+        result
     }
 
     fn draw_optional_path(
@@ -798,7 +1036,14 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
     }
 
     fn gradient_chain(&self, element: &'a XmlElement) -> Result<Vec<&'a XmlElement>, SvgReadError> {
-        let kind = element.local_name();
+        self.resource_chain(element, element.local_name())
+    }
+
+    fn resource_chain(
+        &self,
+        element: &'a XmlElement,
+        kind: &str,
+    ) -> Result<Vec<&'a XmlElement>, SvgReadError> {
         let mut chain = vec![element];
         let mut current = element;
         while let Some(reference) = href(current) {
@@ -1426,6 +1671,97 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         result.and(restore_result)
     }
 
+    fn resolve_color_matrix_filter(&self, id: &str) -> Result<ImageFilter, SvgReadError> {
+        let filter = *self
+            .resources
+            .get(id)
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
+        if filter
+            .namespace_uri()
+            .is_some_and(|uri| uri != SVG_NAMESPACE)
+            || filter.local_name() != "filter"
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+        }
+        if filter.attributes().iter().any(|attribute| {
+            attribute.namespace_uri().is_none()
+                && matches!(
+                    attribute.local_name(),
+                    "x" | "y" | "width" | "height" | "filterUnits" | "primitiveUnits"
+                )
+        }) {
+            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+        }
+        let primitives = filter
+            .children()
+            .iter()
+            .filter_map(XmlNode::as_element)
+            .collect::<Vec<_>>();
+        if primitives.len() != 1 {
+            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+        }
+        let primitive = primitives[0];
+        if primitive
+            .namespace_uri()
+            .is_some_and(|uri| uri != SVG_NAMESPACE)
+            || primitive.local_name() != "feColorMatrix"
+            || !matches!(primitive.attribute_ns(None, "type"), None | Some("matrix"))
+            || !matches!(
+                primitive.attribute_ns(None, "in"),
+                None | Some("SourceGraphic")
+            )
+            || primitive.attribute_ns(None, "result").is_some()
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
+        }
+        if primitive
+            .children()
+            .iter()
+            .any(|child| child.as_text().is_none_or(|text| !text.trim().is_empty()))
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+        }
+        let values = match primitive.attribute_ns(None, "values") {
+            Some(values) => NumberList::parse_all(values)?,
+            None => vec![
+                Scalar::from_bits(1 << 16),
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::from_bits(1 << 16),
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::from_bits(1 << 16),
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::ZERO,
+                Scalar::from_bits(1 << 16),
+                Scalar::ZERO,
+            ],
+        };
+        if values.len() != 20 {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+        }
+        let mut matrix = [0_i32; 20];
+        for (index, value) in values.into_iter().enumerate() {
+            matrix[index] = if index % 5 == 4 {
+                multiply_scalar(value, Scalar::from_bits(255 << 16))?.bits()
+            } else {
+                value.bits()
+            };
+        }
+        Ok(ImageFilter::Color(ColorFilter::Matrix(ColorMatrix::new(
+            matrix,
+        ))))
+    }
+
     fn clip_geometry(&self, element: &XmlElement) -> Result<Option<Path>, SvgReadError> {
         if element
             .namespace_uri()
@@ -1743,6 +2079,88 @@ fn multiply_scalar(left: Scalar, right: Scalar) -> Result<Scalar, SvgReadError> 
     i32::try_from(rounded)
         .map(Scalar::from_bits)
         .map_err(|_| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))
+}
+
+fn object_box_fraction(value: &str) -> Result<Scalar, SvgReadError> {
+    let value = value.trim();
+    if let Some(percentage) = value.strip_suffix('%') {
+        return scalar_from_f64(scalar_to_f64(parse_scalar(percentage)?) / 100.0);
+    }
+    if value
+        .bytes()
+        .any(|byte| byte.is_ascii_alphabetic() || byte == b'%')
+    {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+    }
+    parse_scalar(value)
+}
+
+fn object_box_coordinate(
+    value: Option<&str>,
+    origin: Scalar,
+    extent: Scalar,
+    default: Scalar,
+) -> Result<Scalar, SvgReadError> {
+    let fraction = value
+        .map(object_box_fraction)
+        .transpose()?
+        .unwrap_or(default);
+    add(origin, multiply_scalar(extent, fraction)?)
+}
+
+fn object_box_extent(value: Option<&str>, extent: Scalar) -> Result<Scalar, SvgReadError> {
+    let fraction = value
+        .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))
+        .and_then(object_box_fraction)?;
+    let result = multiply_scalar(extent, fraction)?;
+    if result.bits() <= 0 {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+    }
+    Ok(result)
+}
+
+fn tile_range(
+    minimum: Scalar,
+    maximum: Scalar,
+    base: Scalar,
+    extent: Scalar,
+) -> Result<Vec<i32>, SvgReadError> {
+    if maximum <= minimum || extent.bits() <= 0 {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidGeometry));
+    }
+    let extent_f64 = scalar_to_f64(extent);
+    let start = ((scalar_to_f64(minimum) - scalar_to_f64(base)) / extent_f64).floor();
+    let end = ((scalar_to_f64(maximum) - scalar_to_f64(base)) / extent_f64).ceil() - 1.0;
+    if !start.is_finite()
+        || !end.is_finite()
+        || start < f64::from(i32::MIN)
+        || end > f64::from(i32::MAX)
+        || end < start
+    {
+        return Err(SvgReadError::new(SvgReadErrorCode::ResourceLimit));
+    }
+    let start = start as i32;
+    let end = end as i32;
+    let length = i64::from(end)
+        .checked_sub(i64::from(start))
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::ResourceLimit))?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(length)
+        .map_err(|_| SvgReadError::new(SvgReadErrorCode::AllocationFailed))?;
+    output.extend(start..=end);
+    Ok(output)
+}
+
+fn tile_position(base: Scalar, extent: Scalar, index: i32) -> Result<Scalar, SvgReadError> {
+    let offset = i64::from(extent.bits())
+        .checked_mul(i64::from(index))
+        .and_then(|value| value.checked_add(i64::from(base.bits())))
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+    Ok(Scalar::from_bits(offset))
 }
 
 fn decode_image_data_uri(value: &str, maximum: usize) -> Result<Vec<u8>, SvgReadError> {

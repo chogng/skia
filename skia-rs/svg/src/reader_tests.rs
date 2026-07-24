@@ -375,6 +375,69 @@ fn alpha_masks_lower_as_destination_in_layers() {
 }
 
 #[test]
+fn vector_patterns_tile_inside_the_target_path() {
+    let document = decode(
+        r##"<svg width="40" height="20">
+          <defs>
+            <pattern id="grid" width="25%" height="50%" viewBox="0 0 10 10"
+                     preserveAspectRatio="none">
+              <rect width="5" height="10" fill="#112233"/>
+            </pattern>
+          </defs>
+          <rect x="0" y="0" width="40" height="20" fill="url(#grid)"/>
+        </svg>"##,
+    );
+    let commands = document.display_list().commands();
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, DrawCommand::ClipPath { .. }))
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(
+                |command| matches!(command, DrawCommand::FillPath { paint, .. }
+                if paint.color() == Color::rgb(0x11, 0x22, 0x33))
+            )
+            .count(),
+        8
+    );
+}
+
+#[test]
+fn source_graphic_color_matrix_filters_lower_without_raster_fallback() {
+    let document = decode(
+        r##"<svg width="20" height="10">
+          <defs>
+            <filter id="tint">
+              <feColorMatrix type="matrix"
+                values="0 0 0 0 1
+                        0 1 0 0 0
+                        0 0 1 0 0
+                        0 0 0 .5 0"/>
+            </filter>
+          </defs>
+          <rect width="20" height="10" fill="white" filter="url(#tint)"/>
+        </svg>"##,
+    );
+    assert!(
+        document
+            .display_list()
+            .commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                DrawCommand::SaveLayer(options)
+                    if matches!(
+                        options.filter(),
+                        Some(skia_core::ImageFilter::Color(skia_core::ColorFilter::Matrix(_)))
+                    )
+            ))
+    );
+}
+
+#[test]
 fn malformed_xml_and_unsupported_svg_are_distinct() {
     let malformed = SvgReader::decode(
         br#"<svg width="1" height="1"><path></svg>"#,
