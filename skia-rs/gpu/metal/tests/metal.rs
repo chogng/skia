@@ -82,6 +82,38 @@ fn metal_backend_specializes_runtime_shader_pipelines() {
 }
 
 #[test]
+fn metal_backend_executes_direct_image_shader_sampling() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let shader = ShaderHandle::from_image(
+        image,
+        SamplingOptions::NEAREST,
+        TileMode::Repeat,
+        TileMode::Clamp,
+    )
+    .unwrap();
+    let mut commands = GpuCommandEncoder::new(2).unwrap();
+    commands.clear(Color::BLACK).unwrap();
+    commands
+        .fill_rect(
+            rect(0, 0, 4, 1),
+            Paint::new(Color::WHITE).with_shader(shader),
+        )
+        .unwrap();
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 1).unwrap())
+        .unwrap();
+    backend.submit(&mut surface, &commands.finish()).unwrap();
+    let pixels = surface.read_rgba8().unwrap();
+    assert_eq!(pixel(&pixels, 4, 0, 0), Color::RED.channels());
+    assert_eq!(pixel(&pixels, 4, 1, 0), Color::BLUE.channels());
+    assert_eq!(pixel(&pixels, 4, 2, 0), Color::RED.channels());
+    assert_eq!(pixel(&pixels, 4, 3, 0), Color::BLUE.channels());
+}
+
+#[test]
 fn metal_backend_executes_every_blend_mode_against_destination_pixels() {
     let Some(mut backend) = backend_or_skip() else {
         return;

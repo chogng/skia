@@ -7,6 +7,8 @@ struct Words {
 @group(0) @binding(2) var<storage, read> payload: Words;
 @group(0) @binding(3) var<storage, read> params: Words;
 @group(0) @binding(4) var<storage, read> clip: Words;
+@group(0) @binding(5) var shader_image: texture_2d<f32>;
+@group(0) @binding(6) var shader_sampler: sampler;
 
 const OP_SOLID: u32 = 1u;
 const OP_PATH: u32 = 2u;
@@ -377,6 +379,9 @@ fn evaluate_paint(point: vec2<f32>) -> u32 {
     if kind == 3u {
         return apply_color_filter(evaluate_runtime_paint(point));
     }
+    if kind == 4u {
+        return apply_color_filter(color);
+    }
     if kind != 0u {
         let first = vec2<f32>(bitcast<f32>(params.values[35u]), bitcast<f32>(params.values[36u]));
         var parameter = 0.0;
@@ -491,6 +496,14 @@ fn sample_image(point: vec2<f32>) -> u32 {
     return pack(out.x, out.y, out.z, out.w);
 }
 
+fn sample_shader_image(point: vec2<f32>) -> u32 {
+    let size = textureDimensions(shader_image);
+    let coordinate = point / vec2<f32>(f32(size.x), f32(size.y));
+    let sample = textureSampleLevel(shader_image, shader_sampler, coordinate, 0.0);
+    let channels = vec4<u32>(round(clamp(sample, vec4<f32>(0.0), vec4<f32>(1.0)) * 255.0));
+    return pack(channels.x, channels.y, channels.z, channels.w);
+}
+
 fn inside_scissor(point: vec2<f32>) -> bool {
     if params.values[6u] == 0u { return true; }
     return point.x >= bitcast<f32>(params.values[24u]) && point.y >= bitcast<f32>(params.values[25u]) && point.x < bitcast<f32>(params.values[26u]) && point.y < bitcast<f32>(params.values[27u]);
@@ -535,6 +548,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var covered = false;
     let local = local_point(point);
     var src = evaluate_paint(local);
+    if params.values[32u] == 4u {
+        src = apply_color_filter(modulate_alpha(
+            sample_shader_image(local),
+            channel(params.values[3u], 24u),
+        ));
+    }
     if operation == OP_SOLID {
         covered = local.x >= bitcast<f32>(params.values[8u]) && local.y >= bitcast<f32>(params.values[9u]) && local.x < bitcast<f32>(params.values[10u]) && local.y < bitcast<f32>(params.values[11u]);
     } else if operation == OP_PATH {

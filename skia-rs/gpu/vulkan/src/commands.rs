@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use skia_core::{
-    BlendMode, ClipOp, Color, ColorFilter, FillRule, GradientGeometry, ImageFilter, Paint, Point,
-    Rect, SamplingFilter, SaveLayerOptions, Scalar, TileMode, Transform,
+    BlendMode, ClipOp, Color, ColorFilter, FillRule, GradientGeometry, ImageFilter, ImageShader,
+    Paint, Point, Rect, SamplingFilter, SaveLayerOptions, Scalar, TileMode, Transform,
 };
 use skia_gpu::{
     GpuClipGeometry, GpuClipId, GpuCommand, GpuCommandBuffer, GpuSurfaceDescriptor,
@@ -14,7 +14,7 @@ use skia_tessellation::{DEFAULT_CURVE_STEPS, FlatteningLimits, PathFlattener, st
 use crate::{
     VulkanError, VulkanErrorCode,
     renderer::VulkanRenderer,
-    surface::{PixelBuffer, VulkanSurface},
+    surface::{PixelBuffer, SampledImage, VulkanSurface},
 };
 
 const OP_SOLID: u32 = 1;
@@ -35,6 +35,7 @@ const PARAMETER_WORDS: usize = RUNTIME_SHADER_UNIFORM_BASE + RUNTIME_SHADER_MAX_
 struct DrawParams {
     words: [u32; PARAMETER_WORDS],
     runtime_shader: Option<RuntimeShaderPacket>,
+    image_shader: Option<ImageShader>,
 }
 
 pub(crate) fn submit(
@@ -101,7 +102,7 @@ pub(crate) fn submit(
                 );
                 set_scissor(&mut params, layer.scissor);
                 params[7] = u32::from(clip.is_some());
-                renderer.dispatch(target, Some(source), clip, &[], &params, None)?;
+                renderer.dispatch(target, Some(source), clip, &[], &params, None, None)?;
             }
             GpuCommand::FillRect {
                 rect,
@@ -128,6 +129,11 @@ pub(crate) fn submit(
                 )?;
                 set_rect(&mut draw.words, *rect);
                 draw.words[7] = u32::from(clip.is_some());
+                let shader_image = draw
+                    .image_shader
+                    .as_ref()
+                    .map(|shader| SampledImage::from_shader(context.clone(), shader))
+                    .transpose()?;
                 renderer.dispatch(
                     current_target(surface, &layers),
                     None,
@@ -135,6 +141,7 @@ pub(crate) fn submit(
                     &[],
                     &draw.words,
                     draw.runtime_shader.as_ref(),
+                    shader_image.as_ref(),
                 )?;
             }
             GpuCommand::FillPath {
@@ -169,6 +176,11 @@ pub(crate) fn submit(
                     .map_err(|_| VulkanError::new(VulkanErrorCode::SubmissionFailed))?;
                 draw.words[5] = u32::from(matches!(rule, FillRule::EvenOdd));
                 draw.words[7] = u32::from(clip.is_some());
+                let shader_image = draw
+                    .image_shader
+                    .as_ref()
+                    .map(|shader| SampledImage::from_shader(context.clone(), shader))
+                    .transpose()?;
                 renderer.dispatch(
                     current_target(surface, &layers),
                     None,
@@ -176,6 +188,7 @@ pub(crate) fn submit(
                     &edges,
                     &draw.words,
                     draw.runtime_shader.as_ref(),
+                    shader_image.as_ref(),
                 )?;
             }
             GpuCommand::StrokePath {
@@ -219,6 +232,11 @@ pub(crate) fn submit(
                 draw.words[4] = u32::try_from(mesh.vertices().len() / 3)
                     .map_err(|_| VulkanError::new(VulkanErrorCode::SubmissionFailed))?;
                 draw.words[7] = u32::from(clip.is_some());
+                let shader_image = draw
+                    .image_shader
+                    .as_ref()
+                    .map(|shader| SampledImage::from_shader(context.clone(), shader))
+                    .transpose()?;
                 renderer.dispatch(
                     current_target(surface, &layers),
                     None,
@@ -226,6 +244,7 @@ pub(crate) fn submit(
                     &triangles,
                     &draw.words,
                     draw.runtime_shader.as_ref(),
+                    shader_image.as_ref(),
                 )?;
             }
             GpuCommand::DrawImage {
@@ -281,6 +300,7 @@ pub(crate) fn submit(
                     &pixels,
                     &draw.words,
                     None,
+                    None,
                 )?;
             }
             GpuCommand::DrawGlyphs {
@@ -334,6 +354,7 @@ pub(crate) fn submit(
                         &pixels,
                         &draw.words,
                         draw.runtime_shader.as_ref(),
+                        None,
                     )?;
                 }
             }
@@ -367,9 +388,17 @@ fn filter_layer(
             let vertical = PixelBuffer::new(context, descriptor)?;
             let mut params = base_params(OP_BLUR_X, descriptor);
             params[4] = u32::from(radius);
-            renderer.dispatch(&horizontal, Some(&layer.pixels), None, &[], &params, None)?;
+            renderer.dispatch(
+                &horizontal,
+                Some(&layer.pixels),
+                None,
+                &[],
+                &params,
+                None,
+                None,
+            )?;
             params[0] = OP_BLUR_Y;
-            renderer.dispatch(&vertical, Some(&horizontal), None, &[], &params, None)?;
+            renderer.dispatch(&vertical, Some(&horizontal), None, &[], &params, None, None)?;
             Ok(Some(vertical))
         }
         Some(ImageFilter::Color(filter)) => {
@@ -381,7 +410,7 @@ fn filter_layer(
             set_transform(&mut params, Transform::IDENTITY)?;
             set_rect(&mut params, full_rect(descriptor));
             encode_color_filter(&mut params, filter);
-            renderer.dispatch(&output, Some(&layer.pixels), None, &[], &params, None)?;
+            renderer.dispatch(&output, Some(&layer.pixels), None, &[], &params, None, None)?;
             Ok(Some(output))
         }
     }
@@ -447,7 +476,7 @@ fn ensure_clip(
     params[7] = u32::from(matches!(node.op(), ClipOp::Difference));
     let mask = PixelBuffer::new(context, descriptor)?;
     let parent = node.parent().and_then(|parent| clips.get(&parent));
-    renderer.dispatch(&mask, parent, None, &edges, &params, None)?;
+    renderer.dispatch(&mask, parent, None, &edges, &params, None, None)?;
     clips.insert(id, mask);
     Ok(())
 }
@@ -475,13 +504,14 @@ fn draw_params(
     runtime_shader_packets: &mut RuntimeShaderPacketCache,
 ) -> Result<DrawParams, VulkanError> {
     let mut words = base_params(operation, descriptor);
-    let runtime_shader = encode_paint(&mut words, paint, runtime_shader_packets);
+    let (runtime_shader, image_shader) = encode_paint(&mut words, paint, runtime_shader_packets);
     words[12] = blend_mode(paint.blend_mode());
     set_transform(&mut words, transform)?;
     set_scissor(&mut words, scissor);
     Ok(DrawParams {
         words,
         runtime_shader,
+        image_shader,
     })
 }
 
@@ -683,49 +713,63 @@ fn encode_paint(
     params: &mut [u32; PARAMETER_WORDS],
     paint: &Paint,
     runtime_shader_packets: &mut RuntimeShaderPacketCache,
-) -> Option<RuntimeShaderPacket> {
+) -> (Option<RuntimeShaderPacket>, Option<ImageShader>) {
     params[3] = color_word(paint.color());
-    let runtime_shader = if let Some(runtime) = runtime_shader_packets.packet(paint) {
-        params[32] = 3;
-        params[RUNTIME_SHADER_HEADER] = runtime.instruction_count();
-        params[RUNTIME_SHADER_UNIFORM_BASE
-            ..RUNTIME_SHADER_UNIFORM_BASE + RUNTIME_SHADER_MAX_UNIFORMS]
-            .copy_from_slice(runtime.uniforms());
-        Some(runtime)
-    } else if let Some(gradient) = paint.gradient() {
-        match gradient.geometry() {
-            GradientGeometry::Linear { start, end } => {
-                params[32] = 1;
-                params[35] = scalar_word(start.x());
-                params[36] = scalar_word(start.y());
-                params[37] = scalar_word(end.x());
-                params[38] = scalar_word(end.y());
+    let (runtime_shader, image_shader_pixels) =
+        if let Some(image_shader) = direct_image_shader(paint) {
+            encode_image_shader(params, image_shader);
+            (None, Some(image_shader.clone()))
+        } else if let Some(runtime) = runtime_shader_packets.packet(paint) {
+            params[32] = 3;
+            params[RUNTIME_SHADER_HEADER] = runtime.instruction_count();
+            params[RUNTIME_SHADER_UNIFORM_BASE
+                ..RUNTIME_SHADER_UNIFORM_BASE + RUNTIME_SHADER_MAX_UNIFORMS]
+                .copy_from_slice(runtime.uniforms());
+            (Some(runtime), None)
+        } else if let Some(gradient) = paint.gradient() {
+            match gradient.geometry() {
+                GradientGeometry::Linear { start, end } => {
+                    params[32] = 1;
+                    params[35] = scalar_word(start.x());
+                    params[36] = scalar_word(start.y());
+                    params[37] = scalar_word(end.x());
+                    params[38] = scalar_word(end.y());
+                }
+                GradientGeometry::Radial { center, radius } => {
+                    params[32] = 2;
+                    params[35] = scalar_word(center.x());
+                    params[36] = scalar_word(center.y());
+                    params[37] = scalar_word(radius);
+                }
             }
-            GradientGeometry::Radial { center, radius } => {
-                params[32] = 2;
-                params[35] = scalar_word(center.x());
-                params[36] = scalar_word(center.y());
-                params[37] = scalar_word(radius);
+            params[33] = match gradient.tile_mode() {
+                TileMode::Clamp => 0,
+                TileMode::Repeat => 1,
+                TileMode::Mirror => 2,
+            };
+            params[34] = u32::try_from(gradient.stops().len()).unwrap_or(0);
+            for (index, stop) in gradient.stops().iter().enumerate() {
+                params[40 + index] = scalar_word(stop.offset());
+                params[56 + index] = color_word(stop.color());
             }
-        }
-        params[33] = match gradient.tile_mode() {
-            TileMode::Clamp => 0,
-            TileMode::Repeat => 1,
-            TileMode::Mirror => 2,
+            (None, None)
+        } else {
+            (None, None)
         };
-        params[34] = u32::try_from(gradient.stops().len()).unwrap_or(0);
-        for (index, stop) in gradient.stops().iter().enumerate() {
-            params[40 + index] = scalar_word(stop.offset());
-            params[56 + index] = color_word(stop.color());
-        }
-        None
-    } else {
-        None
-    };
     if let Some(filter) = paint.color_filter() {
         encode_color_filter(params, filter);
     }
-    runtime_shader
+    (runtime_shader, image_shader_pixels)
+}
+
+fn direct_image_shader(paint: &Paint) -> Option<&ImageShader> {
+    paint
+        .shader_handle()
+        .and_then(|shader| shader.as_shader().image_shader())
+}
+
+fn encode_image_shader(params: &mut [u32; PARAMETER_WORDS], _shader: &ImageShader) {
+    params[32] = 4;
 }
 
 fn encode_color_filter(params: &mut [u32; PARAMETER_WORDS], filter: ColorFilter) {

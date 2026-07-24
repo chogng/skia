@@ -17,12 +17,12 @@ use std::{cell::RefCell, collections::HashMap, fmt, mem::size_of};
 use metal::{
     CommandQueue, Device, FunctionConstantValues, Library, MTLClearColor, MTLCommandBufferStatus,
     MTLDataType, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion,
-    MTLResourceOptions, MTLScissorRect, MTLSize, MTLStorageMode, MTLStoreAction, MTLTextureUsage,
-    RenderPassDescriptor, RenderPipelineDescriptor, RenderPipelineState, Texture,
-    TextureDescriptor,
+    MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerMinMagFilter, MTLSamplerMipFilter,
+    MTLScissorRect, MTLSize, MTLStorageMode, MTLStoreAction, MTLTextureUsage, RenderPassDescriptor,
+    RenderPipelineDescriptor, RenderPipelineState, SamplerDescriptor, Texture, TextureDescriptor,
 };
 use skia_core::{
-    BlendMode, Color, ColorFilter, GradientGeometry, ImageFilter, Paint, Point, Rect,
+    BlendMode, Color, ColorFilter, GradientGeometry, ImageFilter, ImageShader, Paint, Point, Rect,
     SamplingFilter, SamplingOptions, SaveLayerOptions, Scalar, TileMode, Transform,
 };
 use skia_gpu::{
@@ -649,16 +649,32 @@ impl GpuBackend for MetalBackend {
                     let clip_texture = clip
                         .and_then(|id| clip_textures.get(&id))
                         .unwrap_or(self.clip_renderer.unclipped_texture());
-                    self.encode_solid_rect(
-                        command_buffer,
-                        &target,
-                        *rect,
-                        paint.clone(),
-                        *transform,
-                        *scissor,
-                        clip_texture,
-                        clip.is_some(),
-                    )?;
+                    if let Some(image_shader) = direct_image_shader(paint) {
+                        let texture = self.upload_image(image_shader.image());
+                        self.encode_image_shader_rect(
+                            command_buffer,
+                            &target,
+                            &texture,
+                            *rect,
+                            image_shader,
+                            paint.clone(),
+                            *transform,
+                            *scissor,
+                            clip_texture,
+                            clip.is_some(),
+                        )?;
+                    } else {
+                        self.encode_solid_rect(
+                            command_buffer,
+                            &target,
+                            *rect,
+                            paint.clone(),
+                            *transform,
+                            *scissor,
+                            clip_texture,
+                            clip.is_some(),
+                        )?;
+                    }
                 }
                 GpuCommand::FillPath {
                     path,
@@ -690,14 +706,31 @@ impl GpuBackend for MetalBackend {
                         *transform,
                         parent,
                     )?;
-                    self.encode_solid_surface(
-                        command_buffer,
-                        &target,
-                        paint.clone(),
-                        *transform,
-                        *scissor,
-                        &fill_mask,
-                    )?;
+                    if let Some(image_shader) = direct_image_shader(paint) {
+                        let texture = self.upload_image(image_shader.image());
+                        self.encode_image_shader_surface(
+                            command_buffer,
+                            &target,
+                            &texture,
+                            image_shader,
+                            paint.clone(),
+                            *transform,
+                            *scissor,
+                            &fill_mask,
+                            true,
+                            self.clip_renderer.unclipped_texture(),
+                            false,
+                        )?;
+                    } else {
+                        self.encode_solid_surface(
+                            command_buffer,
+                            &target,
+                            paint.clone(),
+                            *transform,
+                            *scissor,
+                            &fill_mask,
+                        )?;
+                    }
                 }
                 GpuCommand::DrawImage {
                     image,
@@ -808,16 +841,33 @@ impl GpuBackend for MetalBackend {
                     let clip_texture = clip
                         .and_then(|id| clip_textures.get(&id))
                         .unwrap_or(self.clip_renderer.unclipped_texture());
-                    self.encode_solid_surface_with_masks(
-                        command_buffer,
-                        &target,
-                        paint.clone(),
-                        *transform,
-                        *scissor,
-                        clip_texture,
-                        clip.is_some(),
-                        &stroke_mask,
-                    )?;
+                    if let Some(image_shader) = direct_image_shader(paint) {
+                        let texture = self.upload_image(image_shader.image());
+                        self.encode_image_shader_surface(
+                            command_buffer,
+                            &target,
+                            &texture,
+                            image_shader,
+                            paint.clone(),
+                            *transform,
+                            *scissor,
+                            clip_texture,
+                            clip.is_some(),
+                            &stroke_mask,
+                            true,
+                        )?;
+                    } else {
+                        self.encode_solid_surface_with_masks(
+                            command_buffer,
+                            &target,
+                            paint.clone(),
+                            *transform,
+                            *scissor,
+                            clip_texture,
+                            clip.is_some(),
+                            &stroke_mask,
+                        )?;
+                    }
                 }
             }
         }
@@ -1057,9 +1107,13 @@ impl MetalBackend {
             &vertices,
             paint,
             SamplingOptions::NEAREST,
+            TileMode::Clamp,
+            TileMode::Clamp,
             scissor,
             clip_texture,
             layer.clip.is_some(),
+            self.clip_renderer.unclipped_texture(),
+            false,
         )
     }
 
@@ -1349,9 +1403,84 @@ impl MetalBackend {
             &vertices,
             paint,
             sampling,
+            TileMode::Clamp,
+            TileMode::Clamp,
             scissor,
             clip_texture,
             has_clip,
+            self.clip_renderer.unclipped_texture(),
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_image_shader_rect(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: &MetalSurface,
+        image: &Texture,
+        rect: Rect,
+        shader: &ImageShader,
+        paint: Paint,
+        transform: Transform,
+        scissor: Option<Rect>,
+        clip_texture: &Texture,
+        has_clip: bool,
+    ) -> Result<(), MetalError> {
+        let Some(scissor) = scissor_rect(scissor, surface.descriptor) else {
+            return Ok(());
+        };
+        let vertices = image_shader_rect_vertices(rect, transform)?;
+        self.encode_image_vertices(
+            command_buffer,
+            surface,
+            image,
+            &vertices,
+            paint,
+            shader.sampling(),
+            shader.x_tile_mode(),
+            shader.y_tile_mode(),
+            scissor,
+            clip_texture,
+            has_clip,
+            self.clip_renderer.unclipped_texture(),
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_image_shader_surface(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        surface: &MetalSurface,
+        image: &Texture,
+        shader: &ImageShader,
+        paint: Paint,
+        transform: Transform,
+        scissor: Option<Rect>,
+        clip_texture: &Texture,
+        has_clip: bool,
+        shape_texture: &Texture,
+        has_shape: bool,
+    ) -> Result<(), MetalError> {
+        let Some(scissor) = scissor_rect(scissor, surface.descriptor) else {
+            return Ok(());
+        };
+        let vertices = image_shader_surface_vertices(surface.descriptor, transform)?;
+        self.encode_image_vertices(
+            command_buffer,
+            surface,
+            image,
+            &vertices,
+            paint,
+            shader.sampling(),
+            shader.x_tile_mode(),
+            shader.y_tile_mode(),
+            scissor,
+            clip_texture,
+            has_clip,
+            shape_texture,
+            has_shape,
         )
     }
 
@@ -1364,9 +1493,13 @@ impl MetalBackend {
         vertices: &[ImageVertex],
         paint: Paint,
         sampling: SamplingOptions,
+        x_tile_mode: TileMode,
+        y_tile_mode: TileMode,
         scissor: MTLScissorRect,
         clip_texture: &Texture,
         has_clip: bool,
+        shape_texture: &Texture,
+        has_shape: bool,
     ) -> Result<(), MetalError> {
         let bytes = vertices
             .len()
@@ -1398,21 +1531,40 @@ impl MetalBackend {
             size_of_val(&has_clip) as u64,
             (&has_clip as *const u32).cast(),
         );
-        let sampling_filter = match sampling.filter() {
-            SamplingFilter::Nearest => 0_u32,
-            SamplingFilter::Linear => 1_u32,
-        };
+        let sampler = self.image_sampler(sampling, x_tile_mode, y_tile_mode);
+        encoder.set_fragment_sampler_state(0, Some(&sampler));
+        let has_shape = u32::from(has_shape);
         encoder.set_fragment_bytes(
             2,
-            size_of_val(&sampling_filter) as u64,
-            (&sampling_filter as *const u32).cast(),
+            size_of_val(&has_shape) as u64,
+            (&has_shape as *const u32).cast(),
         );
         encoder.set_fragment_texture(0, Some(image));
         encoder.set_fragment_texture(1, Some(clip_texture));
-        encoder.set_fragment_texture(2, Some(&target_snapshot));
+        encoder.set_fragment_texture(2, Some(shape_texture));
+        encoder.set_fragment_texture(3, Some(&target_snapshot));
         encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, vertices.len() as u64);
         encoder.end_encoding();
         Ok(())
+    }
+
+    fn image_sampler(
+        &self,
+        sampling: SamplingOptions,
+        x_tile_mode: TileMode,
+        y_tile_mode: TileMode,
+    ) -> metal::SamplerState {
+        let descriptor = SamplerDescriptor::new();
+        let filter = match sampling.filter() {
+            SamplingFilter::Nearest => MTLSamplerMinMagFilter::Nearest,
+            SamplingFilter::Linear => MTLSamplerMinMagFilter::Linear,
+        };
+        descriptor.set_min_filter(filter);
+        descriptor.set_mag_filter(filter);
+        descriptor.set_mip_filter(MTLSamplerMipFilter::NotMipmapped);
+        descriptor.set_address_mode_s(metal_sampler_address_mode(x_tile_mode));
+        descriptor.set_address_mode_t(metal_sampler_address_mode(y_tile_mode));
+        self.device.new_sampler(&descriptor)
     }
 }
 
@@ -1558,6 +1710,20 @@ const _: [u8; 32] = [0; size_of::<GlyphVertex>()];
 struct ImageVertex {
     position: [f32; 2],
     image_position: [f32; 2],
+}
+
+fn direct_image_shader(paint: &Paint) -> Option<&ImageShader> {
+    paint
+        .shader_handle()
+        .and_then(|shader| shader.as_shader().image_shader())
+}
+
+fn metal_sampler_address_mode(mode: TileMode) -> MTLSamplerAddressMode {
+    match mode {
+        TileMode::Clamp => MTLSamplerAddressMode::ClampToEdge,
+        TileMode::Repeat => MTLSamplerAddressMode::Repeat,
+        TileMode::Mirror => MTLSamplerAddressMode::MirrorRepeat,
+    }
 }
 
 fn solid_rect_vertices(rect: Rect, transform: Transform) -> Result<[SolidVertex; 6], MetalError> {
@@ -1816,6 +1982,62 @@ fn image_vertices(
     Ok([0, 1, 2, 1, 3, 2].map(|index| ImageVertex {
         position: position[index],
         image_position: image_position[index],
+    }))
+}
+
+fn image_shader_rect_vertices(
+    rect: Rect,
+    transform: Transform,
+) -> Result<[ImageVertex; 6], MetalError> {
+    let logical = [
+        Point::new(rect.left(), rect.top()),
+        Point::new(rect.right(), rect.top()),
+        Point::new(rect.left(), rect.bottom()),
+        Point::new(rect.right(), rect.bottom()),
+    ];
+    let mut position = [[0.0; 2]; 4];
+    for (index, point) in logical.into_iter().enumerate() {
+        let mapped = transform
+            .map_point(point)
+            .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        position[index] = [scalar_to_f32(mapped.x()), scalar_to_f32(mapped.y())];
+    }
+    Ok([0, 1, 2, 1, 3, 2].map(|index| ImageVertex {
+        position: position[index],
+        image_position: [
+            scalar_to_f32(logical[index].x()),
+            scalar_to_f32(logical[index].y()),
+        ],
+    }))
+}
+
+fn image_shader_surface_vertices(
+    surface: GpuSurfaceDescriptor,
+    transform: Transform,
+) -> Result<[ImageVertex; 6], MetalError> {
+    let width = surface.width() as f32;
+    let height = surface.height() as f32;
+    let position = [[0.0, 0.0], [width, 0.0], [0.0, height], [width, height]];
+    let inverse = transform
+        .inverse()
+        .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+    let bounds = surface_rect(surface)?;
+    let device = [
+        Point::new(bounds.left(), bounds.top()),
+        Point::new(bounds.right(), bounds.top()),
+        Point::new(bounds.left(), bounds.bottom()),
+        Point::new(bounds.right(), bounds.bottom()),
+    ];
+    let mut local = [[0.0; 2]; 4];
+    for (index, point) in device.into_iter().enumerate() {
+        let point = inverse
+            .map_point(point)
+            .map_err(|_| MetalError::new(MetalErrorCode::SubmissionFailed))?;
+        local[index] = [scalar_to_f32(point.x()), scalar_to_f32(point.y())];
+    }
+    Ok([0, 1, 2, 1, 3, 2].map(|index| ImageVertex {
+        position: position[index],
+        image_position: local[index],
     }))
 }
 

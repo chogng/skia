@@ -9,13 +9,13 @@ publish = false
 ash = { workspace = true, features = ["loaded", "std"] }
 skia-core = { workspace = true }
 skia-gpu = { workspace = true }
+skia-image = { workspace = true }
 skia-tessellation = { workspace = true }
 naga = { workspace = true, features = ["spv-out", "wgsl-in"] }
 
 [dev-dependencies]
 skia-cpu = { workspace = true }
 skia-gpu = { workspace = true, features = ["software"] }
-skia-image = { workspace = true }
 
 [build-dependencies]
 naga = { workspace = true, features = ["spv-out", "wgsl-in"] }

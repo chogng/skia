@@ -387,15 +387,12 @@ vertex ImageVarying skia_image_vertex(const device ImageVertex* vertices [[buffe
     output.image_position = input.image_position;
     return output;
 }
-fragment float4 skia_image_fragment(ImageVarying input [[stage_in]], texture2d<float> image [[texture(0)]], texture2d<float, access::read> clip_mask [[texture(1)]], texture2d<float, access::read> destination [[texture(2)]], constant PaintUniforms& paint [[buffer(0)]], constant uint& has_clip [[buffer(1)]], constant uint& sampling_filter [[buffer(2)]]) {
+fragment float4 skia_image_fragment(ImageVarying input [[stage_in]], texture2d<float> image [[texture(0)]], texture2d<float, access::read> clip_mask [[texture(1)]], texture2d<float, access::read> shape_mask [[texture(2)]], texture2d<float, access::read> destination [[texture(3)]], sampler image_sampler [[sampler(0)]], constant PaintUniforms& paint [[buffer(0)]], constant uint& has_clip [[buffer(1)]], constant uint& has_shape [[buffer(2)]]) {
     if (has_clip != 0 && clip_mask.read(uint2(input.position.xy)).r < 0.5) discard_fragment();
-    constexpr sampler nearest_sampler(coord::normalized, address::clamp_to_edge, filter::nearest);
-    constexpr sampler linear_sampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    if (has_shape != 0 && shape_mask.read(uint2(input.position.xy)).r < 0.5) discard_fragment();
     float2 image_size = float2(image.get_width(), image.get_height());
     float2 coordinate = input.image_position / image_size;
-    float4 sample = sampling_filter == 0
-        ? image.sample(nearest_sampler, coordinate)
-        : image.sample(linear_sampler, coordinate);
+    float4 sample = image.sample(image_sampler, coordinate);
     sample.a *= paint.color.a;
     sample = apply_filter(sample, paint);
     return composite(sample, destination.read(uint2(input.position.xy)), paint.extra.x);

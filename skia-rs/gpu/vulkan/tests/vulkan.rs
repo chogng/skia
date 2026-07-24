@@ -192,6 +192,69 @@ fn vulkan_backend_matches_runtime_shader_arithmetic() {
 }
 
 #[test]
+fn vulkan_backend_matches_direct_image_shader_sampling() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).expect("image");
+    let shader = ShaderHandle::from_image(
+        image,
+        SamplingOptions::NEAREST,
+        TileMode::Repeat,
+        TileMode::Clamp,
+    )
+    .expect("image shader");
+    let mut encoder = GpuCommandEncoder::new(2).expect("encoder");
+    encoder.clear(Color::BLACK).expect("clear");
+    encoder
+        .fill_rect(
+            rect(0, 0, 4, 1),
+            Paint::new(Color::WHITE).with_shader(shader),
+        )
+        .expect("image shader fill");
+    assert_matches_reference(
+        &mut backend,
+        GpuSurfaceDescriptor::new(4, 1).expect("descriptor"),
+        &encoder.finish(),
+    );
+}
+
+#[test]
+fn vulkan_backend_mirrors_direct_image_shader_sampling() {
+    let Some(mut backend) = backend_or_skip() else {
+        return;
+    };
+    let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).expect("image");
+    let shader = ShaderHandle::from_image(
+        image,
+        SamplingOptions::NEAREST,
+        TileMode::Mirror,
+        TileMode::Clamp,
+    )
+    .expect("image shader");
+    let mut commands = GpuCommandEncoder::new(2).expect("encoder");
+    commands
+        .fill_rect(
+            rect(0, 0, 4, 1),
+            Paint::new(Color::WHITE).with_shader(shader),
+        )
+        .expect("image shader fill");
+    let mut surface = backend
+        .create_surface(GpuSurfaceDescriptor::new(4, 1).expect("descriptor"))
+        .expect("surface");
+    backend
+        .submit(&mut surface, &commands.finish())
+        .expect("submit");
+    let pixels = surface.read_rgba8().expect("readback");
+    assert_eq!(
+        pixels,
+        vec![
+            255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255, 255, 0, 0, 255
+        ]
+    );
+}
+
+#[test]
 fn vulkan_backend_executes_portable_draw_commands() {
     let Some(mut backend) = backend_or_skip() else {
         return;

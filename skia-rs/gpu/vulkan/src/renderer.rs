@@ -6,7 +6,7 @@ use skia_gpu::{RuntimeShaderPacket, RuntimeShaderProgramPacket};
 use crate::{
     VulkanError, VulkanErrorCode,
     context::VulkanContext,
-    surface::{HostBuffer, PixelBuffer},
+    surface::{HostBuffer, PixelBuffer, SampledImage},
 };
 
 pub(crate) struct VulkanRenderer {
@@ -20,6 +20,7 @@ pub(crate) struct VulkanRenderer {
     specialized_pipeline_misses: u64,
     specialized_pipeline_evictions: u64,
     dummy: PixelBuffer,
+    dummy_image: SampledImage,
 }
 
 struct CachedRuntimeShaderPipeline {
@@ -38,7 +39,8 @@ impl VulkanRenderer {
             .map_err(|_| VulkanError::new(VulkanErrorCode::SurfaceAllocationFailed))?;
         let dummy = PixelBuffer::new(context.clone(), dummy_descriptor)?;
         dummy.clear(skia_core::Color::TRANSPARENT)?;
-        let bindings = (0..5)
+        let dummy_image = SampledImage::transparent(context.clone())?;
+        let mut bindings = (0..5)
             .map(|binding| {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(binding)
@@ -47,6 +49,20 @@ impl VulkanRenderer {
                     .stage_flags(vk::ShaderStageFlags::COMPUTE)
             })
             .collect::<Vec<_>>();
+        bindings.push(
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        );
+        bindings.push(
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(6)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        );
         let descriptor_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: descriptor bindings are complete and retained through the call.
         let descriptor_set_layout = unsafe {
@@ -137,6 +153,7 @@ impl VulkanRenderer {
             specialized_pipeline_misses: 0,
             specialized_pipeline_evictions: 0,
             dummy,
+            dummy_image,
         })
     }
 
@@ -205,6 +222,7 @@ impl VulkanRenderer {
         self.specialized_pipeline_evictions = self.specialized_pipeline_evictions.saturating_add(1);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch(
         &mut self,
         output: &PixelBuffer,
@@ -213,15 +231,24 @@ impl VulkanRenderer {
         payload_words: &[u32],
         parameter_words: &[u32],
         runtime_shader: Option<&RuntimeShaderPacket>,
+        shader_image: Option<&SampledImage>,
     ) -> Result<(), VulkanError> {
         let pipeline = self.pipeline_for(runtime_shader)?;
         let payload = HostBuffer::from_words(self.context.clone(), payload_words)?;
         let parameters = HostBuffer::from_words(self.context.clone(), parameter_words)?;
         let source = source.unwrap_or(&self.dummy);
         let clip = clip.unwrap_or(&self.dummy);
-        let pool_sizes = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(5)];
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(5),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1),
+        ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
             .pool_sizes(&pool_sizes);
@@ -252,7 +279,7 @@ impl VulkanRenderer {
             [buffer_info(parameters.handle(), parameters.byte_len())],
             [buffer_info(clip.handle(), clip.byte_len())],
         ];
-        let writes = infos
+        let mut writes = infos
             .iter()
             .enumerate()
             .map(|(binding, info)| {
@@ -263,6 +290,25 @@ impl VulkanRenderer {
                     .buffer_info(info)
             })
             .collect::<Vec<_>>();
+        let sampled = shader_image.unwrap_or(&self.dummy_image);
+        let image_info = [vk::DescriptorImageInfo::default()
+            .image_view(sampled.view())
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let sampler_info = [vk::DescriptorImageInfo::default().sampler(sampled.sampler())];
+        writes.push(
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&image_info),
+        );
+        writes.push(
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(6)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&sampler_info),
+        );
         // SAFETY: descriptors point at buffers alive through submission.
         unsafe { self.context.device().update_descriptor_sets(&writes, &[]) };
         let width = output.descriptor().width().div_ceil(8);

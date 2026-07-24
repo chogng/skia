@@ -130,8 +130,9 @@ impl GpuCommand {
 
     /// Returns whether this command carries a shader graph not yet lowered by native backends.
     ///
-    /// Software replay evaluates these nodes directly. Image draws ignore the
-    /// paint source shader and therefore never require this lowering.
+    /// Native backends lower a direct [`Shader::Image`] paint for geometric
+    /// draws. Composition nodes, and image-shader glyph paints, still require
+    /// graph lowering. Image draws ignore the paint source shader entirely.
     pub fn requires_shader_graph_lowering(&self) -> bool {
         let paint = match self {
             Self::FillRect { paint, .. }
@@ -144,15 +145,13 @@ impl GpuCommand {
             | Self::DrawImage { .. } => None,
         };
         paint.is_some_and(|paint| {
-            paint.shader_handle().is_some_and(|shader| {
-                matches!(
-                    shader.as_shader(),
-                    Shader::SolidColor(_)
-                        | Shader::Image(_)
-                        | Shader::LocalMatrix(_)
-                        | Shader::Blend(_)
-                )
-            })
+            paint
+                .shader_handle()
+                .is_some_and(|shader| match shader.as_shader() {
+                    Shader::Image(_) => matches!(self, Self::DrawGlyphs { .. }),
+                    Shader::SolidColor(_) | Shader::LocalMatrix(_) | Shader::Blend(_) => true,
+                    Shader::Gradient(_) | Shader::Runtime(_) => false,
+                })
         })
     }
 }

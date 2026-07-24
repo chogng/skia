@@ -656,7 +656,7 @@ fn software_replay_evaluates_composed_shader_graphs_and_marks_native_lowering() 
 }
 
 #[test]
-fn software_replay_evaluates_image_shaders_and_marks_native_lowering() {
+fn software_replay_evaluates_image_shaders_without_native_graph_lowering() {
     let image = Image::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
     let shader = ShaderHandle::from_image(
         image,
@@ -673,7 +673,7 @@ fn software_replay_evaluates_image_shaders_and_marks_native_lowering() {
         )
         .unwrap();
     let commands = encoder.finish();
-    assert!(commands.commands()[0].requires_shader_graph_lowering());
+    assert!(!commands.commands()[0].requires_shader_graph_lowering());
 
     let mut backend = SoftwareGpuBackend::default();
     let mut surface = backend
