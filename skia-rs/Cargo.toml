@@ -17,6 +17,7 @@ members = [
     "tessellation",
     "text",
     "text/system",
+    "xml",
     "xps",
 ]
 resolver = "3"
@@ -46,6 +47,7 @@ skia-tessellation = { path = "tessellation" }
 skia-text = { path = "text" }
 skia-vulkan = { path = "gpu/vulkan" }
 skia-xps = { path = "xps" }
+skia-xml = { path = "xml" }
 
 # External
 ash = { version = "0.38.0", default-features = false }

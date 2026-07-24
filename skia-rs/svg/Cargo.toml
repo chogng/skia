@@ -9,6 +9,7 @@ publish = false
 skia-codec = { workspace = true }
 skia-core = { workspace = true, features = ["text"] }
 skia-image = { workspace = true }
+skia-xml = { workspace = true }
 
 [lib]
 path = "src/lib.rs"

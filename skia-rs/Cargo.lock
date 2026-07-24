@@ -825,6 +825,7 @@ dependencies = [
  "skia-codec",
  "skia-core",
  "skia-image",
+ "skia-xml",
 ]
 
 [[package]]
@@ -868,6 +869,10 @@ dependencies = [
  "skia-image",
  "skia-tessellation",
 ]
+
+[[package]]
+name = "skia-xml"
+version = "0.1.0"
 
 [[package]]
 name = "skia-xps"

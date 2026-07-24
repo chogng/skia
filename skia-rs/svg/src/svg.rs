@@ -9,7 +9,7 @@ use skia_codec::{
 };
 use skia_core::{
     BlendMode, ClipOp, Color, DisplayList, DrawCommand, FillRule, Gradient, GradientGeometry,
-    ImageId, Paint, Path, PathVerb, Rect, SamplingFilter, Scalar, StrokeAlign, StrokeCap,
+    ImageId, Paint, Path, PathVerb, Rect, SamplingFilter, Scalar, Shader, StrokeAlign, StrokeCap,
     StrokeJoin, StrokeOptions, TileMode, Transform,
 };
 use skia_image::{ColorSpace, Image};
@@ -93,6 +93,68 @@ pub struct SvgCanvasSpec {
     width: Scalar,
     height: Scalar,
     view_box: Rect,
+    preserve_aspect_ratio: SvgPreserveAspectRatio,
+}
+
+/// Alignment of a logical SVG view box inside its viewport.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SvgViewBoxAlignment {
+    /// Scale the two axes independently to fill the viewport.
+    None,
+    /// Align minimum X and minimum Y.
+    XMinYMin,
+    /// Align midpoint X and minimum Y.
+    XMidYMin,
+    /// Align maximum X and minimum Y.
+    XMaxYMin,
+    /// Align minimum X and midpoint Y.
+    XMinYMid,
+    /// Align both axis midpoints.
+    XMidYMid,
+    /// Align maximum X and midpoint Y.
+    XMaxYMid,
+    /// Align minimum X and maximum Y.
+    XMinYMax,
+    /// Align midpoint X and maximum Y.
+    XMidYMax,
+    /// Align both axis maxima.
+    XMaxYMax,
+}
+
+/// Uniform view-box scaling policy when alignment is not `none`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SvgViewBoxScale {
+    /// Fit the entire view box inside the viewport.
+    Meet,
+    /// Fill the viewport and allow the view box to be cropped.
+    Slice,
+}
+
+/// SVG `preserveAspectRatio` policy retained with a canvas specification.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SvgPreserveAspectRatio {
+    alignment: SvgViewBoxAlignment,
+    scale: SvgViewBoxScale,
+}
+
+impl SvgPreserveAspectRatio {
+    /// SVG's default midpoint-aligned meet policy.
+    pub const DEFAULT: Self = Self::new(SvgViewBoxAlignment::XMidYMid, SvgViewBoxScale::Meet);
+
+    /// Creates one alignment and uniform-scaling policy.
+    pub const fn new(alignment: SvgViewBoxAlignment, scale: SvgViewBoxScale) -> Self {
+        Self { alignment, scale }
+    }
+
+    /// Returns the viewport alignment.
+    pub const fn alignment(self) -> SvgViewBoxAlignment {
+        self.alignment
+    }
+
+    /// Returns the meet-or-slice policy.
+    pub const fn scale(self) -> SvgViewBoxScale {
+        self.scale
+    }
 }
 
 impl SvgCanvasSpec {
@@ -107,12 +169,22 @@ impl SvgCanvasSpec {
             width,
             height,
             view_box,
+            preserve_aspect_ratio: SvgPreserveAspectRatio::DEFAULT,
         })
     }
 
     /// Replaces the logical view box without changing the rendered dimensions.
     pub const fn with_view_box(mut self, view_box: Rect) -> Self {
         self.view_box = view_box;
+        self
+    }
+
+    /// Replaces the view-box alignment and scaling policy.
+    pub const fn with_preserve_aspect_ratio(
+        mut self,
+        preserve_aspect_ratio: SvgPreserveAspectRatio,
+    ) -> Self {
+        self.preserve_aspect_ratio = preserve_aspect_ratio;
         self
     }
 
@@ -129,6 +201,11 @@ impl SvgCanvasSpec {
     /// Returns the logical view box.
     pub const fn view_box(self) -> Rect {
         self.view_box
+    }
+
+    /// Returns the view-box alignment and scaling policy.
+    pub const fn preserve_aspect_ratio(self) -> SvgPreserveAspectRatio {
+        self.preserve_aspect_ratio
     }
 }
 
@@ -224,7 +301,7 @@ struct Compiler<'a> {
     stack: Vec<StateFrame>,
     clip_depth: usize,
     resource_count: usize,
-    gradient_ids: HashMap<(Gradient, u8), usize>,
+    gradient_ids: HashMap<(Gradient, Option<Transform>, u8), usize>,
     image_ids: HashMap<ImageId, usize>,
     next_gradient_id: usize,
     next_clip_id: usize,
@@ -235,6 +312,21 @@ struct Compiler<'a> {
 struct StateFrame {
     transform: Transform,
     clip_depth: usize,
+}
+
+fn gradient_shader(shader: &Shader) -> Option<(Gradient, Option<Transform>)> {
+    match shader {
+        Shader::Gradient(gradient) => Some((*gradient, None)),
+        Shader::LocalMatrix(local) => {
+            let (gradient, child_matrix) = gradient_shader(local.shader().as_shader())?;
+            let matrix = match child_matrix {
+                Some(child) => child.concat(local.local_matrix()).ok()?,
+                None => local.local_matrix(),
+            };
+            Some((gradient, Some(matrix)))
+        }
+        Shader::SolidColor(_) | Shader::Runtime(_) | Shader::Image(_) | Shader::Blend(_) => None,
+    }
 }
 
 impl<'a> Compiler<'a> {
@@ -579,10 +671,9 @@ impl<'a> Compiler<'a> {
         match paint.shader() {
             None => push_solid_paint(&mut output, property, paint.color()),
             Some(shader) => {
-                let gradient = shader
-                    .gradient()
-                    .ok_or(SvgError::new(SvgErrorCode::Unsupported))?;
-                let id = self.intern_gradient(gradient, paint.color().alpha())?;
+                let (gradient, local_matrix) =
+                    gradient_shader(&shader).ok_or(SvgError::new(SvgErrorCode::Unsupported))?;
+                let id = self.intern_gradient(gradient, local_matrix, paint.color().alpha())?;
                 output.push(' ');
                 output.push_str(property);
                 output.push_str("=\"url(#gradient");
@@ -593,8 +684,13 @@ impl<'a> Compiler<'a> {
         Ok(output)
     }
 
-    fn intern_gradient(&mut self, gradient: Gradient, opacity: u8) -> Result<usize, SvgError> {
-        let key = (gradient, opacity);
+    fn intern_gradient(
+        &mut self,
+        gradient: Gradient,
+        local_matrix: Option<Transform>,
+        opacity: u8,
+    ) -> Result<usize, SvgError> {
+        let key = (gradient, local_matrix, opacity);
         if let Some(id) = self.gradient_ids.get(&key) {
             return Ok(*id);
         }
@@ -632,6 +728,16 @@ impl<'a> Compiler<'a> {
             TileMode::Repeat => "repeat",
             TileMode::Mirror => "reflect",
         });
+        if let Some(transform) = local_matrix {
+            definition.push_str("\" gradientTransform=\"matrix(");
+            for (index, value) in transform.coefficients().iter().enumerate() {
+                if index != 0 {
+                    definition.push(' ');
+                }
+                definition.push_str(&svg_scalar(*value));
+            }
+            definition.push(')');
+        }
         definition.push_str("\">");
         for stop in gradient.stops() {
             let color = stop.color().with_opacity(opacity);
@@ -759,9 +865,9 @@ impl OutputParts {
 
     fn finish(self, spec: SvgCanvasSpec) -> Result<Vec<u8>, SvgError> {
         let view_box = spec.view_box;
-        let header = format!(
+        let mut header = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-             <svg xmlns=\"{SVG_NAMESPACE}\" width=\"{}\" height=\"{}\" viewBox=\"{} {} {} {}\">",
+             <svg xmlns=\"{SVG_NAMESPACE}\" width=\"{}\" height=\"{}\" viewBox=\"{} {} {} {}\"",
             svg_scalar(spec.width),
             svg_scalar(spec.height),
             svg_scalar(view_box.left()),
@@ -769,6 +875,12 @@ impl OutputParts {
             svg_rect_width(view_box),
             svg_rect_height(view_box)
         );
+        if spec.preserve_aspect_ratio != SvgPreserveAspectRatio::DEFAULT {
+            header.push_str(" preserveAspectRatio=\"");
+            push_preserve_aspect_ratio(&mut header, spec.preserve_aspect_ratio);
+            header.push('"');
+        }
+        header.push('>');
         let defs_overhead = if self.defs.is_empty() {
             0
         } else {
@@ -1023,6 +1135,30 @@ fn base64_encode(bytes: &[u8]) -> Result<String, SvgError> {
     }
     debug_assert_eq!(output.len(), output_length);
     Ok(output)
+}
+
+fn push_preserve_aspect_ratio(output: &mut String, value: SvgPreserveAspectRatio) {
+    let alignment = match value.alignment {
+        SvgViewBoxAlignment::None => {
+            output.push_str("none");
+            return;
+        }
+        SvgViewBoxAlignment::XMinYMin => "xMinYMin",
+        SvgViewBoxAlignment::XMidYMin => "xMidYMin",
+        SvgViewBoxAlignment::XMaxYMin => "xMaxYMin",
+        SvgViewBoxAlignment::XMinYMid => "xMinYMid",
+        SvgViewBoxAlignment::XMidYMid => "xMidYMid",
+        SvgViewBoxAlignment::XMaxYMid => "xMaxYMid",
+        SvgViewBoxAlignment::XMinYMax => "xMinYMax",
+        SvgViewBoxAlignment::XMidYMax => "xMidYMax",
+        SvgViewBoxAlignment::XMaxYMax => "xMaxYMax",
+    };
+    output.push_str(alignment);
+    output.push(' ');
+    output.push_str(match value.scale {
+        SvgViewBoxScale::Meet => "meet",
+        SvgViewBoxScale::Slice => "slice",
+    });
 }
 
 fn map_skia_error(error: skia_core::SkiaError) -> SvgError {

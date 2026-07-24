@@ -25,11 +25,12 @@ flowchart LR
   api --> text["Font loading and shaping"]
   api --> image["Image resources"]
   api --> codec["Image codecs"]
+  api --> xml["Bounded XML parser"]
   api --> core["Skia core semantics"]
   api --> effects["Built-in effects"]
   api --> cpu["Skia CPU executor"]
   api --> gpu["Skia GPU executor"]
-  api --> svg["SVG canvas writer"]
+  api --> svg["SVG reader / canvas writer"]
   api --> pdf["PDF document writer"]
   api --> xps["XPS / OpenXPS writer"]
   gpu --> metal["Metal backend"]
@@ -66,7 +67,7 @@ at the application composition boundary; Bazel expresses the same boundary with
 - `skia-rs/Cargo.toml` is a virtual workspace manifest, not a package. There is
   no root facade crate: consumers depend directly on the public responsibility
   crates they use, such as `skia-core`, `skia-effects`, `skia-cpu`,
-  `skia-codec`, `skia-svg`, `skia-pdf`, `skia-xps`, or `skia-gpu`. Skia crates may depend
+  `skia-codec`, `skia-xml`, `skia-svg`, `skia-pdf`, `skia-xps`, or `skia-gpu`. Skia crates may depend
   on each other, but never on a caller-specific document crate or semantic type.
 - The application composition root may additionally depend on `skia-rs/gpu`,
   `skia-rs/gpu/text`, and one selected platform executor such as `skia-rs/gpu/metal` or
@@ -128,14 +129,23 @@ at the application composition boundary; Bazel expresses the same boundary with
   objects, operators, page state, or policy. Perform such translation in the
   caller's adapter.
 
-`skia-svg` is the single-canvas SVG output boundary. It depends on core drawing
-semantics, image storage, and PNG encoding; none of those lower crates depends
-on SVG. XML assembly remains private to the format crate. The current SVG and
-XPS writers do not yet share a general element/attribute API, and there is no
-input parser, entity policy, or namespace model that would justify a public
-`skia-xml` responsibility crate. Introduce that crate only when at least two
-format implementations share a concrete bounded XML contract or when an SVG
-input parser establishes a separately useful XML boundary.
+`skia-xml` owns bounded, dependency-free XML document parsing for untrusted
+UTF-8 inputs. It retains elements, qualified names, attributes, text, and CDATA
+in declaration order; applies explicit input, depth, node, attribute, name, and
+decoded-text ceilings; and rejects DTDs, arbitrary entities, and external entity
+loading. It validates an optional UTF-8 XML 1.0 declaration, resolves default
+and prefixed namespaces (including expanded duplicate attributes), and exposes
+qualified, prefix, local-name, namespace-URI, exact-attribute, and
+namespace-aware attribute access. It intentionally does not apply CSS,
+resource resolution, or any SVG semantics. SVG input parsing depends one-way
+on this crate.
+
+`skia-svg` is the single-canvas SVG format boundary. It depends on `skia-xml`,
+core drawing semantics, image storage, and PNG encoding; none of those lower
+crates depends on SVG. Its reader uses `skia-xml` for bounded syntax/tree
+construction before applying SVG-specific inheritance and transactional
+display-list lowering. The writer keeps output XML assembly private because it
+emits only format-owned names and values.
 
 ## Image pixels and color management
 
@@ -178,7 +188,27 @@ images are converted before sampling, so samples from different declared
 spaces enter that same compositing path instead of being mixed as if they
 shared an encoding.
 
-## SVG output
+## SVG input and output
+
+`skia-svg::SvgReader` parses bounded UTF-8 XML and returns an `SvgDocument`
+containing `SvgCanvasSpec` plus a portable `DisplayList`. The implemented input
+profile covers the root viewport/view box, groups, `rect`, `circle`, `ellipse`,
+`line`, `polyline`, `polygon`, all path command families including elliptical
+arcs, inherited solid fill/stroke properties, fill rules,
+cap/join/miter/dash geometry, visibility, element/group opacity, and all
+affine transform functions. It resolves bounded local `defs`/`use` chains,
+linear and radial gradients (including inherited definitions,
+object-bounding-box transforms, spread modes, and stop opacity),
+user-space clip paths, embedded PNG/JPEG/WebP data-URI images, and nested SVG
+viewports. Root and nested `preserveAspectRatio` policies are retained or
+lowered explicitly. Missing root dimensions use the SVG defaults of 300 by
+150. Zero-sized basic shapes produce no drawing command.
+
+Input parsing has independent XML, display-list, and per-path ceilings and
+adds reference-depth and embedded-image ceilings. It publishes stable error
+categories. DTDs, external entities, invalid namespace bindings, incompatible
+XML declarations, duplicate resource IDs, and cyclic references fail before a
+document is published.
 
 `skia-svg::SvgWriter` serializes one complete `DisplayList` and
 `SvgCanvasSpec` to deterministic UTF-8 SVG. `encode` returns owned bytes;
@@ -208,9 +238,13 @@ The initial native mapping is:
 | Difference clip, non-center stroke, path effect, runtime shader, color/image filter, non-source-over blend, rational conic | Explicit `Unsupported` |
 | Glyph-run command | `UnsupportedText`; source text and font rights are never guessed from glyph IDs |
 
-SVG input parsing, external resources, CSS, animation, masks, patterns, filters,
-text embedding/outlines, and whole-canvas CPU fallback are separate future
-increments rather than silent behavior in this writer.
+The reader and writer intentionally have separate limits and error types.
+`skia-xml` provides syntax only and does not by itself accept or render SVG.
+Network/file resources, selector-based CSS stylesheets, animation, masks,
+patterns, filters, markers, symbols, arbitrary focal radial gradients,
+object-bounding-box clip paths, and text shaping/font resolution are outside
+the current safe portable profile and fail explicitly. They are not silently
+approximated. Whole-canvas CPU fallback remains a separate increment.
 
 ## PDF output
 
