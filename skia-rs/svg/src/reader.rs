@@ -4,9 +4,9 @@ use skia_codec::{CodecErrorCode, CodecLimits, ImageCodec};
 use skia_core::{
     Angle, BlendMode, ClipOp, Color, ColorFilter, ColorMatrix, DisplayList, DisplayListBuilder,
     FillRule, FontCollection, FontSlant, FontStyle, FontWidth, Gradient, GradientStop, ImageFilter,
-    Paint, Path, PathBuilder, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar, ShaderHandle,
-    StrokeCap, StrokeJoin, StrokeOptions, TextDirection, TextError, TextErrorCode, TextStyleSpan,
-    TileMode, Transform,
+    Paint, Path, PathBuilder, PathVerb, Point, Rect, SamplingOptions, SaveLayerOptions, Scalar,
+    ShaderHandle, StrokeCap, StrokeJoin, StrokeOptions, TextDirection, TextError, TextErrorCode,
+    TextStyleSpan, TileMode, Transform,
 };
 use skia_xml::{XmlDocument, XmlElement, XmlError, XmlErrorCode, XmlLimits, XmlNode};
 
@@ -203,6 +203,20 @@ struct TextCursor {
     pending_space: bool,
 }
 
+#[derive(Clone, Copy)]
+enum MarkerPosition {
+    Start,
+    Middle,
+    End,
+}
+
+#[derive(Clone, Copy)]
+struct MarkerVertex {
+    point: Point,
+    angle_degrees: f64,
+    position: MarkerPosition,
+}
+
 #[derive(Clone)]
 struct Style {
     fill: Option<PaintSource>,
@@ -222,6 +236,9 @@ struct Style {
     font_style: FontStyle,
     text_anchor: TextAnchor,
     text_direction: Option<TextDirection>,
+    marker_start: Option<String>,
+    marker_mid: Option<String>,
+    marker_end: Option<String>,
 }
 
 impl Default for Style {
@@ -244,6 +261,9 @@ impl Default for Style {
             font_style: FontStyle::NORMAL,
             text_anchor: TextAnchor::Start,
             text_direction: None,
+            marker_start: None,
+            marker_mid: None,
+            marker_end: None,
         }
     }
 }
@@ -469,6 +489,7 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
                 | "pattern"
                 | "filter"
                 | "feColorMatrix"
+                | "marker"
                 | "clipPath"
                 | "mask"
                 | "symbol"
@@ -597,6 +618,14 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         if !style.visible {
             return Ok(());
         }
+        let marker_vertices = if style.marker_start.is_some()
+            || style.marker_mid.is_some()
+            || style.marker_end.is_some()
+        {
+            path_marker_vertices(&path)?
+        } else {
+            Vec::new()
+        };
         let fill_pattern = style
             .fill
             .as_ref()
@@ -660,6 +689,16 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
             self.builder
                 .stroke_path_with_options(id, options, paint)
                 .map_err(map_core_error)?;
+        }
+        for vertex in marker_vertices {
+            let reference = match vertex.position {
+                MarkerPosition::Start => style.marker_start.as_deref(),
+                MarkerPosition::Middle => style.marker_mid.as_deref(),
+                MarkerPosition::End => style.marker_end.as_deref(),
+            };
+            if let Some(reference) = reference {
+                self.lower_marker(reference, vertex, style)?;
+            }
         }
         Ok(())
     }
@@ -850,6 +889,152 @@ impl<'a, 'fonts> Compiler<'a, 'fonts> {
         self.builder.restore().map_err(map_core_error)?;
         self.reference_stack.pop();
         result
+    }
+
+    fn lower_marker(
+        &mut self,
+        reference: &str,
+        vertex: MarkerVertex,
+        inherited: &Style,
+    ) -> Result<(), SvgReadError> {
+        if self.reference_stack.len() >= self.limits.max_reference_depth
+            || self
+                .reference_stack
+                .iter()
+                .any(|active| active == reference)
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::ResourceLimit));
+        }
+        let marker = *self
+            .resources
+            .get(reference)
+            .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidValue))?;
+        if marker
+            .namespace_uri()
+            .is_some_and(|uri| uri != SVG_NAMESPACE)
+            || marker.local_name() != "marker"
+        {
+            return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+        }
+        let width = marker
+            .attribute_ns(None, "markerWidth")
+            .map(parse_positive_length)
+            .transpose()?
+            .unwrap_or(Scalar::from_bits(3 << 16));
+        let height = marker
+            .attribute_ns(None, "markerHeight")
+            .map(parse_positive_length)
+            .transpose()?
+            .unwrap_or(Scalar::from_bits(3 << 16));
+        let viewport =
+            Rect::new(Scalar::ZERO, Scalar::ZERO, width, height).map_err(map_core_error)?;
+        let view_box = marker
+            .attribute_ns(None, "viewBox")
+            .map(parse_view_box)
+            .transpose()?;
+        let content_mapping = view_box
+            .map(|view_box| {
+                viewport_mapping(
+                    viewport,
+                    view_box,
+                    marker
+                        .attribute_ns(None, "preserveAspectRatio")
+                        .unwrap_or("xMidYMid meet"),
+                )
+            })
+            .transpose()?
+            .unwrap_or(Transform::IDENTITY);
+        let reference_point = Point::new(
+            marker
+                .attribute_ns(None, "refX")
+                .map(parse_length)
+                .transpose()?
+                .unwrap_or(Scalar::ZERO),
+            marker
+                .attribute_ns(None, "refY")
+                .map(parse_length)
+                .transpose()?
+                .unwrap_or(Scalar::ZERO),
+        );
+        let mapped_reference = content_mapping
+            .map_point(reference_point)
+            .map_err(map_core_error)?;
+        let unit_scale = match marker
+            .attribute_ns(None, "markerUnits")
+            .unwrap_or("strokeWidth")
+        {
+            "strokeWidth" => Transform::scale(inherited.stroke_width, inherited.stroke_width),
+            "userSpaceOnUse" => Transform::IDENTITY,
+            _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
+        };
+        let angle = match marker.attribute_ns(None, "orient").unwrap_or("0") {
+            "auto" => vertex.angle_degrees,
+            "auto-start-reverse" => {
+                vertex.angle_degrees
+                    + if matches!(vertex.position, MarkerPosition::Start) {
+                        180.0
+                    } else {
+                        0.0
+                    }
+            }
+            value => parse_angle_degrees(value)?,
+        };
+        let placement = Transform::translate(
+            subtract(Scalar::ZERO, mapped_reference.x())?,
+            subtract(Scalar::ZERO, mapped_reference.y())?,
+        );
+        let placement = placement.concat(unit_scale).map_err(map_core_error)?;
+        let rotation = rotation_transform(scalar_from_f64(angle)?, Scalar::ZERO, Scalar::ZERO)?;
+        let placement = placement.concat(rotation).map_err(map_core_error)?;
+        let placement = placement
+            .concat(Transform::translate(vertex.point.x(), vertex.point.y()))
+            .map_err(map_core_error)?;
+        let final_transform = content_mapping.concat(placement).map_err(map_core_error)?;
+        let cascade = self
+            .stylesheet
+            .cascade(marker, &self.ancestors)
+            .map_err(map_css_error)?;
+        if cascade.property("display") == Some("none") {
+            return Ok(());
+        }
+        let marker_style = parse_style(&Style::default(), &cascade)?;
+        let opacity = cascade
+            .property("opacity")
+            .map(parse_opacity)
+            .transpose()?
+            .unwrap_or(u8::MAX);
+
+        self.reference_stack.push(reference.to_owned());
+        if opacity == u8::MAX {
+            self.builder.save().map_err(map_core_error)?;
+        } else {
+            self.builder
+                .save_layer(SaveLayerOptions::new().with_opacity(opacity))
+                .map_err(map_core_error)?;
+        }
+        if !matches!(cascade.property("overflow"), Some("visible")) {
+            let mut clip_builder = self.path_builder()?;
+            clip_builder
+                .add_round_rect(viewport, Scalar::ZERO, Scalar::ZERO)
+                .map_err(map_core_error)?;
+            let clip = clip_builder
+                .finish()
+                .and_then(|path| path.transformed(placement))
+                .map_err(map_core_error)?;
+            let clip = self.builder.add_path(clip).map_err(map_core_error)?;
+            self.builder
+                .clip_path(clip, FillRule::NonZero, ClipOp::Intersect)
+                .map_err(map_core_error)?;
+        }
+        self.builder
+            .concat_transform(final_transform)
+            .map_err(map_core_error)?;
+        self.ancestors.push(marker);
+        let result = self.lower_children(marker, &marker_style);
+        self.ancestors.pop();
+        let restore = self.builder.restore().map_err(map_core_error);
+        self.reference_stack.pop();
+        result.and(restore)
     }
 
     fn draw_optional_path(
@@ -1981,6 +2166,163 @@ fn combine_paths(paths: &[Path], maximum: usize) -> Result<Path, SvgReadError> {
 }
 
 #[derive(Clone, Copy)]
+struct MarkerSegment {
+    start: Point,
+    end: Point,
+    start_tangent: (f64, f64),
+    end_tangent: (f64, f64),
+}
+
+fn path_marker_vertices(path: &Path) -> Result<Vec<MarkerVertex>, SvgReadError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve(path.verbs().len().saturating_mul(2))
+        .map_err(|_| SvgReadError::new(SvgReadErrorCode::AllocationFailed))?;
+    let mut segments = Vec::new();
+    segments
+        .try_reserve(path.verbs().len())
+        .map_err(|_| SvgReadError::new(SvgReadErrorCode::AllocationFailed))?;
+    let mut current = None;
+    let mut contour_start = None;
+    for verb in path.verbs() {
+        match *verb {
+            PathVerb::MoveTo(point) => {
+                append_marker_contour(&segments, &mut output);
+                segments.clear();
+                current = Some(point);
+                contour_start = Some(point);
+            }
+            PathVerb::LineTo(end) => {
+                let start =
+                    current.ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+                let tangent = point_delta(start, end);
+                segments.push(MarkerSegment {
+                    start,
+                    end,
+                    start_tangent: tangent,
+                    end_tangent: tangent,
+                });
+                current = Some(end);
+            }
+            PathVerb::QuadTo(control, end) | PathVerb::ConicTo(control, end, _) => {
+                let start =
+                    current.ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+                segments.push(MarkerSegment {
+                    start,
+                    end,
+                    start_tangent: first_nonzero_delta(&[start, control, end]),
+                    end_tangent: last_nonzero_delta(&[start, control, end]),
+                });
+                current = Some(end);
+            }
+            PathVerb::CubicTo(first, second, end) => {
+                let start =
+                    current.ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+                segments.push(MarkerSegment {
+                    start,
+                    end,
+                    start_tangent: first_nonzero_delta(&[start, first, second, end]),
+                    end_tangent: last_nonzero_delta(&[start, first, second, end]),
+                });
+                current = Some(end);
+            }
+            PathVerb::Close => {
+                let start =
+                    current.ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+                let end = contour_start
+                    .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::InvalidGeometry))?;
+                if start != end {
+                    let tangent = point_delta(start, end);
+                    segments.push(MarkerSegment {
+                        start,
+                        end,
+                        start_tangent: tangent,
+                        end_tangent: tangent,
+                    });
+                }
+                append_marker_contour(&segments, &mut output);
+                segments.clear();
+                current = Some(end);
+            }
+        }
+    }
+    append_marker_contour(&segments, &mut output);
+    Ok(output)
+}
+
+fn append_marker_contour(segments: &[MarkerSegment], output: &mut Vec<MarkerVertex>) {
+    let Some(first) = segments.first() else {
+        return;
+    };
+    output.push(MarkerVertex {
+        point: first.start,
+        angle_degrees: vector_angle(first.start_tangent),
+        position: MarkerPosition::Start,
+    });
+    for pair in segments.windows(2) {
+        output.push(MarkerVertex {
+            point: pair[0].end,
+            angle_degrees: bisected_angle(pair[0].end_tangent, pair[1].start_tangent),
+            position: MarkerPosition::Middle,
+        });
+    }
+    if let Some(last) = segments.last() {
+        output.push(MarkerVertex {
+            point: last.end,
+            angle_degrees: vector_angle(last.end_tangent),
+            position: MarkerPosition::End,
+        });
+    }
+}
+
+fn point_delta(start: Point, end: Point) -> (f64, f64) {
+    (
+        scalar_to_f64(end.x()) - scalar_to_f64(start.x()),
+        scalar_to_f64(end.y()) - scalar_to_f64(start.y()),
+    )
+}
+
+fn first_nonzero_delta(points: &[Point]) -> (f64, f64) {
+    points
+        .windows(2)
+        .map(|pair| point_delta(pair[0], pair[1]))
+        .find(|(x, y)| *x != 0.0 || *y != 0.0)
+        .unwrap_or((1.0, 0.0))
+}
+
+fn last_nonzero_delta(points: &[Point]) -> (f64, f64) {
+    points
+        .windows(2)
+        .rev()
+        .map(|pair| point_delta(pair[0], pair[1]))
+        .find(|(x, y)| *x != 0.0 || *y != 0.0)
+        .unwrap_or((1.0, 0.0))
+}
+
+fn vector_angle(vector: (f64, f64)) -> f64 {
+    vector.1.atan2(vector.0).to_degrees()
+}
+
+fn bisected_angle(incoming: (f64, f64), outgoing: (f64, f64)) -> f64 {
+    let normalize = |(x, y): (f64, f64)| {
+        let length = x.hypot(y);
+        if length == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (x / length, y / length)
+        }
+    };
+    let incoming = normalize(incoming);
+    let outgoing = normalize(outgoing);
+    let sum = (incoming.0 + outgoing.0, incoming.1 + outgoing.1);
+    if sum.0.abs() < f64::EPSILON && sum.1.abs() < f64::EPSILON {
+        vector_angle(outgoing)
+    } else {
+        vector_angle(sum)
+    }
+}
+
+#[derive(Clone, Copy)]
 enum Axis {
     Horizontal,
     Vertical,
@@ -2430,6 +2772,10 @@ fn parse_style(inherited: &Style, cascade: &CascadedStyle) -> Result<Style, SvgR
         "font-stretch",
         "text-anchor",
         "direction",
+        "marker",
+        "marker-start",
+        "marker-mid",
+        "marker-end",
     ] {
         if let Some(value) = cascade.property(name) {
             apply_style(&mut style, name, value)?;
@@ -2476,6 +2822,10 @@ fn apply_style(style: &mut Style, name: &str, value: &str) -> Result<(), SvgRead
                 | "font-stretch"
                 | "text-anchor"
                 | "direction"
+                | "marker"
+                | "marker-start"
+                | "marker-mid"
+                | "marker-end"
         )
     {
         return Ok(());
@@ -2600,6 +2950,15 @@ fn apply_style(style: &mut Style, name: &str, value: &str) -> Result<(), SvgRead
                 _ => return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue)),
             }
         }
+        "marker" => {
+            let reference = parse_local_resource_property(value)?;
+            style.marker_start.clone_from(&reference);
+            style.marker_mid.clone_from(&reference);
+            style.marker_end = reference;
+        }
+        "marker-start" => style.marker_start = parse_local_resource_property(value)?,
+        "marker-mid" => style.marker_mid = parse_local_resource_property(value)?,
+        "marker-end" => style.marker_end = parse_local_resource_property(value)?,
         "style"
         | "opacity"
         | "transform"
@@ -2643,8 +3002,7 @@ fn apply_style(style: &mut Style, name: &str, value: &str) -> Result<(), SvgRead
         | "ry"
         | "points"
         | "d" => {}
-        "mask" | "filter" | "marker" | "marker-start" | "marker-mid" | "marker-end"
-        | "paint-order" | "vector-effect" => {
+        "mask" | "filter" | "paint-order" | "vector-effect" => {
             return Err(SvgReadError::new(SvgReadErrorCode::Unsupported));
         }
         name if name.starts_with("xmlns:")
@@ -2744,6 +3102,16 @@ fn local_url_reference(value: &str) -> Option<&str> {
         .strip_prefix("url(#")
         .and_then(|value| value.strip_suffix(')'))
         .filter(|id| !id.is_empty())
+}
+
+fn parse_local_resource_property(value: &str) -> Result<Option<String>, SvgReadError> {
+    let value = value.trim();
+    if value == "none" {
+        return Ok(None);
+    }
+    local_url_reference(value)
+        .map(|id| Some(id.to_owned()))
+        .ok_or_else(|| SvgReadError::new(SvgReadErrorCode::Unsupported))
 }
 
 fn parse_hex_color(value: &str) -> Result<Color, SvgReadError> {
@@ -2882,6 +3250,26 @@ fn parse_transform(value: &str) -> Result<Transform, SvgReadError> {
         source = source[close + 1..].trim_start_matches(|ch: char| ch.is_whitespace() || ch == ',');
     }
     Ok(result)
+}
+
+fn parse_angle_degrees(value: &str) -> Result<f64, SvgReadError> {
+    let value = value.trim();
+    let (number, factor) = if let Some(number) = value.strip_suffix("deg") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix("grad") {
+        (number, 0.9)
+    } else if let Some(number) = value.strip_suffix("rad") {
+        (number, 180.0 / std::f64::consts::PI)
+    } else if let Some(number) = value.strip_suffix("turn") {
+        (number, 360.0)
+    } else {
+        (value, 1.0)
+    };
+    let degrees = scalar_to_f64(parse_scalar(number)?) * factor;
+    if !degrees.is_finite() {
+        return Err(SvgReadError::new(SvgReadErrorCode::InvalidValue));
+    }
+    Ok(degrees)
 }
 
 fn rotation_transform(

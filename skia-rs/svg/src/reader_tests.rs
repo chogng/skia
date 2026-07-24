@@ -438,6 +438,42 @@ fn source_graphic_color_matrix_filters_lower_without_raster_fallback() {
 }
 
 #[test]
+fn markers_follow_start_mid_and_end_path_tangents() {
+    let document = decode(
+        r##"<svg width="60" height="30">
+          <defs>
+            <marker id="arrow" markerWidth="6" markerHeight="4" refX="3" refY="2"
+                    viewBox="0 0 6 4" orient="auto-start-reverse"
+                    markerUnits="userSpaceOnUse">
+              <path d="M0 0 L6 2 L0 4 Z" fill="#8844cc"/>
+            </marker>
+          </defs>
+          <polyline points="5,20 25,5 50,20" fill="none" stroke="black"
+                    marker-start="url(#arrow)" marker-mid="url(#arrow)"
+                    marker-end="url(#arrow)"/>
+        </svg>"##,
+    );
+    let commands = document.display_list().commands();
+    assert_eq!(
+        commands
+            .iter()
+            .filter(
+                |command| matches!(command, DrawCommand::FillPath { paint, .. }
+                if paint.color() == Color::rgb(0x88, 0x44, 0xcc))
+            )
+            .count(),
+        3
+    );
+    assert!(
+        commands
+            .iter()
+            .filter(|command| matches!(command, DrawCommand::ConcatTransform(_)))
+            .count()
+            >= 3
+    );
+}
+
+#[test]
 fn malformed_xml_and_unsupported_svg_are_distinct() {
     let malformed = SvgReader::decode(
         br#"<svg width="1" height="1"><path></svg>"#,
