@@ -1,6 +1,7 @@
 use skia_core::{
-    Color, DisplayListBuilder, DrawCommand, FillRule, FontCollection, FontCollectionLimits,
-    FontFace, FontId, FontLimits, Paint, PathVerb, Rect, Scalar, StrokeCap, StrokeJoin,
+    Color, ColorFilter, DisplayListBuilder, DrawCommand, FillRule, FontCollection,
+    FontCollectionLimits, FontFace, FontId, FontLimits, ImageFilter, Paint, PathVerb, Rect, Scalar,
+    StrokeCap, StrokeJoin,
 };
 use skia_image::Image;
 
@@ -458,6 +459,35 @@ fn functional_css_colors_support_legacy_and_modern_forms() {
 }
 
 #[test]
+fn absolute_svg_length_units_convert_at_ninety_six_dpi() {
+    for (width, expected) in [
+        ("1in", 96),
+        ("2.54cm", 96),
+        ("25.4mm", 96),
+        ("101.6q", 96),
+        ("72pt", 96),
+        ("6pc", 96),
+    ] {
+        let source =
+            format!(r#"<svg width="120" height="10"><rect width="{width}" height="1"/></svg>"#);
+        let document = decode(&source);
+        let DrawCommand::FillPath { path, .. } = document.display_list().commands()[0] else {
+            panic!("unit rectangle");
+        };
+        let bounds = document
+            .display_list()
+            .path(path)
+            .expect("path")
+            .tight_bounds()
+            .expect("bounds");
+        assert!(
+            (bounds.right().bits() - (expected << 16)).abs() <= 1,
+            "{width}"
+        );
+    }
+}
+
+#[test]
 fn alpha_masks_lower_as_destination_in_layers() {
     let document = decode(
         r##"<svg width="30" height="20">
@@ -480,6 +510,42 @@ fn alpha_masks_lower_as_destination_in_layers() {
                 DrawCommand::SaveLayer(options)
                     if options.blend_mode() == skia_core::BlendMode::DestinationIn
             ))
+    );
+}
+
+#[test]
+fn luminance_masks_preserve_content_alpha_before_destination_in() {
+    let document = decode(
+        r##"<svg width="30" height="20">
+          <defs>
+            <mask id="fade" maskUnits="userSpaceOnUse"
+                  x="0" y="0" width="30" height="20">
+              <rect width="15" height="20" fill="#80808080"/>
+            </mask>
+          </defs>
+          <rect width="30" height="20" fill="red" mask="url(#fade)"/>
+        </svg>"##,
+    );
+    let commands = document.display_list().commands();
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        DrawCommand::SaveLayer(options)
+            if matches!(
+                options.filter(),
+                Some(ImageFilter::Color(ColorFilter::Matrix(matrix)))
+                    if matrix.values()[15..19] == [13_933, 46_871, 4_732, 0]
+            )
+    )));
+    assert!(
+        commands
+            .iter()
+            .filter(|command| matches!(
+                command,
+                DrawCommand::SaveLayer(options)
+                    if options.blend_mode() == skia_core::BlendMode::DestinationIn
+            ))
+            .count()
+            >= 2
     );
 }
 
@@ -511,6 +577,88 @@ fn vector_patterns_tile_inside_the_target_path() {
             )
             .count(),
         8
+    );
+}
+
+#[test]
+fn transformed_patterns_expand_coverage_in_inverse_pattern_space() {
+    let document = decode(
+        r##"<svg width="30" height="30">
+          <defs>
+            <pattern id="rotated" patternUnits="userSpaceOnUse"
+                     width="10" height="10" patternTransform="rotate(45)">
+              <rect width="5" height="10" fill="#225588"/>
+            </pattern>
+          </defs>
+          <rect width="30" height="30" fill="url(#rotated)"/>
+        </svg>"##,
+    );
+    let commands = document.display_list().commands();
+    assert!(
+        commands
+            .iter()
+            .filter(|command| matches!(command, DrawCommand::ClipPath { .. }))
+            .count()
+            > 1
+    );
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillPath { paint, .. } if paint.color() == Color::rgb(0x22, 0x55, 0x88)
+    )));
+}
+
+#[test]
+fn pattern_strokes_lower_through_shared_stroke_outline_geometry() {
+    let document = decode(
+        r##"<svg width="30" height="30">
+          <defs>
+            <pattern id="stripe" patternUnits="userSpaceOnUse" width="4" height="4">
+              <rect width="2" height="4" fill="#884422"/>
+            </pattern>
+          </defs>
+          <rect x="5" y="5" width="20" height="20" fill="none"
+                stroke="url(#stripe)" stroke-width="4"/>
+        </svg>"##,
+    );
+    let commands = document.display_list().commands();
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, DrawCommand::ClipPath { .. }))
+    );
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillPath { paint, .. } if paint.color() == Color::rgb(0x88, 0x44, 0x22)
+    )));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, DrawCommand::StrokePath { .. }))
+    );
+}
+
+#[test]
+fn marker_context_paints_resolve_against_the_referencing_path() {
+    let document = decode(
+        r##"<svg width="30" height="20">
+          <defs>
+            <marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="5" markerHeight="5"
+                    refX="5" refY="2.5" orient="auto">
+              <path d="M0 0 L5 2.5 L0 5 Z" fill="context-stroke"/>
+            </marker>
+          </defs>
+          <path d="M2 10 L25 10" fill="none" stroke="#123456" marker-end="url(#arrow)"/>
+        </svg>"##,
+    );
+    assert!(
+        document
+            .display_list()
+            .commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                DrawCommand::FillPath { paint, .. } if paint.color() == Color::rgb(0x12, 0x34, 0x56)
+            ))
     );
 }
 
